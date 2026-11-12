@@ -651,16 +651,17 @@ print_tiling_item(const ws_event_tiling_item_t *it, void *ctx)
 	(void)ctx;
 	if (it->flags & WS_TILING_ITEM_TILED)
 		printf("tile %u window=%u app=%u tile=%d,%d,%dx%d "
-		    "frame=%d,%d,%dx%d%s\n", it->index, it->window, it->app_id,
-		    it->tile.x, it->tile.y, it->tile.width, it->tile.height,
-		    it->frame.x, it->frame.y, it->frame.width, it->frame.height,
-		    (it->flags & WS_TILING_ITEM_FOCUSED) ? " focused" : "");
+		    "frame=%d,%d,%dx%d%s%s\n", it->index, it->window,
+		    it->app_id, it->tile.x, it->tile.y, it->tile.width,
+		    it->tile.height, it->frame.x, it->frame.y, it->frame.width,
+		    it->frame.height,
+		    (it->flags & WS_TILING_ITEM_FOCUSED) ? " focused" : "",
+		    (it->flags & WS_TILING_ITEM_CUT) ? " cut" : "");
 	else
-		printf("float window=%u app=%u frame=%d,%d,%dx%d%s%s\n",
+		printf("float window=%u app=%u frame=%d,%d,%dx%d%s\n",
 		    it->window, it->app_id, it->frame.x, it->frame.y,
 		    it->frame.width, it->frame.height,
-		    (it->flags & WS_TILING_ITEM_FLOATED) ? " floated" : "",
-		    (it->flags & WS_TILING_ITEM_REFUSED) ? " too-big" : "");
+		    (it->flags & WS_TILING_ITEM_FLOATED) ? " floated" : "");
 }
 
 static int

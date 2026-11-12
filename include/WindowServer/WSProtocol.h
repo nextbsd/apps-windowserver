@@ -661,15 +661,16 @@ typedef struct ws_req_cursor {
  * (not the Dock's app), that take pointer events and can be key, with
  * none of WS_WINDOW_NO_TILE (the app's choice), WS_WINDOW_FIXED_SIZE
  * (the user can't resize it) and WS_WINDOW_PANEL (panels, alerts,
- * sheets), and that fit their tile. Everything else floats above the
- * tiled windows, where its owner puts it: menus, torn-off menus,
- * panels, desktop-level windows, app icons, the Dock. A window floats
- * too when the user floats it, when its minimum size
- * (WS_MSG_WINDOW_SET_SIZE_LIMITS) is larger than its tile, or when its
- * owner keeps giving it a larger frame than its tile (three times in a
- * row). An owner that answers with a smaller frame keeps that size, at
- * the tile's top-left corner; a maximum size smaller than the tile
- * centres the window in it.
+ * sheets). Everything else floats above the tiled windows, where its
+ * owner puts it: menus, torn-off menus, panels, desktop-level windows,
+ * app icons, the Dock. A window floats too when the user floats it. As
+ * on Hyprland, a minimum size (WS_MSG_WINDOW_SET_SIZE_LIMITS) larger
+ * than the tile doesn't keep a window from tiling: it gets its tile.
+ * An owner that keeps giving it a larger frame than its tile (three
+ * times in a row) hears that size at the tile's corner, and the window
+ * is cut to its tile (WS_TILING_ITEM_CUT). An owner that answers with a
+ * smaller frame keeps that size, at the tile's top-left corner; a
+ * maximum size smaller than the tile centres the window in it.
  *
  * The stack: on the normal level, tiled windows are always below the
  * windows that float, whatever their owners order. Clicking a tiled

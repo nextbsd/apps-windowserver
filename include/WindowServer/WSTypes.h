@@ -861,9 +861,9 @@ typedef struct ws_event_tiling {
 
 #define WS_TILING_ITEM_TILED	0x0001
 #define WS_TILING_ITEM_FLOATED	0x0002	/* the user floated it */
-#define WS_TILING_ITEM_REFUSED	0x0004	/* its minimum size, or the size it
-					   kept asking for, is larger than
-					   its tile: it floats */
+#define WS_TILING_ITEM_CUT	0x0004	/* tiled, but its owner keeps asking
+					   for a larger frame: cut to its
+					   tile */
 #define WS_TILING_ITEM_FOCUSED	0x0008
 
 typedef struct ws_event_tiling_item {
