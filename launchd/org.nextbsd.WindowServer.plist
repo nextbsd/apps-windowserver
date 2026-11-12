@@ -17,7 +17,7 @@
 	<string>org.nextbsd.WindowServer</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer</string>
+		<string>/System/Library/CoreServices/WindowServer</string>
 	</array>
 	<key>MachServices</key>
 	<dict>

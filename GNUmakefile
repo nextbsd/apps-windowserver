@@ -15,8 +15,9 @@ LN		?= ln
 
 DESTDIR		?=
 PREFIX		?= /usr
-# The server lives in SkyLight.framework, as on macOS.
-SERVERDIR	?= /System/Library/PrivateFrameworks/SkyLight.framework/Resources
+# The server lives in CoreServices, beside loginwindow and the other system UI
+# services. (macOS keeps it in a private framework; NextBSD has no such framework.)
+SERVERDIR	?= /System/Library/CoreServices
 LIBDIR		?= $(PREFIX)/lib
 INCDIR		?= $(PREFIX)/include
 PKGCONFIGDIR	?= $(PREFIX)/libdata/pkgconfig

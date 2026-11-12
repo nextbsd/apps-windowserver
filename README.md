@@ -30,7 +30,7 @@ libs-base and libs-gui are unmodified. The `nextbsd` backend installs beside the
 
 | What | Path |
 |---|---|
-| Server | `/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer` |
+| Server | `/System/Library/CoreServices/WindowServer` |
 | launchd job | `/System/Library/LaunchDaemons/org.nextbsd.WindowServer.plist` |
 | Defaults | `/System/Library/Preferences/org.nextbsd.WindowServer.plist` |
 | Client library | `/usr/lib/libWindowServerClient.so.1` and `.a` |

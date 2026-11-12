@@ -20,7 +20,7 @@
 # the way startx does for X today. Until the backend exists it only
 # starts the server; try wstest from another login.
 
-SERVER=/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+SERVER=/System/Library/CoreServices/WindowServer
 TOOLS=$(cd "$(dirname "$0")" && pwd)
 LABEL=org.nextbsd.WindowServer.dev
 SERVICE=${WS_SERVICE_NAME:-org.nextbsd.windowserver}
