@@ -75,7 +75,7 @@ config_defaults(struct ws_config *cfg)
 	cfg->allow_terminate = true;
 	cfg->hardware_cursor = true;
 	/* Black where no window is. Desktop pictures come from a desktop-level
-	   window (InnerSpace, or a Dock/FileViewer desktop), as on macOS. */
+	   window (InnerSpace, or a Dock/Workspace desktop), as on macOS. */
 	cfg->background = 0x000000;
 	strlcpy(cfg->service_name, WS_SERVICE_NAME, sizeof(cfg->service_name));
 	strlcpy(cfg->user, "_windowserver", sizeof(cfg->user));

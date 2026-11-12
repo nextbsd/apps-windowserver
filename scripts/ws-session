@@ -16,7 +16,7 @@
 # display). With --headless it needs no display and works over SSH.
 #
 # Later (phase P2) "run" will also start gpbs and gdnc, set GSBackend
-# to the nextbsd backend and open the Dock, FileViewer and Terminal,
+# to the nextbsd backend and open the Dock, Workspace and Terminal,
 # the way startx does for X today. Until the backend exists it only
 # starts the server; try wstest from another login.
 
