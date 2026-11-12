@@ -264,10 +264,12 @@ conn_readable(struct ws_server *srv, struct ws_conn *conn)
 	ev.u.welcome.client_id = c->id;
 	ev.u.welcome.protocol_version = WS_PROTOCOL_VERSION;
 	ev.u.welcome.server_flags = (srv->headless ? WS_SERVER_HEADLESS : 0) |
-	    (srv->cursor_hw ? WS_SERVER_HW_CURSOR : 0) | WS_SERVER_JOIN;
+	    (srv->cursor_hw ? WS_SERVER_HW_CURSOR : 0) | WS_SERVER_FEATURES;
 	ev.u.welcome.screen_count = 1;
 	screen_info(srv, &ev.u.welcome.screen);
 	client_send(srv, c, &ev, -1);
+	if (c->flags & WS_CONNECT_XKB)
+		keyboard_client_ready(srv, c);
 	ws_info("client %u (%s, pid %d) connected", c->id, c->app_name,
 	    (int)c->pid);
 }
@@ -663,6 +665,8 @@ client_destroy(struct ws_server *srv, struct ws_client *c)
 	if (c->dead)
 		return;
 	c->dead = true;
+	if (srv->kbd_focus == c)
+		srv->kbd_focus = NULL;
 	ws_debug("destroying client %u (%s)", c->id, c->app_name);
 
 	for (w = srv->windows; w != NULL; w = next) {
@@ -674,6 +678,7 @@ client_destroy(struct ws_server *srv, struct ws_client *c)
 	c->key_window = NULL;
 	if (srv->active == c)
 		app_deactivate(srv, c);
+	keyboard_focus_update(srv);
 
 	if (c->cursor_buffer != NULL) {
 		cursor_buffer_gone(srv, c->cursor_buffer);

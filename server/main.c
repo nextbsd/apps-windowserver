@@ -197,6 +197,7 @@ main(int argc, char **argv)
 	memset(srv, 0, sizeof(*srv));
 	srv->listen_fd = -1;
 	srv->tty_fd = -1;
+	srv->keymap_fd = -1;
 	srv->next_client_id = 1;
 	srv->next_window_id = 1;
 

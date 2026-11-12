@@ -134,15 +134,20 @@ P1=$MARKS
 "$B/wsctl" click 1000 200 || fail "wsctl click W4"
 "$B/wsctl" key a || fail "wsctl key a (W4)"
 "$B/wsctl" key cmd+q || fail "wsctl key cmd+q"
+"$B/wsctl" key shift+b || fail "wsctl key shift+b"
+"$B/wsctl" key Caps_Lock && "$B/wsctl" key Caps_Lock || fail "wsctl key Caps_Lock"
 mark
 P2=$MARKS
-# Beta takes over, then a click in W4 brings the whole app back.
+# Beta takes over while Shift is held, then a click in W4 brings the
+# whole app back, and Gamma hears that Shift is still down.
+"$B/wsctl" keydown Shift_L || fail "wsctl keydown Shift_L"
 "$B/wsctl" click 700 600 || fail "wsctl click W3"
 mark
 P3=$MARKS
 "$B/wsctl" click 1000 200 || fail "wsctl click W4 again"
 "$B/wsctl" list >"$LOG/list3.txt"
 cat "$LOG/list3.txt"
+"$B/wsctl" keyup Shift_L || fail "wsctl keyup Shift_L"
 mark
 P4=$MARKS
 
@@ -222,6 +227,29 @@ in_part "$P3" "$P4" 'app=Alpha type=app-activated' &&
 grep -q '"W4"$' "$LOG/list3.txt" && grep '"W4"$' "$LOG/list3.txt" | grep -q ' active key ' &&
     grep '"W1"$' "$LOG/list3.txt" | grep -q ' active ' &&
     pass "wsctl list: W4 key, W1 active (one app)" || fail "wsctl list after the join"
+
+# XKB state (Gamma connected with WS_CONNECT_XKB; the others didn't).
+grep -q 'app=Gamma type=keymap win=- format=1 size=[1-9][0-9]* delay=500 interval=33 text=xkb_keymap sealed=yes' "$LOG/wstest.log" &&
+    pass "keymap memfd (sealed, xkb_keymap text) and repeat settings at welcome" ||
+    fail "no usable WS_EVENT_KEYMAP"
+grep -q -E 'app=(Alpha|Beta) type=(keymap|modifiers|keys-held)' "$LOG/wstest.log" &&
+    fail "a client without WS_CONNECT_XKB got XKB events" ||
+    pass "clients without WS_CONNECT_XKB got no XKB events"
+in_part "$P1" "$P2" 'app=Gamma type=keys-held win=W4 count=0 keys=$' &&
+    pass "keys-held (none) when W4's connection started getting keys" ||
+    fail "no keys-held when the key window moved to W4"
+in_part "$P1" "$P2" 'app=Gamma type=modifiers win=W4 depressed=0x1 latched=0x0 locked=0x0 group=0 mods=0x1' &&
+    pass "modifiers: Shift depressed (XKB mask 0x1)" || fail "modifiers for Shift"
+in_part "$P1" "$P2" 'app=Gamma type=modifiers win=W4 depressed=0x0 latched=0x0 locked=0x2 ' &&
+    pass "modifiers: Caps Lock locked (XKB mask 0x2)" || fail "modifiers for Caps Lock"
+in_part "$P3" "$P4" 'app=Gamma type=keys-held win=W4 count=1 keys=50$' &&
+    in_part "$P3" "$P4" 'app=Gamma type=modifiers win=W4 depressed=0x1 ' &&
+    pass "on activation Gamma heard Shift_L (50) still held, with its modifiers" ||
+    fail "held keys on activation"
+in_part "$P3" "$P4" 'app=Gamma type=key-up win=W4 keycode=50 ' &&
+    in_part "$P3" "$P4" 'app=Gamma type=modifiers win=W4 depressed=0x0 ' &&
+    pass "Shift_L's release reached Gamma and cleared the modifier" ||
+    fail "release of a held key after activation"
 
 kill "$SPID"
 wait "$SPID" 2>/dev/null

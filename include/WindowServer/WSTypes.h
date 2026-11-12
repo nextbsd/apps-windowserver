@@ -109,11 +109,15 @@ extern "C" {
 #define WS_CONNECT_CONTROL	0x0001	/* tool connection (wsctl): not an app */
 #define WS_CONNECT_JOIN		0x0002	/* join another connection's app
 					   (ws_connect_join, WSProtocol.h) */
+#define WS_CONNECT_XKB		0x0004	/* also send WS_EVENT_KEYMAP,
+					   WS_EVENT_MODIFIERS and
+					   WS_EVENT_KEYS_HELD */
 
 /* Server flags in WS_EVENT_WELCOME. */
 #define WS_SERVER_HEADLESS	0x0001
 #define WS_SERVER_HW_CURSOR	0x0002
 #define WS_SERVER_JOIN		0x0004	/* accepts WS_CONNECT_JOIN */
+#define WS_SERVER_XKB		0x0008	/* accepts WS_CONNECT_XKB */
 
 /* Synthetic input kinds (wsctl, headless testing). */
 #define WS_INJECT_MOTION	1	/* absolute: x, y */
@@ -168,6 +172,10 @@ enum {
 	WS_EVENT_SNAPSHOT,
 	WS_EVENT_WINDOW_INFO,
 	WS_EVENT_LIST_END,
+	/* added after protocol 1 shipped; clients ignore unknown types */
+	WS_EVENT_KEYMAP,		/* WS_CONNECT_XKB only */
+	WS_EVENT_MODIFIERS,		/* WS_CONNECT_XKB only */
+	WS_EVENT_KEYS_HELD,		/* WS_CONNECT_XKB only */
 	WS_EVENT_MAX
 };
 
@@ -258,6 +266,59 @@ typedef struct ws_event_snapshot {
 	uint32_t	reserved;
 } ws_event_snapshot_t;
 
+/*
+ * XKB keyboard state, for clients that connect with WS_CONNECT_XKB (an
+ * X server, which runs its own XKB). Others get only the WS_MOD_* bits
+ * in key and pointer events and WS_EVENT_FLAGS_CHANGED.
+ *
+ * WS_EVENT_KEYMAP comes right after WS_EVENT_WELCOME, and again if the
+ * server's keymap changes. It carries a read-only, sealed memfd holding
+ * the compiled keymap (xkb_keymap_get_as_string(), XKB_KEYMAP_FORMAT_
+ * TEXT_V1) as a NUL-terminated string of `size` bytes. mmap it
+ * (PROT_READ, MAP_PRIVATE) rather than read() it: every client gets the
+ * same open file. The client must close the fd.
+ */
+#define WS_KEYMAP_XKB_V1	1
+
+typedef struct ws_event_keymap {
+	uint32_t	format;		/* WS_KEYMAP_XKB_V1 */
+	uint32_t	size;		/* bytes, NUL included */
+	uint32_t	repeat_delay;	/* ms before the first repeat */
+	uint32_t	repeat_interval; /* ms between repeats, 0 = off */
+	int32_t		fd;		/* filled in by the client library */
+	uint32_t	reserved;
+} ws_event_keymap_t;
+
+/*
+ * WS_EVENT_MODIFIERS: the XKB modifier and layout state, as
+ * xkb_state_serialize_mods() and xkb_state_serialize_layout() give it,
+ * like Wayland's wl_keyboard.modifiers. Sent to the connection that
+ * gets key events when it starts getting them (after WS_EVENT_KEYS_HELD)
+ * and whenever the state changes while it does, after the key event
+ * that changed it.
+ */
+typedef struct ws_event_modifiers {
+	uint32_t	depressed;	/* XKB_STATE_MODS_DEPRESSED */
+	uint32_t	latched;	/* XKB_STATE_MODS_LATCHED */
+	uint32_t	locked;		/* XKB_STATE_MODS_LOCKED */
+	uint32_t	group;		/* XKB_STATE_LAYOUT_EFFECTIVE */
+	uint32_t	modifiers;	/* WS_MOD_* */
+	uint32_t	reserved;
+} ws_event_modifiers_t;
+
+/*
+ * WS_EVENT_KEYS_HELD: the keys held down when a connection starts
+ * getting key events (its app is activated, or the key window moves to
+ * it). Their key-ups come to it later. Sent with count 0 too.
+ */
+#define WS_MAX_KEYS_HELD	32
+
+typedef struct ws_event_keys_held {
+	uint32_t	count;
+	uint32_t	reserved;
+	uint32_t	keycodes[WS_MAX_KEYS_HELD]; /* XKB keycodes */
+} ws_event_keys_held_t;
+
 /* Window list entry (wsctl list). */
 #define WS_WINDOW_INFO_VISIBLE	0x0001
 #define WS_WINDOW_INFO_KEY	0x0002	/* key window of the active app */
@@ -290,6 +351,9 @@ typedef struct ws_event {
 		ws_event_error_t	error;
 		ws_event_snapshot_t	snapshot;
 		ws_event_window_info_t	window_info;
+		ws_event_keymap_t	keymap;
+		ws_event_modifiers_t	modifiers;
+		ws_event_keys_held_t	keys_held;
 		uint8_t			raw[232];
 	} u;
 } ws_event_t;

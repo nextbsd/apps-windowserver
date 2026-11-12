@@ -30,6 +30,9 @@ void	ws_log(int level, const char *fmt, ...)
 #define ws_debug(...)	ws_log(WS_LOG_DEBUG, __VA_ARGS__)
 uint64_t ws_now_usec(void);
 
+/* Optional features this server has (WS_SERVER_* in hello and welcome). */
+#define WS_SERVER_FEATURES	(WS_SERVER_JOIN | WS_SERVER_XKB)
+
 /* ---- configuration (config.c) ---- */
 
 struct ws_config {
@@ -276,6 +279,11 @@ struct ws_server {
 	uint32_t	modifiers;
 	uint32_t	repeat_key;	/* evdev code, 0 = none */
 	bool		repeat_started;
+	int		keymap_fd;	/* sealed memfd with the keymap, or -1 */
+	uint32_t	keymap_size;	/* bytes, NUL included */
+	uint32_t	keys_held[WS_MAX_KEYS_HELD];	/* XKB keycodes */
+	unsigned	nkeys_held;
+	struct ws_client *kbd_focus;	/* gets key events (not ref'd) */
 
 	/* input (input.c) */
 	struct libinput	*libinput;
@@ -368,6 +376,8 @@ void	keyboard_fini(struct ws_server *srv);
 void	keyboard_key(struct ws_server *srv, uint32_t evdev_code, bool pressed);
 void	keyboard_repeat_fire(struct ws_server *srv);
 int	keyboard_inject(struct ws_server *srv, const char *name, int mode);
+void	keyboard_client_ready(struct ws_server *srv, struct ws_client *c);
+void	keyboard_focus_update(struct ws_server *srv);
 
 /* ---- cursor.c ---- */
 int	cursor_init(struct ws_server *srv);

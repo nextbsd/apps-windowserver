@@ -187,6 +187,7 @@ set_key_window(struct ws_server *srv, struct ws_client *a, struct ws_window *w)
 		send_simple(srv, old->owner, WS_EVENT_KEY_WINDOW_LOST, old->id, 0);
 	if (w != NULL)
 		send_simple(srv, w->owner, WS_EVENT_KEY_WINDOW_GAINED, w->id, 0);
+	keyboard_focus_update(srv);
 }
 
 /*
@@ -217,6 +218,7 @@ app_activate(struct ws_server *srv, struct ws_client *c, struct ws_window *key)
 	srv->active = c;
 	if (c == NULL) {
 		ws_debug("no active app");
+		keyboard_focus_update(srv);
 		return;
 	}
 	if (key != NULL)
@@ -228,6 +230,7 @@ app_activate(struct ws_server *srv, struct ws_client *c, struct ws_window *key)
 	if (c->key_window != NULL)
 		send_simple(srv, c->key_window->owner,
 		    WS_EVENT_KEY_WINDOW_GAINED, c->key_window->id, 0);
+	keyboard_focus_update(srv);
 }
 
 /*
