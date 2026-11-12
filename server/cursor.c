@@ -2,7 +2,8 @@
  * Copyright (c) 2026, Joseph Maloney
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The pointer cursor: the built-in arrow, per-connection and per-window
+ * The pointer cursor: the built-in images for the standard kinds,
+ * per-connection and per-window
  * cursors (a window's wins over its connection's), and the
  * choice between the display's hardware cursor plane and a software
  * cursor composited in the server's top tier.
@@ -14,7 +15,14 @@
 
 #include "server.h"
 
-/* 12x19 arrow: '#' outline, '.' fill, ' ' transparent. Hot spot 0,0. */
+/*
+ * The standard cursors, drawn for NextBSD: '#' black, '.' white, ' '
+ * transparent. Solid shapes are white with a black outline; thin ones
+ * (I-beam, crosshair, not-allowed) are black with a white halo, so each
+ * shows on dark and light backgrounds alike.
+ */
+
+/* 12x19 arrow. Hot spot 0,0. */
 static const char *const arrow[] = {
 	"#           ",
 	"##          ",
@@ -37,10 +45,205 @@ static const char *const arrow[] = {
 	"       ##   ",
 };
 
+/* 9x18 I-beam. Hot spot 4,8, mid-stem. */
+static const char *const ibeam[] = {
+	" ....... ",
+	".#######.",
+	" ...#... ",
+	"   .#.   ",
+	"   .#.   ",
+	"   .#.   ",
+	"   .#.   ",
+	"   .#.   ",
+	"   .#.   ",
+	"   .#.   ",
+	"   .#.   ",
+	"   .#.   ",
+	"   .#.   ",
+	"   .#.   ",
+	"   .#.   ",
+	" ...#... ",
+	".#######.",
+	" ....... ",
+};
+
+/* 18x20 pointing hand. Hot spot 6,0, the fingertip. */
+static const char *const pointing_hand[] = {
+	"      ##          ",
+	"     #..#         ",
+	"     #..#         ",
+	"     #..#         ",
+	"     #..#         ",
+	"     #..###       ",
+	"     #..#..###    ",
+	"     #..#..#..#   ",
+	"     #..#..#..### ",
+	"  ## #..#..#..#..#",
+	" #..##..#..#..#..#",
+	" #...#........#..#",
+	" #...............#",
+	"  #..............#",
+	"  #..............#",
+	"   #.............#",
+	"   #............# ",
+	"    #...........# ",
+	"    #...........# ",
+	"    ############# ",
+};
+
+/* 17x13 closed hand (grabbing). Hot spot 9,5, mid-palm. */
+static const char *const closed_hand[] = {
+	"    ## ## ##     ",
+	"   #..#..#..###  ",
+	"   #..#..#..#..# ",
+	"  ##..#..#..#..# ",
+	" #..#...........#",
+	" #..............#",
+	"  #.............#",
+	"   #............#",
+	"   #............#",
+	"    #..........# ",
+	"     #.........# ",
+	"     #.........# ",
+	"     ########### ",
+};
+
+/* 17x17 open hand. Hot spot 9,9, mid-palm. */
+static const char *const open_hand[] = {
+	"        ##       ",
+	"     ###..###    ",
+	"    #..#..#..#   ",
+	"    #..#..#..### ",
+	"    #..#..#..#..#",
+	"    #..#..#..#..#",
+	" ## #..#..#..#..#",
+	"#..##..#..#..#..#",
+	"#...#..#..#..#..#",
+	" #..............#",
+	"  #.............#",
+	"   #............#",
+	"    #...........#",
+	"    #...........#",
+	"     #.........# ",
+	"     #.........# ",
+	"     ########### ",
+};
+
+/* 19x19 crosshair. Hot spot 9,9, the centre dot. */
+static const char *const crosshair[] = {
+	"        .#.        ",
+	"        .#.        ",
+	"        .#.        ",
+	"        .#.        ",
+	"        .#.        ",
+	"        .#.        ",
+	"        .#.        ",
+	"        ...        ",
+	"...................",
+	"#######..#..#######",
+	"...................",
+	"        ...        ",
+	"        .#.        ",
+	"        .#.        ",
+	"        .#.        ",
+	"        .#.        ",
+	"        .#.        ",
+	"        .#.        ",
+	"        .#.        ",
+};
+
+/* 25x11 left-right resize. Hot spot 12,5, the centre. */
+static const char *const resize_lr[] = {
+	"     #             #     ",
+	"    ##             ##    ",
+	"   #.#             #.#   ",
+	"  #..###############..#  ",
+	" #.....................# ",
+	"#.......................#",
+	" #.....................# ",
+	"  #..###############..#  ",
+	"   #.#             #.#   ",
+	"    ##             ##    ",
+	"     #             #     ",
+};
+
+/* 11x25 up-down resize. Hot spot 5,12, the centre. */
+static const char *const resize_ud[] = {
+	"     #     ",
+	"    #.#    ",
+	"   #...#   ",
+	"  #.....#  ",
+	" #.......# ",
+	"####...####",
+	"   #...#   ",
+	"   #...#   ",
+	"   #...#   ",
+	"   #...#   ",
+	"   #...#   ",
+	"   #...#   ",
+	"   #...#   ",
+	"   #...#   ",
+	"   #...#   ",
+	"   #...#   ",
+	"   #...#   ",
+	"   #...#   ",
+	"   #...#   ",
+	"####...####",
+	" #.......# ",
+	"  #.....#  ",
+	"   #...#   ",
+	"    #.#    ",
+	"     #     ",
+};
+
+/* 20x20 operation not allowed. Hot spot 10,10, the centre. */
+static const char *const not_allowed[] = {
+	"        ....        ",
+	"     ....##....     ",
+	"    ..########..    ",
+	"   ..##########..   ",
+	"  ..###......###..  ",
+	" ..####..   ...##.. ",
+	" .######..    .###. ",
+	" .##..###..   ..##. ",
+	"..##...###..   .##..",
+	".###. ..###..  .###.",
+	".###.  ..###.. .###.",
+	"..##.   ..###...##..",
+	" .##..   ..###..##. ",
+	" .###.    ..######. ",
+	" ..##...   ..####.. ",
+	"  ..###......###..  ",
+	"   ..##########..   ",
+	"    ..########..    ",
+	"     ....##....     ",
+	"        ....        ",
+};
+
+#define STD(rows, hx, hy) \
+	{ rows, (int)(sizeof(rows) / sizeof(rows[0])), hx, hy }
+
+static const struct std_cursor {
+	const char *const *rows;
+	int	h;
+	int	hot_x;
+	int	hot_y;
+} std_cursors[WS_NSTD_CURSORS] = {
+	[WS_CURSOR_ARROW] =		STD(arrow, 0, 0),
+	[WS_CURSOR_IBEAM] =		STD(ibeam, 4, 8),
+	[WS_CURSOR_POINTING_HAND] =	STD(pointing_hand, 6, 0),
+	[WS_CURSOR_CLOSED_HAND] =	STD(closed_hand, 9, 5),
+	[WS_CURSOR_OPEN_HAND] =		STD(open_hand, 9, 9),
+	[WS_CURSOR_CROSSHAIR] =		STD(crosshair, 9, 9),
+	[WS_CURSOR_RESIZE_LR] =		STD(resize_lr, 12, 5),
+	[WS_CURSOR_RESIZE_UD] =		STD(resize_ud, 5, 12),
+	[WS_CURSOR_NOT_ALLOWED] =	STD(not_allowed, 10, 10),
+};
+
 static pixman_image_t *
-make_arrow(void)
+make_image(const char *const *rows, int h)
 {
-	const int w = 12, h = (int)(sizeof(arrow) / sizeof(arrow[0]));
+	const int w = (int)strlen(rows[0]);
 	pixman_image_t *img;
 	uint32_t *px;
 	int x, y, stride;
@@ -52,7 +255,7 @@ make_arrow(void)
 	stride = pixman_image_get_stride(img) / 4;
 	for (y = 0; y < h; y++)
 		for (x = 0; x < w; x++) {
-			char ch = arrow[y][x];
+			char ch = rows[y][x];
 
 			px[y * stride + x] = ch == '#' ? 0xff000000 :
 			    ch == '.' ? 0xffffffff : 0x00000000;
@@ -63,11 +266,14 @@ make_arrow(void)
 int
 cursor_init(struct ws_server *srv)
 {
-	srv->cursor_default = make_arrow();
-	if (srv->cursor_default == NULL)
-		return -1;
-	srv->cursor_default_hot_x = 0;
-	srv->cursor_default_hot_y = 0;
+	int i;
+
+	for (i = 0; i < WS_NSTD_CURSORS; i++) {
+		srv->cursor_std[i] = make_image(std_cursors[i].rows,
+		    std_cursors[i].h);
+		if (srv->cursor_std[i] == NULL)
+			return -1;
+	}
 	srv->cursor_visible = true;
 	srv->cursor_hw = false;
 	memset(&srv->cursor_rect, 0, sizeof(srv->cursor_rect));
@@ -80,9 +286,13 @@ cursor_fini(struct ws_server *srv)
 {
 	if (srv->output != NULL && srv->output->cursor_hide != NULL)
 		srv->output->cursor_hide(srv);
-	if (srv->cursor_default != NULL)
-		pixman_image_unref(srv->cursor_default);
-	srv->cursor_default = NULL;
+	int i;
+
+	for (i = 0; i < WS_NSTD_CURSORS; i++) {
+		if (srv->cursor_std[i] != NULL)
+			pixman_image_unref(srv->cursor_std[i]);
+		srv->cursor_std[i] = NULL;
+	}
 	srv->cursor_image = NULL;
 }
 
@@ -116,29 +326,38 @@ cursor_update(struct ws_server *srv)
 	/* Tiles are the server's: they get the default arrow. */
 	struct ws_client *c = w != NULL && w->tile_for == NULL ? w->owner :
 	    srv->pgrab;
-	pixman_image_t *img = srv->cursor_default;
-	int hx = srv->cursor_default_hot_x, hy = srv->cursor_default_hot_y;
+	uint32_t kind = WS_CURSOR_ARROW;
+	struct ws_buffer *buf = NULL;
+	pixman_image_t *img;
+	int hx = 0, hy = 0;
 	bool visible = true, hw = false;
 
-	if (srv->cursor_default == NULL)
+	if (srv->cursor_std[WS_CURSOR_ARROW] == NULL)
 		return;
 	if (c != NULL && !c->dead) {
 		if (c->cursor_hidden)
 			visible = false;
 		if (w != NULL && w->owner == c && w->cursor_set) {
-			if (w->cursor_kind == WS_CURSOR_CUSTOM &&
-			    w->cursor_buffer != NULL) {
-				img = w->cursor_buffer->image;
-				hx = w->cursor_hot_x;
-				hy = w->cursor_hot_y;
-			}
-		} else if (c->cursor_kind == WS_CURSOR_CUSTOM &&
-		    c->cursor_buffer != NULL) {
-			img = c->cursor_buffer->image;
+			kind = w->cursor_kind;
+			buf = w->cursor_buffer;
+			hx = w->cursor_hot_x;
+			hy = w->cursor_hot_y;
+		} else {
+			kind = c->cursor_kind;
+			buf = c->cursor_buffer;
 			hx = c->cursor_hot_x;
 			hy = c->cursor_hot_y;
 		}
-		/* TODO: built-in images for the other standard cursors. */
+	}
+	if (kind == WS_CURSOR_CUSTOM && buf != NULL) {
+		img = buf->image;
+	} else {
+		/* A kind this server doesn't know gets the arrow. */
+		if (kind >= WS_NSTD_CURSORS)
+			kind = WS_CURSOR_ARROW;
+		img = srv->cursor_std[kind];
+		hx = std_cursors[kind].hot_x;
+		hy = std_cursors[kind].hot_y;
 	}
 	if (img == srv->cursor_image && hx == srv->cursor_hot_x &&
 	    hy == srv->cursor_hot_y && visible == srv->cursor_visible)
