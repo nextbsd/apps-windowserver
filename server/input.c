@@ -20,6 +20,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include <dev/evdev/input-event-codes.h>
@@ -29,6 +30,7 @@
 #include "server.h"
 
 #define DEV_IGNORED	((void *)(uintptr_t)1)
+#define DEV_TOUCHPAD	((void *)(uintptr_t)2)	/* taps: a touchpad */
 
 static int
 open_restricted(const char *path, int flags, void *data)
@@ -110,6 +112,74 @@ is_mux_device(const char *name)
 	    strstr(name, "System mouse") != NULL;
 }
 
+/*
+ * Touchpad and pointer settings (README, "Touchpad"): tapping, tap and
+ * drag, secondary click, three-finger drag and pointer speed.
+ */
+static void
+configure_device(struct ws_server *srv, struct libinput_device *dev)
+{
+	const char *name = libinput_device_get_name(dev);
+	const char *sc = srv->cfg.secondary_click;
+	uint32_t methods;
+	double speed;
+
+	if (libinput_device_config_accel_is_available(dev)) {
+		speed = srv->cfg.pointer_speed;
+		if (speed < -1.0)
+			speed = -1.0;
+		if (speed > 1.0)
+			speed = 1.0;
+		libinput_device_config_accel_set_speed(dev, speed);
+	}
+	if (libinput_device_config_tap_get_finger_count(dev) == 0)
+		return;
+	libinput_device_set_user_data(dev, DEV_TOUCHPAD);
+	libinput_device_config_tap_set_enabled(dev, srv->cfg.tap_to_click ?
+	    LIBINPUT_CONFIG_TAP_ENABLED : LIBINPUT_CONFIG_TAP_DISABLED);
+	/* One finger left, two right, three middle. */
+	libinput_device_config_tap_set_button_map(dev,
+	    LIBINPUT_CONFIG_TAP_MAP_LRM);
+	libinput_device_config_tap_set_drag_enabled(dev, srv->cfg.tap_to_drag ?
+	    LIBINPUT_CONFIG_DRAG_ENABLED : LIBINPUT_CONFIG_DRAG_DISABLED);
+	libinput_device_config_tap_set_drag_lock_enabled(dev,
+	    LIBINPUT_CONFIG_DRAG_LOCK_DISABLED);
+
+	/* A click: with two fingers, in the bottom-right corner, or
+	 * always a left click (Off, and see map_touchpad_button()). */
+	methods = libinput_device_config_click_get_methods(dev);
+	if (strcasecmp(sc, "TwoFingers") == 0) {
+		if (methods & LIBINPUT_CONFIG_CLICK_METHOD_CLICKFINGER) {
+			libinput_device_config_click_set_method(dev,
+			    LIBINPUT_CONFIG_CLICK_METHOD_CLICKFINGER);
+			libinput_device_config_click_set_clickfinger_button_map(
+			    dev, LIBINPUT_CONFIG_CLICKFINGER_MAP_LRM);
+		}
+	} else if (strcasecmp(sc, "BottomRightCorner") == 0) {
+		if (methods & LIBINPUT_CONFIG_CLICK_METHOD_BUTTON_AREAS)
+			libinput_device_config_click_set_method(dev,
+			    LIBINPUT_CONFIG_CLICK_METHOD_BUTTON_AREAS);
+	} else if (strcasecmp(sc, "Off") == 0) {
+		if (methods != 0)
+			libinput_device_config_click_set_method(dev,
+			    LIBINPUT_CONFIG_CLICK_METHOD_NONE);
+	} else
+		ws_warn("SecondaryClick: unknown value %s (TwoFingers, "
+		    "BottomRightCorner or Off)", sc);
+
+	/* Three-finger drag (macOS's accessibility option). libinput then
+	 * reports swipes with four fingers, not three. */
+	if (libinput_device_config_3fg_drag_get_finger_count(dev) >= 3)
+		libinput_device_config_3fg_drag_set_enabled(dev,
+		    srv->cfg.three_finger_drag ?
+		    LIBINPUT_CONFIG_3FG_DRAG_ENABLED_3FG :
+		    LIBINPUT_CONFIG_3FG_DRAG_DISABLED);
+	ws_info("input: %s: tap %s, tap-and-drag %s, secondary click %s, "
+	    "three-finger drag %s", name, srv->cfg.tap_to_click ? "on" : "off",
+	    srv->cfg.tap_to_drag ? "on" : "off", sc,
+	    srv->cfg.three_finger_drag ? "on" : "off");
+}
+
 static void
 device_added(struct ws_server *srv, struct libinput_device *dev)
 {
@@ -128,10 +198,7 @@ device_added(struct ws_server *srv, struct libinput_device *dev)
 	    LIBINPUT_DEVICE_CAP_POINTER) ? " pointer" : "",
 	    libinput_device_has_capability(dev,
 	    LIBINPUT_DEVICE_CAP_TOUCH) ? " touch" : "");
-	if (libinput_device_config_tap_get_finger_count(dev) > 0)
-		libinput_device_config_tap_set_enabled(dev,
-		    srv->cfg.tap_to_click ? LIBINPUT_CONFIG_TAP_ENABLED :
-		    LIBINPUT_CONFIG_TAP_DISABLED);
+	configure_device(srv, dev);
 }
 
 static uint32_t
@@ -168,6 +235,12 @@ handle_scroll(struct ws_server *srv, struct libinput_event_pointer *p,
 		dy = libinput_event_pointer_get_scroll_value(p, v);
 		if (source == WS_SCROLL_WHEEL)
 			vy = (int32_t)libinput_event_pointer_get_scroll_value_v120(p, v);
+	}
+	if (source == WS_SCROLL_FINGER) {
+		/* Zero on every axis it names: the fingers lifted. */
+		scroll_finger(srv, dx, dy, dx == 0 && dy == 0,
+		    libinput_event_pointer_get_time_usec(p));
+		return;
 	}
 	if (dx != 0 || dy != 0 || vx != 0 || vy != 0)
 		pointer_scroll(srv, dx, dy, vx, vy, source);
@@ -225,8 +298,13 @@ handle_event(struct ws_server *srv, struct libinput_event *ev)
 		    LIBINPUT_BUTTON_STATE_PRESSED;
 		if ((pressed && count != 1) || (!pressed && count != 0))
 			break;
-		pointer_button(srv,
-		    map_button(libinput_event_pointer_get_button(p)), pressed);
+		key = libinput_event_pointer_get_button(p);
+		/* SecondaryClick Off: a two-finger tap is a left click too. */
+		if (key == BTN_RIGHT &&
+		    libinput_device_get_user_data(dev) == DEV_TOUCHPAD &&
+		    strcasecmp(srv->cfg.secondary_click, "Off") == 0)
+			key = BTN_LEFT;
+		pointer_button(srv, map_button(key), pressed);
 		break;
 	case LIBINPUT_EVENT_POINTER_SCROLL_WHEEL:
 		handle_scroll(srv, libinput_event_get_pointer_event(ev),
@@ -240,10 +318,14 @@ handle_event(struct ws_server *srv, struct libinput_event *ev)
 		handle_scroll(srv, libinput_event_get_pointer_event(ev),
 		    WS_SCROLL_CONTINUOUS);
 		break;
+	case LIBINPUT_EVENT_GESTURE_HOLD_BEGIN:
+		/* Fingers resting on the touchpad stop momentum scrolling. */
+		scroll_touch(srv);
+		break;
 	default:
 		/* LIBINPUT_EVENT_POINTER_AXIS is the deprecated duplicate of
-		 * the SCROLL_* events. Touch, tablet, gestures and switches:
-		 * TODO. */
+		 * the SCROLL_* events. Touch, tablet, other gestures and
+		 * switches: TODO. */
 		break;
 	}
 }

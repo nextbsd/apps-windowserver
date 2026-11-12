@@ -384,6 +384,7 @@ window_destroy(struct ws_server *srv, struct ws_window *w)
 	if (c->app->key_window == w)
 		set_key_window(srv, c->app, NULL);
 	pointer_window_gone(srv, w);
+	scroll_window_gone(srv, w);
 	if (w->pending_attach)
 		buffer_unref(srv, w->pending);
 	if (!c->dead)

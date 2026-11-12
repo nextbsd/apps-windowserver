@@ -33,7 +33,8 @@ uint64_t ws_now_usec(void);
 /* Optional features this server has (WS_SERVER_* in hello and welcome). */
 #define WS_SERVER_FEATURES	(WS_SERVER_JOIN | WS_SERVER_XKB | \
 				 WS_SERVER_XRGB | WS_SERVER_ORDERED | \
-				 WS_SERVER_MINIMIZE | WS_SERVER_DOCK)
+				 WS_SERVER_MINIMIZE | WS_SERVER_DOCK | \
+				 WS_SERVER_SCROLL_PHASES)
 
 /* Connections that aren't apps: wsctl and the Dock's window list. */
 #define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK)
@@ -52,6 +53,13 @@ struct ws_config {
 	bool	raise_on_click;
 	bool	ignore_mux_devices;	/* skip kbdmux/sysmouse */
 	bool	tap_to_click;
+	bool	tap_to_drag;		/* tap, then drag (no drag lock) */
+	bool	three_finger_drag;	/* moves the three-finger swipes
+					   to four fingers */
+	char	secondary_click[32];	/* TwoFingers, BottomRightCorner, Off */
+	double	pointer_speed;		/* libinput accel speed, -1 to 1 */
+	double	scroll_speed;		/* scroll distance multiplier */
+	bool	momentum_scrolling;
 	bool	natural_scrolling;
 	bool	allow_terminate;	/* Ctrl+Alt+Backspace quits */
 	bool	hardware_cursor;
@@ -197,6 +205,30 @@ enum ws_src_type {
 enum {
 	TIMER_REPEAT = 1,
 	TIMER_HOUSEKEEPING,
+	TIMER_MOMENTUM,
+};
+
+/* Touchpad scrolling in progress (scroll.c). */
+#define WS_SCROLL_SAMPLES	8
+
+struct ws_scroll_state {
+	bool		fingers;	/* a finger scroll is under way */
+	bool		momentum;	/* momentum scrolling is under way */
+	bool		momentum_began;	/* its BEGAN event went out */
+	uint32_t	window;		/* where this scroll goes */
+	uint64_t	last_usec;	/* last finger scroll or momentum step */
+	double		vx;		/* momentum velocity, pixels/s */
+	double		vy;
+	uint64_t	momentum_start;
+	/* recent finger deltas, for the velocity at lift-off */
+	unsigned	nsamples;
+	unsigned	next_sample;
+	struct {
+		uint64_t usec;
+		double	dt;		/* seconds since the sample before */
+		double	dx;
+		double	dy;
+	} samples[WS_SCROLL_SAMPLES];
 };
 
 /* ---- output backends ---- */
@@ -288,6 +320,8 @@ struct ws_server {
 	bool		tile_dragging;
 	double		tile_grab_x;	/* pointer offset in the grabbed tile */
 	double		tile_grab_y;
+	/* touchpad scrolling (scroll.c) */
+	struct ws_scroll_state scroll;
 	pixman_image_t	*tile_background; /* MinimizeTileImage, or NULL */
 	pixman_image_t	*tile_mask_outer; /* rounded tile shapes (a8) */
 	pixman_image_t	*tile_mask_inner;
@@ -453,6 +487,17 @@ void	pointer_motion(struct ws_server *srv, double x, double y);
 void	pointer_button(struct ws_server *srv, uint32_t button, bool pressed);
 void	pointer_scroll(struct ws_server *srv, double dx, double dy,
 	    int32_t v120_x, int32_t v120_y, uint32_t source);
+struct ws_window *pointer_scroll_target(struct ws_server *srv);
+void	pointer_scroll_send(struct ws_server *srv, struct ws_window *w,
+	    double dx, double dy, int32_t v120_x, int32_t v120_y,
+	    uint32_t source, uint32_t phase, uint32_t momentum_phase);
+
+/* ---- scroll.c ---- */
+void	scroll_finger(struct ws_server *srv, double dx, double dy,
+	    bool stop, uint64_t usec);
+void	scroll_touch(struct ws_server *srv);
+void	scroll_momentum_fire(struct ws_server *srv);
+void	scroll_window_gone(struct ws_server *srv, struct ws_window *w);
 void	pointer_window_gone(struct ws_server *srv, struct ws_window *w);
 void	pointer_recheck(struct ws_server *srv);
 

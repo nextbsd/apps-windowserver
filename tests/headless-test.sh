@@ -7,7 +7,8 @@
 # windows), then uses wsctl to check the composited screen and drive
 # synthetic input, including minimizing a window to a tile and
 # restoring it, and the Dock's window list (wsctl dock), with minimized
-# windows handed to the Dock instead of tiles (MinimizeIntoDock).
+# windows handed to the Dock instead of tiles (MinimizeIntoDock), and
+# touchpad scroll phases and momentum scrolling.
 #
 #   sh tests/headless-test.sh [BUILD_DIR]
 #
@@ -287,6 +288,62 @@ DPID=
 expect_pixel 4 $((TILE_Y + 24)) 303030 "tile back once the Dock is gone"
 expect_pixel 20 $((TILE_Y + 24)) 20a050 "the tile shows W3"
 grep -q '^error' "$LOG/dock-watch.log" && fail "the Dock got errors"
+
+# Touchpad scrolling (WS_SERVER_SCROLL_PHASES): a two-finger flick over
+# W1 (where nothing covers it) is began, changed..., ended when the
+# fingers lift, then momentum began, changed... and ended.
+"$B/wsctl" move 150 450 || fail "wsctl move (scroll)"
+mark
+PS0=$MARKS
+"$B/wsctl" flick 0 400 8 || fail "wsctl flick"
+sleep 3
+mark
+PS1=$MARKS
+awk -v from="$PS0" -v to="$PS1" 'NR > from && NR <= to && / type=scroll /' \
+    "$LOG/wstest.log" >"$LOG/flick.txt"
+sed -n '1,3p;$p' "$LOG/flick.txt"
+phases=$(awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^(phase|momentum)=/) \
+    printf "%s ", $i; print "" }' "$LOG/flick.txt" | uniq | tr '\n' '|')
+echo "phases: $phases"
+[ "$phases" = "phase=began momentum=none |phase=changed momentum=none |phase=ended momentum=none |phase=none momentum=began |phase=none momentum=changed |phase=none momentum=ended |" ] &&
+    pass "flick: began, changed, ended, then momentum began, changed, ended" ||
+    fail "flick phases"
+grep -q 'app=Alpha type=scroll win=W1 dx=0.00 dy=50.00 source=1 phase=began' "$LOG/flick.txt" &&
+    pass "finger scroll delivered to W1 with its delta" || fail "finger scroll delta"
+grep 'phase=ended' "$LOG/flick.txt" | grep -q 'dx=0.00 dy=0.00 ' &&
+    grep 'momentum=ended' "$LOG/flick.txt" | grep -q 'dx=0.00 dy=0.00 ' &&
+    pass "ended events carry no delta" || fail "ended events with a delta"
+n=$(grep -c 'momentum=changed' "$LOG/flick.txt")
+total=$(awk '/momentum=(began|changed)/ { sub("dy=", "", $7); t += $7 } END { printf "%d", t }' "$LOG/flick.txt")
+first=$(awk '/momentum=began/ { sub("dy=", "", $7); print $7 }' "$LOG/flick.txt")
+last=$(awk '/momentum=changed/ { sub("dy=", "", $7); d = $7 } END { print d }' "$LOG/flick.txt")
+echo "momentum: $n steps, $total pixels, first step $first, last step $last"
+[ "$n" -ge 20 ] && [ "$total" -gt 200 ] &&
+    awk -v a="$first" -v b="$last" 'BEGIN { exit !(a > 0 && b > 0 && b < a) }' &&
+    pass "momentum scrolls on in the same direction and slows down" ||
+    fail "momentum scrolling"
+# A finger touching down again (libinput's hold gesture) stops it.
+"$B/wsctl" flick 0 400 8 && "$B/wsctl" hold || fail "wsctl flick + hold"
+sleep 1
+mark
+PS2=$MARKS
+awk -v from="$PS1" -v to="$PS2" 'NR > from && NR <= to && / type=scroll /' \
+    "$LOG/wstest.log" >"$LOG/hold.txt"
+n=$(grep -c 'momentum=changed' "$LOG/hold.txt")
+tail -1 "$LOG/hold.txt" | grep -q 'momentum=ended' && [ "$n" -lt 10 ] &&
+    pass "hold stopped momentum at once ($n steps)" || fail "hold didn't stop momentum ($n steps)"
+# Fingers that rest before lifting: no momentum.
+"$B/wsctl" scroll 0 30 finger && sleep 0.3 && "$B/wsctl" scroll 0 0 finger ||
+    fail "wsctl scroll finger"
+sleep 0.5
+mark
+PS3=$MARKS
+in_part "$PS2" "$PS3" 'type=scroll .*phase=ended' &&
+    ! in_part "$PS2" "$PS3" 'momentum=began' &&
+    pass "no momentum after the fingers rested" || fail "momentum after resting fingers"
+# Wheel and other scrolls have no phases.
+grep -q 'app=Alpha type=scroll win=W1 dx=0.00 dy=15.00 source=2 phase=none momentum=none' "$LOG/wstest.log" &&
+    pass "a non-touchpad scroll has no phases" || fail "phases on a non-touchpad scroll"
 
 kill "$TPID"
 wait "$TPID" 2>/dev/null

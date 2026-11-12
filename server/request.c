@@ -182,6 +182,14 @@ handle_inject(struct ws_server *srv, struct ws_client *c,
 	case WS_INJECT_SCROLL:
 		pointer_scroll(srv, m->dx, m->dy, 0, 0, WS_SCROLL_CONTINUOUS);
 		break;
+	case WS_INJECT_SCROLL_FINGER:
+		scroll_finger(srv, m->dx, m->dy, m->dx == 0 && m->dy == 0,
+		    ws_now_usec());
+		break;
+	case WS_INJECT_HOLD:
+		if (m->pressed)
+			scroll_touch(srv);
+		break;
 	default:
 		client_error(srv, c, WS_MSG_INJECT, 0, EINVAL,
 		    "unknown inject kind");

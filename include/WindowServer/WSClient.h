@@ -206,6 +206,15 @@ int		 ws_inject_key(ws_connection_t *conn, const char *key_name,
     int pressed);
 int		 ws_inject_key_tap(ws_connection_t *conn, const char *key_name);
 int		 ws_inject_scroll(ws_connection_t *conn, double dx, double dy);
+/*
+ * Touchpad input, on servers with WS_SERVER_SCROLL_PHASES: a
+ * two-finger scroll by dx, dy pixels (0, 0: the fingers lift, which
+ * may start momentum scrolling), and fingers resting on the touchpad
+ * (libinput's hold gesture), which stops it.
+ */
+int		 ws_inject_scroll_finger(ws_connection_t *conn, double dx,
+    double dy);
+int		 ws_inject_hold(ws_connection_t *conn, int down);
 
 /*
  * The Dock (WS_CONNECT_DOCK on servers with WS_SERVER_DOCK; see "The
