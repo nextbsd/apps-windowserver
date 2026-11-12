@@ -104,6 +104,7 @@ usable_set(struct ws_server *srv, const ws_rect_t *r)
 	    r->height, srv->usable_menu_bar);
 	send_usable(srv);
 	window_tiles_place(srv);
+	tiling_changed(srv);		/* tiling lays out again */
 	srv->ov.dirty = true;		/* the overview lays out again */
 }
 

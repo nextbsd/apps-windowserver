@@ -104,6 +104,32 @@
 	<!-- No animations (the overview's). -->
 	<key>ReduceMotion</key>
 	<false/>
+	<!-- Window tiling (README, "Window tiling"): "stacking" or
+	     "tiling". Workspace Preferences sets the user's choice. -->
+	<key>WindowMode</key>
+	<string>stacking</string>
+	<!-- "dwindle" (each window splits what is left) or "master" (one
+	     window beside a stack of the others) -->
+	<key>TilingLayout</key>
+	<string>dwindle</string>
+	<!-- pixels between tiles (0 to 64) and around them (0 to 128) -->
+	<key>TilingGapsInner</key>
+	<integer>8</integer>
+	<key>TilingGapsOuter</key>
+	<integer>8</integer>
+	<!-- the master window's share of the screen, 0.1 to 0.9 -->
+	<key>TilingMasterRatio</key>
+	<real>0.55</real>
+	<!-- a border round the key window while it is tiled: pixels (0 for
+	     none, up to 16) and colour -->
+	<key>TilingBorder</key>
+	<integer>2</integer>
+	<key>TilingBorderColor</key>
+	<string>4a7fc0</string>
+	<!-- the modifier of the tiling keys: Command, Option, Control or a
+	     combination ("Command+Option"); never Shift -->
+	<key>TilingModifier</key>
+	<string>Command+Option</string>
 	<!-- empty: the first /dev/dri/card* with a connected display -->
 	<key>DRMDevice</key>
 	<string></string>

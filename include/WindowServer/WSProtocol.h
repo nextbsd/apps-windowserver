@@ -120,6 +120,10 @@ enum {
 	   bar strip" */
 	WS_MSG_SET_MENU_BAR,		/* ws_req_int_t: height in pixels,
 					   0 = no menu bar */
+	/* servers with WS_SERVER_TILING, see "Window tiling" */
+	WS_MSG_WINDOW_SET_SIZE_LIMITS,	/* ws_req_size_limits_t */
+	WS_MSG_TILING,			/* tools and the Dock, ws_req_tiling_t;
+					   answers on the socket */
 	WS_MSG_LAST
 };
 
@@ -498,7 +502,7 @@ typedef struct ws_req_cursor {
  *     WS_SERVER_DOCK_EDGE): the screen edge this Dock sits on
  *     (WS_DOCK_EDGE_*) and how many pixels it takes from it, measured
  *     from the edge. That strip is left out of the usable area (see
- *     "The screen and its usable area"), and window tiling will keep
+ *     "The screen and its usable area"), and window tiling keeps
  *     it free. The newest
  *     report from a Dock connection still connected counts; when that
  *     Dock goes away or reports WS_DOCK_EDGE_NONE, the newest other
@@ -625,6 +629,100 @@ typedef struct ws_req_cursor {
  */
 
 /*
+ * Window tiling (servers with WS_SERVER_TILING). Windows stack, as
+ * always, until the WindowMode setting says "tiling": then WindowServer
+ * lays out the ordinary windows of every app side by side in the usable
+ * area (see "The screen and its usable area": the Dock's strip and the
+ * menu bar strip stay free), with TilingGapsInner pixels between them
+ * and TilingGapsOuter around them, and lays them out again whenever one
+ * is shown, hidden, minimized, restored or closed, or the usable area
+ * changes (the Dock moved). The mode is the screen's (one layout per
+ * screen now; one per workspace once there are workspaces). Owners hear
+ * their windows' new frames as WS_EVENT_WINDOW_FRAME, as for any frame
+ * the server sets, and draw them at the new size. Leaving tiling mode
+ * gives every window back the frame it had before it was tiled.
+ *
+ * Layouts (TilingLayout): "dwindle" gives the first window part of the
+ * area and the next one part of what is left, splitting the longer side
+ * each time; "master" gives the first window the master area (left, or
+ * top on a tall screen) and stacks the others beside it. New windows
+ * come after the window that had the focus (dwindle) or at the end of
+ * the stack (master).
+ *
+ * What tiles: visible windows on the normal level, of app connections
+ * (not the Dock's app), that take pointer events and can be key, with
+ * none of WS_WINDOW_NO_TILE (the app's choice), WS_WINDOW_FIXED_SIZE
+ * (the user can't resize it) and WS_WINDOW_PANEL (panels, alerts,
+ * sheets), and that fit their tile. Everything else floats above the
+ * tiled windows, where its owner puts it: menus, torn-off menus,
+ * panels, desktop-level windows, app icons, the Dock. A window floats
+ * too when the user floats it, when its minimum size
+ * (WS_MSG_WINDOW_SET_SIZE_LIMITS) is larger than its tile, or when its
+ * owner keeps giving it a larger frame than its tile (three times in a
+ * row). An owner that answers with a smaller frame keeps that size, at
+ * the tile's top-left corner; a maximum size smaller than the tile
+ * centres the window in it.
+ *
+ * The stack: on the normal level, tiled windows are always below the
+ * windows that float, whatever their owners order. Clicking a tiled
+ * window raises it among the tiled ones.
+ *
+ * WS_MSG_WINDOW_SET_SIZE_LIMITS (ws_req_size_limits_t, hdr.window): the
+ * smallest and largest frame the window takes, 0 for no limit, as
+ * NSWindow's minSize and maxSize. Only tiling reads them.
+ *
+ * Keys, while tiling is on (TilingModifier, "Command+Option" by
+ * default, is any of Command, Option, Control; never Shift):
+ *	modifier+arrow			focus the tile that way
+ *	modifier+Shift+arrow		swap places with it
+ *	modifier+Minus, modifier+Equal	shrink, grow the focused tile
+ *	modifier+Shift+Space		float the key window, or tile it again
+ * Otherwise the keys go to the app as usual.
+ *
+ * The pointer: a press in the gap between two tiles (TilingGapsInner,
+ * or 4 pixels either side of the line without a gap) takes the split,
+ * and dragging moves it. When the user drags a tiled window by its
+ * title bar (its owner moves the window while a button pressed in it
+ * is held), it follows; let go over another tile and the two swap
+ * places, anywhere else and it goes back. If the owner resized the
+ * window that way (a resize bar), the splits along the edges it moved
+ * follow.
+ *
+ * With TilingBorder > 0 the active app's key window, if tiled, gets a
+ * border of that many pixels in TilingBorderColor, outside its frame.
+ *
+ * In tiling mode a minimized window always goes into the Dock (a tile
+ * on the bottom row would cover the tiled windows), or, while no Dock
+ * shows minimized windows, onto the bottom row as before.
+ *
+ * WS_MSG_TILING (ws_req_tiling_t), from WS_CONNECT_CONTROL and
+ * WS_CONNECT_DOCK connections with the same user check as the window
+ * list: `op` WS_TILING_FOCUS, _SWAP, _RESIZE and _FLOAT do what the keys
+ * do (FLOAT on hdr.window, or the key window when it is 0), and every
+ * op, WS_TILING_QUERY included, is answered on the socket with
+ * WS_EVENT_TILING_STATE, WS_EVENT_TILING_ITEMs and WS_EVENT_LIST_END
+ * (WSTypes.h). Turning tiling on and off and choosing the layout are
+ * settings (WS_MSG_SET_SETTINGS), so Workspace Preferences switches the
+ * mode live with one request, and the session's value persists in the
+ * user's org.nextbsd.WindowServer defaults. Window lists mark tiled
+ * windows with WS_WINDOW_INFO_TILED.
+ */
+typedef struct ws_req_size_limits {	/* WINDOW_SET_SIZE_LIMITS */
+	ws_req_header_t	hdr;
+	uint32_t	min_width;	/* 0 = no limit */
+	uint32_t	min_height;
+	uint32_t	max_width;
+	uint32_t	max_height;
+} ws_req_size_limits_t;
+
+typedef struct ws_req_tiling {		/* TILING */
+	ws_req_header_t	hdr;		/* hdr.window: WS_TILING_FLOAT's window,
+					   0 = the key window */
+	uint32_t	op;		/* WS_TILING_* */
+	int32_t		arg;
+} ws_req_tiling_t;
+
+/*
  * Settings (servers with WS_SERVER_SETTINGS). WindowServer's settings
  * (README, "Settings") change while it runs, in layers:
  *
@@ -685,6 +783,11 @@ typedef struct ws_req_cursor {
  *     active layout stays active if it's still in the list.
  *   - KeyRepeatDelay, KeyRepeatInterval: WS_CONNECT_XKB connections
  *     get WS_EVENT_KEYMAP again, which carries them.
+ *   - WindowMode, TilingLayout, TilingGapsInner, TilingGapsOuter,
+ *     TilingMasterRatio, TilingBorder, TilingBorderColor,
+ *     TilingModifier (servers with WS_SERVER_TILING): the windows are
+ *     tiled, laid out again, or given back their frames from before
+ *     tiling (see "Window tiling").
  * Tool and Dock connections get WS_EVENT_SETTINGS_CHANGED after any
  * change in effect, from any layer.
  *

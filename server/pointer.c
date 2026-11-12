@@ -262,6 +262,9 @@ pointer_motion(struct ws_server *srv, double x, double y)
 		    WS_EVENT_MOUSE_DRAGGED : WS_EVENT_MOUSE_MOVED, 0, 0);
 		return;
 	}
+	/* Dragging a split between tiles, or over one (tiling.c). */
+	if (tiling_motion(srv))
+		return;
 	if (srv->grab != NULL) {
 		send_tracking(srv, srv->grab);
 		if (srv->grab->tile_for != NULL) {
@@ -366,6 +369,10 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 		}
 		return;
 	}
+	/* A press on a split between tiles takes it, up to its release. */
+	if (pressed ? srv->buttons == 0 && tiling_press(srv, button) :
+	    tiling_release(srv, button))
+		return;
 	if (pressed) {
 		if (srv->buttons & mask)
 			return;
@@ -421,6 +428,9 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 		send_pointer(srv, srv->grab, WS_EVENT_MOUSE_UP, button,
 		    srv->click_count);
 	if (srv->buttons == 0) {
+		/* A tiled window the user dragged goes to its place. */
+		if (srv->grab != NULL)
+			tiling_grab_end(srv, srv->grab);
 		srv->grab = NULL;
 		srv->grab_suppressed = false;
 		srv->tile_dragging = false;

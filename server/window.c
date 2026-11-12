@@ -169,9 +169,20 @@ stack_insert_above(struct ws_server *srv, struct ws_window *w,
 }
 
 /*
+ * Where w sorts in the stack: by level and, on a level, the windows
+ * tiling lays out (tiling.c) below the ones that float.
+ */
+static int64_t
+stack_key(const struct ws_window *w)
+{
+	return (int64_t)w->level * 2 + (w->tiled ? 0 : 1);
+}
+
+/*
  * Place w in the stack. Levels always win: `rel` is honoured only if it
- * is visible and on the same level; otherwise w goes to the top (ABOVE)
- * or bottom (BELOW) of its level.
+ * is visible and on the same level (and tiled if w is, floating if w
+ * floats); otherwise w goes to the top (ABOVE) or bottom (BELOW) of its
+ * level.
  */
 static void
 stack_place(struct ws_server *srv, struct ws_window *w, int op,
@@ -179,7 +190,8 @@ stack_place(struct ws_server *srv, struct ws_window *w, int op,
 {
 	struct ws_window *at;
 
-	if (rel != NULL && (!rel->visible || rel == w || rel->level != w->level))
+	if (rel != NULL && (!rel->visible || rel == w ||
+	    stack_key(rel) != stack_key(w)))
 		rel = NULL;
 	if (rel != NULL) {
 		stack_insert_above(srv, w, op == WS_ORDER_ABOVE ? rel : rel->below);
@@ -188,13 +200,13 @@ stack_place(struct ws_server *srv, struct ws_window *w, int op,
 	if (op == WS_ORDER_ABOVE) {
 		/* above the highest window whose level is <= ours */
 		for (at = srv->stack_top; at != NULL; at = at->below)
-			if (at->level <= w->level)
+			if (stack_key(at) <= stack_key(w))
 				break;
 		stack_insert_above(srv, w, at);
 	} else {
 		/* below the lowest window whose level is >= ours */
 		for (at = srv->stack_bottom; at != NULL; at = at->above)
-			if (at->level >= w->level)
+			if (stack_key(at) >= stack_key(w))
 				break;
 		stack_insert_above(srv, w, at != NULL ? at->below : srv->stack_top);
 	}
@@ -564,6 +576,7 @@ window_destroy(struct ws_server *srv, struct ws_window *w)
 	window_unminimize(srv, w);
 	if (w->visible)
 		window_order(srv, w, WS_ORDER_OUT, NULL);
+	tiling_window_gone(srv, w);
 	if (c->app->key_window == w)
 		set_key_window(srv, c->app, NULL);
 	pointer_window_gone(srv, w);
@@ -686,6 +699,7 @@ window_order(struct ws_server *srv, struct ws_window *w, int op,
 		stack_unlink(srv, w);
 		w->visible = false;
 		dock_list_changed(srv);
+		tiling_changed(srv);
 		damage_rect(srv, &w->frame);
 		if (c->app->key_window == w)
 			set_key_window(srv, c->app, NULL);
@@ -694,14 +708,16 @@ window_order(struct ws_server *srv, struct ws_window *w, int op,
 	}
 	if (w->visible) {
 		if (rel == NULL && op == WS_ORDER_ABOVE &&
-		    (w->above == NULL || w->above->level > w->level))
+		    (w->above == NULL || stack_key(w->above) > stack_key(w)))
 			return;		/* already on top of its level */
 		if (rel == NULL && op == WS_ORDER_BELOW &&
-		    (w->below == NULL || w->below->level < w->level))
+		    (w->below == NULL || stack_key(w->below) < stack_key(w)))
 			return;
 		stack_unlink(srv, w);
 	} else if ((w->flags & WS_WINDOW_ICON) != 0)
 		place_icon(srv, w);
+	if (!w->visible)
+		tiling_changed(srv);
 	w->visible = true;
 	stack_place(srv, w, op, rel);
 	damage_rect(srv, &w->frame);
@@ -759,6 +775,7 @@ window_set_level(struct ws_server *srv, struct ws_window *w, int32_t level)
 		return;
 	w->level = level;
 	dock_list_changed(srv);
+	tiling_changed(srv);
 	if (w->visible) {
 		stack_unlink(srv, w);
 		stack_place(srv, w, WS_ORDER_ABOVE, NULL);
@@ -863,6 +880,7 @@ window_commit(struct ws_server *srv, struct ws_window *w, uint32_t flags,
 		}
 	}
 	overview_window_committed(srv, w);
+	tiling_committed(srv, w);
 	if (w->tile != NULL) {
 		/* The tile shows the new frame. */
 		w->tile->tile_dirty = true;
@@ -889,6 +907,8 @@ list_one(struct ws_server *srv, struct ws_client *to, struct ws_window *lw,
 	ev.u.window_info.level = lw->level;
 	if (lw->owner->app->key_window == lw)
 		flags |= WS_WINDOW_INFO_KEY;
+	if (lw->tiled)
+		flags |= WS_WINDOW_INFO_TILED;
 	if (srv->active == lw->owner->app)
 		flags |= WS_WINDOW_INFO_ACTIVE;
 	else if (to->flags & WS_CONNECT_CONTROL)
@@ -957,6 +977,11 @@ window_minimize(struct ws_server *srv, struct ws_window *w, int32_t where)
 		into_dock = false;
 	else
 		into_dock = srv->cfg.minimize_into_dock;
+	/* In tiling mode a tile on the bottom row would sit on the tiled
+	   windows: into the Dock (onto the bottom row only while no Dock
+	   shows minimized windows). */
+	if (srv->tiling.on)
+		into_dock = true;
 	if (w->minimized) {
 		if (w->into_dock == into_dock)
 			return;
@@ -1174,7 +1199,6 @@ windows_keep_on_screen(struct ws_server *srv, uint32_t old_width,
 	ws_rect_t old = { 0, 0, (int32_t)old_width, (int32_t)old_height };
 	ws_rect_t scr = { 0, 0, (int32_t)srv->width, (int32_t)srv->height };
 	struct ws_window *w;
-	ws_event_t ev;
 	ws_rect_t r;
 
 	for (w = srv->windows; w != NULL; w = w->next) {
@@ -1197,11 +1221,7 @@ windows_keep_on_screen(struct ws_server *srv, uint32_t old_width,
 			continue;
 		ws_debug("window %u kept on the screen: %d,%d -> %d,%d",
 		    w->id, w->frame.x, w->frame.y, r.x, r.y);
-		window_set_frame(srv, w, &r);
-		event_init(srv, &ev, WS_EVENT_WINDOW_FRAME, sizeof(ev.u.frame),
-		    w->id);
-		ev.u.frame.frame = r;
-		client_send(srv, w->owner, &ev, -1);
+		window_server_frame(srv, w, &r);
 	}
 }
 
@@ -1209,9 +1229,44 @@ windows_keep_on_screen(struct ws_server *srv, uint32_t old_width,
 void
 window_tile_raise(struct ws_server *srv, struct ws_window *t)
 {
-	if (t->above == NULL || t->above->level > t->level)
+	if (t->above == NULL || stack_key(t->above) > stack_key(t))
 		return;
 	stack_unlink(srv, t);
 	stack_place(srv, t, WS_ORDER_ABOVE, NULL);
 	damage_rect(srv, &t->frame);
+}
+
+/* The server gives w a new frame: its owner hears it
+ * (WS_EVENT_WINDOW_FRAME). */
+void
+window_server_frame(struct ws_server *srv, struct ws_window *w,
+    const ws_rect_t *frame)
+{
+	ws_event_t ev;
+
+	window_set_frame(srv, w, frame);
+	event_init(srv, &ev, WS_EVENT_WINDOW_FRAME, sizeof(ev.u.frame), w->id);
+	ev.u.frame.frame = w->frame;
+	client_send(srv, w->owner, &ev, -1);
+}
+
+/*
+ * w was tiled or floats now (tiling.c), which changes where it sorts in
+ * the stack: put it on top of its part of its level. Its owner hears
+ * about a new place.
+ */
+void
+window_restack(struct ws_server *srv, struct ws_window *w)
+{
+	struct ws_window *below = w->below, *above = w->above;
+
+	if (!w->visible || w->tile_for != NULL)
+		return;
+	stack_unlink(srv, w);
+	stack_place(srv, w, WS_ORDER_ABOVE, NULL);
+	damage_rect(srv, &w->frame);
+	pointer_recheck(srv);
+	dock_list_changed(srv);
+	if (w->below != below || w->above != above)
+		send_ordered(srv, w);
 }

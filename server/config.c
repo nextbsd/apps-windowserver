@@ -88,6 +88,16 @@ static const struct ckey keys[] = {
 	B("MinimizeIntoDock", minimize_into_dock, 0),
 	B("StartKeyShowsOverview", start_key_overview, CONFIG_LIVE),
 	B("ReduceMotion", reduce_motion, CONFIG_LIVE),
+	/* window tiling (tiling.c, "Window tiling" in WSProtocol.h) */
+	S("WindowMode", window_mode, CONFIG_TILING),
+	S("TilingLayout", tiling_layout, CONFIG_TILING),
+	I("TilingGapsInner", tiling_gaps_inner, CONFIG_TILING),
+	I("TilingGapsOuter", tiling_gaps_outer, CONFIG_TILING),
+	R("TilingMasterRatio", tiling_master_ratio, CONFIG_TILING),
+	I("TilingBorder", tiling_border, CONFIG_TILING),
+	{ "TilingBorderColor", C_COLOR, offsetof(struct ws_config,
+	  tiling_border_color), sizeof(uint32_t), CONFIG_TILING },
+	S("TilingModifier", tiling_modifier, CONFIG_TILING),
 };
 
 #define NKEYS	(sizeof(keys) / sizeof(keys[0]))
@@ -134,6 +144,17 @@ config_defaults(struct ws_config *cfg)
 	cfg->minimize_tile_size = 64;
 	cfg->start_key_overview = true;
 	cfg->reduce_motion = false;
+	/* Windows stack until the user (Workspace Preferences) or the
+	   theme picks tiling. */
+	strlcpy(cfg->window_mode, "stacking", sizeof(cfg->window_mode));
+	strlcpy(cfg->tiling_layout, "dwindle", sizeof(cfg->tiling_layout));
+	cfg->tiling_gaps_inner = 8;
+	cfg->tiling_gaps_outer = 8;
+	cfg->tiling_master_ratio = 0.55;
+	cfg->tiling_border = 2;
+	cfg->tiling_border_color = 0x4a7fc0;
+	strlcpy(cfg->tiling_modifier, "Command+Option",
+	    sizeof(cfg->tiling_modifier));
 }
 
 static int

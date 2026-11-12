@@ -281,6 +281,7 @@ main(int argc, char **argv)
 	if (compositor_init(srv) < 0)
 		goto out;
 	screen_usable_compute(srv, &srv->usable);
+	tiling_init(srv);
 	if (tile_init(srv) < 0)
 		goto out;
 	srv->display_active = true;
@@ -308,6 +309,7 @@ main(int argc, char **argv)
 		for (i = 0; i < n; i++)
 			handle_kevent(srv, &events[i]);
 		clients_reap(srv);
+		tiling_flush(srv);
 		dock_flush(srv);
 		overview_flush(srv);
 	}
@@ -323,6 +325,7 @@ out:
 	}
 	cursor_fini(srv);
 	overview_fini(srv);
+	tiling_fini(srv);
 	tile_fini(srv);
 	if (srv->output != NULL && srv->output->shutdown != NULL)
 		srv->output->shutdown(srv);

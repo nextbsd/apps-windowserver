@@ -118,6 +118,8 @@ apply(struct ws_server *srv, const struct ws_config *next)
 		keyboard_repeat_changed(srv);
 	if (need & CONFIG_DEVICE)
 		input_reconfigure(srv);
+	if (need & CONFIG_TILING)
+		tiling_config_changed(srv, &old);
 	event_init(srv, &ev, WS_EVENT_SETTINGS_CHANGED, 0, 0);
 	settings_tools_notify(srv, &ev);
 }
@@ -217,6 +219,24 @@ value_ok(const struct ws_config *cfg, const char *key)
 		return in_range(cfg->mouse_speed, -1, 1, true);
 	if (strcmp(key, "ScrollSpeed") == 0)
 		return in_range(cfg->scroll_speed, 0.05, 20, false);
+	if (strcmp(key, "WindowMode") == 0)
+		return strcasecmp(cfg->window_mode, "stacking") == 0 ||
+		    strcasecmp(cfg->window_mode, "tiling") == 0;
+	if (strcmp(key, "TilingLayout") == 0)
+		return strcasecmp(cfg->tiling_layout, "dwindle") == 0 ||
+		    strcasecmp(cfg->tiling_layout, "master") == 0;
+	if (strcmp(key, "TilingGapsInner") == 0)
+		return cfg->tiling_gaps_inner >= 0 &&
+		    cfg->tiling_gaps_inner <= 64;
+	if (strcmp(key, "TilingGapsOuter") == 0)
+		return cfg->tiling_gaps_outer >= 0 &&
+		    cfg->tiling_gaps_outer <= 128;
+	if (strcmp(key, "TilingMasterRatio") == 0)
+		return in_range(cfg->tiling_master_ratio, 0.1, 0.9, false);
+	if (strcmp(key, "TilingBorder") == 0)
+		return cfg->tiling_border >= 0 && cfg->tiling_border <= 16;
+	if (strcmp(key, "TilingModifier") == 0)
+		return tiling_modifier_parse(cfg->tiling_modifier, NULL);
 	return true;
 }
 

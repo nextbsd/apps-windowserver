@@ -64,6 +64,11 @@ extern "C" {
 #define WS_WINDOW_IGNORES_MOUSE	0x0008	/* pointer events pass through */
 #define WS_WINDOW_ICON		0x0010	/* app icon or miniwindow: the server
 					   finds it a free place (see window.c) */
+/* Window tiling (servers with WS_SERVER_TILING; "Window tiling" in
+   WSProtocol.h): windows with any of these float in tiling mode. */
+#define WS_WINDOW_NO_TILE	0x0020	/* the app never wants it tiled */
+#define WS_WINDOW_FIXED_SIZE	0x0040	/* the user can't resize it */
+#define WS_WINDOW_PANEL		0x0080	/* a panel, alert or sheet */
 
 /*
  * Pixel formats. Window buffers can be either (XRGB8888 only on servers
@@ -229,6 +234,12 @@ extern "C" {
 					   the active app; the one before
 					   stays active, menus included
 					   ("Activation" in WSProtocol.h) */
+#define WS_SERVER_TILING	0x02000000 /* window tiling: the WindowMode and
+						   Tiling* settings, WS_WINDOW_NO_TILE,
+						   _FIXED_SIZE and _PANEL,
+						   WS_MSG_WINDOW_SET_SIZE_LIMITS and
+						   WS_MSG_TILING ("Window tiling" in
+						   WSProtocol.h) */
 
 /* WS_MSG_ACTIVATE flags (ws_activate_flags). */
 #define WS_ACTIVATE_RAISE	0x0001	/* also bring the app's windows,
@@ -344,6 +355,10 @@ enum {
 					   and button); hdr.window 0 */
 	WS_EVENT_POINTER_UNGRABBED,	/* no payload: the server ended this
 					   connection's grab */
+	/* WS_SERVER_TILING: answers WS_MSG_TILING ("Window tiling" in
+	   WSProtocol.h) */
+	WS_EVENT_TILING_STATE,		/* ws_event_tiling_t */
+	WS_EVENT_TILING_ITEM,		/* ws_event_tiling_item_t */
 	WS_EVENT_MAX
 };
 
@@ -592,6 +607,7 @@ typedef struct ws_event_ordered {
 #define WS_WINDOW_INFO_MINIMIZED 0x0008	/* minimized */
 #define WS_WINDOW_INFO_IN_DOCK	0x0010	/* minimized, and the Dock shows it
 					   instead of a tile */
+#define WS_WINDOW_INFO_TILED	0x0020	/* tiled (WS_SERVER_TILING) */
 
 #define WS_STACK_INDEX_NONE	0xffffffffu
 
@@ -767,6 +783,65 @@ typedef struct ws_event_input_device {
 	char		sysname[32];	/* e.g. "event3" */
 } ws_event_input_device_t;
 
+/*
+ * Window tiling (servers with WS_SERVER_TILING; see "Window tiling" in
+ * WSProtocol.h). WS_MSG_TILING is answered with WS_EVENT_TILING_STATE,
+ * a WS_EVENT_TILING_ITEM per tiled window (in layout order) and per
+ * window that floats in tiling mode only because the user floated it or
+ * it wouldn't fit its tile, then WS_EVENT_LIST_END.
+ */
+#define WS_TILING_STACKING	0	/* ws_event_tiling_t.mode */
+#define WS_TILING_TILING	1
+
+#define WS_TILING_DWINDLE	0	/* ws_event_tiling_t.layout */
+#define WS_TILING_MASTER	1	/* master and stack */
+
+/* WS_MSG_TILING operations (ws_req_tiling_t.op) */
+#define WS_TILING_QUERY		0	/* state and items, nothing changes */
+#define WS_TILING_FOCUS		1	/* arg WS_TILING_DIR_*: focus the
+					   neighbour tile */
+#define WS_TILING_SWAP		2	/* arg WS_TILING_DIR_*: swap places
+					   with the neighbour tile */
+#define WS_TILING_RESIZE	3	/* arg > 0 grows the tile, < 0 shrinks
+					   it, by 5% of the area per step */
+#define WS_TILING_FLOAT		4	/* arg 1 floats the window, 0 tiles it
+					   again, 2 toggles */
+
+#define WS_TILING_DIR_LEFT	1
+#define WS_TILING_DIR_RIGHT	2
+#define WS_TILING_DIR_UP	3
+#define WS_TILING_DIR_DOWN	4
+
+typedef struct ws_event_tiling {
+	uint32_t	mode;		/* WS_TILING_STACKING or _TILING */
+	uint32_t	layout;		/* WS_TILING_DWINDLE or _MASTER */
+	uint32_t	count;		/* windows tiled */
+	uint32_t	focused;	/* the tiled window that has the focus,
+					   0 = none */
+	ws_rect_t	area;		/* where tiles go: the usable area
+					   minus the outer gaps */
+	uint32_t	gaps_inner;	/* pixels between tiles */
+	uint32_t	gaps_outer;	/* pixels around them */
+	uint32_t	border;		/* active-window border, pixels */
+	uint32_t	modifier;	/* WS_MOD_* the tiling keys take */
+} ws_event_tiling_t;
+
+#define WS_TILING_ITEM_TILED	0x0001
+#define WS_TILING_ITEM_FLOATED	0x0002	/* the user floated it */
+#define WS_TILING_ITEM_REFUSED	0x0004	/* its minimum size, or the size it
+					   kept asking for, is larger than
+					   its tile: it floats */
+#define WS_TILING_ITEM_FOCUSED	0x0008
+
+typedef struct ws_event_tiling_item {
+	uint32_t	window;		/* as in hdr.window */
+	uint32_t	app_id;
+	uint32_t	flags;		/* WS_TILING_ITEM_* */
+	uint32_t	index;		/* place in the layout, 0 first */
+	ws_rect_t	tile;		/* its tile (tiled windows) */
+	ws_rect_t	frame;		/* its frame */
+} ws_event_tiling_item_t;
+
 typedef struct ws_event {
 	ws_event_header_t hdr;
 	union {
@@ -794,6 +869,8 @@ typedef struct ws_event {
 		ws_event_setting_t	setting;
 		ws_event_keyboard_layout_t keyboard_layout;
 		ws_event_input_device_t	input_device;
+		ws_event_tiling_t	tiling;
+		ws_event_tiling_item_t	tiling_item;
 		uint8_t			raw[232];
 	} u;
 } ws_event_t;

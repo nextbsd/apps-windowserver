@@ -131,6 +131,15 @@ int		 ws_window_set_flags(ws_connection_t *conn, uint32_t window,
     uint32_t flags);
 int		 ws_window_make_key(ws_connection_t *conn, uint32_t window);
 /*
+ * The smallest and largest frame the window takes (NSWindow's minSize
+ * and maxSize), 0 for no limit: window tiling floats a window whose
+ * minimum doesn't fit its tile. Servers with WS_SERVER_TILING (others
+ * fail with ENOTSUP).
+ */
+int		 ws_window_set_size_limits(ws_connection_t *conn,
+    uint32_t window, uint32_t min_width, uint32_t min_height,
+    uint32_t max_width, uint32_t max_height);
+/*
  * ws_window_create without the round trip, on servers with
  * WS_SERVER_WINDOW_IDS: the id comes from a block the library reserves
  * (one round trip per 256 windows), and the request goes one-way, so a
@@ -333,6 +342,21 @@ int		 ws_inject_screen_size(ws_connection_t *conn, uint32_t width,
 int		 ws_overview(ws_connection_t *conn, uint32_t request,
     ws_event_overview_t *state,
     void (*fn)(const ws_event_overview_item_t *item, void *ctx), void *ctx);
+
+/*
+ * Window tiling (servers with WS_SERVER_TILING; tool and Dock
+ * connections only; see "Window tiling" in WSProtocol.h). op is
+ * WS_TILING_QUERY, _FOCUS or _SWAP (arg WS_TILING_DIR_*), _RESIZE (arg
+ * > 0 grows, < 0 shrinks the focused tile) or _FLOAT (window, 0 for the
+ * key window; arg 1 float, 0 tile again, 2 toggle); then *state (if not
+ * NULL) gets the state and fn is called for each tiled window, in layout
+ * order, and each window the user floated or that didn't fit. Turning
+ * tiling on and off and the layout are settings (WindowMode,
+ * TilingLayout...: ws_set_setting).
+ */
+int		 ws_tiling(ws_connection_t *conn, uint32_t op, uint32_t window,
+    int32_t arg, ws_event_tiling_t *state,
+    void (*fn)(const ws_event_tiling_item_t *item, void *ctx), void *ctx);
 
 /*
  * The Dock (WS_CONNECT_DOCK on servers with WS_SERVER_DOCK; see "The

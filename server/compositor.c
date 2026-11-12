@@ -168,8 +168,11 @@ composite_region(struct ws_server *srv, pixman_region32_t *region)
 	} else {
 		/* TODO: skip windows hidden behind opaque windows above
 		 * them. */
-		for (w = srv->stack_bottom; w != NULL; w = w->above)
+		for (w = srv->stack_bottom; w != NULL; w = w->above) {
+			if (w == srv->tiling.border)
+				tiling_draw_border(srv, w);
 			composite_window(srv, w, ext, 1.0);
+		}
 	}
 
 	if (!srv->cursor_hw && srv->cursor_visible && srv->cursor_image != NULL)
