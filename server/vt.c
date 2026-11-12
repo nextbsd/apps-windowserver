@@ -94,13 +94,15 @@ vt_open(struct ws_server *srv)
 	char path[32];
 	int ctl, vtno = -1;
 
-	/* /dev/consolectl answers VT queries even after the privilege drop. */
-	srv->consolectl_fd = open("/dev/consolectl", O_RDWR | O_CLOEXEC);
-	ctl = srv->consolectl_fd >= 0 ? srv->consolectl_fd :
-	    open("/dev/ttyv0", O_RDWR | O_CLOEXEC | O_NOCTTY);
+	/*
+	 * VT queries (VT_OPENQRY, VT_GETACTIVE, VT_ACTIVATE) need a vt(4)
+	 * terminal: /dev/consolectl doesn't answer them. ttyv0 stays open so
+	 * they keep working after the privilege drop.
+	 */
+	srv->vtctl_fd = open("/dev/ttyv0", O_RDWR | O_CLOEXEC | O_NOCTTY);
+	ctl = srv->vtctl_fd;
 	if (ctl < 0) {
-		ws_err("can't open /dev/consolectl or /dev/ttyv0: %s",
-		    strerror(errno));
+		ws_err("can't open /dev/ttyv0: %s", strerror(errno));
 		return -1;
 	}
 	if (ioctl(ctl, VT_GETACTIVE, &srv->vt_orig) < 0)
@@ -111,7 +113,7 @@ vt_open(struct ws_server *srv)
 		ws_err("no free VT (VT_OPENQRY: %s)", strerror(errno));
 		goto fail;
 	}
-	if (ctl != srv->consolectl_fd)
+	if (ctl != srv->vtctl_fd)
 		close(ctl);
 
 	/* vt(4) numbers VTs from 1; ttyv0 is VT 1. */
@@ -178,7 +180,7 @@ fail_restore:
 	vt_saved.fd = -1;
 	return -1;
 fail:
-	if (ctl != srv->consolectl_fd)
+	if (ctl != srv->vtctl_fd)
 		close(ctl);
 	return -1;
 }
@@ -244,8 +246,8 @@ vt_close(struct ws_server *srv)
 	close(srv->tty_fd);
 	srv->tty_fd = -1;
 	vt_saved.fd = -1;
-	if (srv->consolectl_fd >= 0)
-		close(srv->consolectl_fd);
-	srv->consolectl_fd = -1;
+	if (srv->vtctl_fd >= 0)
+		close(srv->vtctl_fd);
+	srv->vtctl_fd = -1;
 	srv->vt_setup = false;
 }

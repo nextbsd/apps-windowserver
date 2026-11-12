@@ -47,8 +47,11 @@ fi
 
 stop() {
 	if [ -f "$PLIST" ]; then
-		launchctl unload "$PLIST"
+		launchctl unload "$PLIST" 2>/dev/null
 		rm -f "$PLIST"
+		echo "WindowServer stopped"
+	elif launchctl list "$LABEL" >/dev/null 2>&1; then
+		launchctl remove "$LABEL"
 		echo "WindowServer stopped"
 	fi
 }
@@ -59,6 +62,12 @@ start() {
 		exit 1
 	fi
 	[ -x "$SERVER" ] || { echo "ws-session: no server at $SERVER" >&2; exit 1; }
+	# A job left over from an earlier start that failed or was killed would
+	# make "launchctl load" fail with "already loaded".
+	if [ -f "$PLIST" ] || launchctl list "$LABEL" >/dev/null 2>&1; then
+		echo "ws-session: removing a WindowServer job left from an earlier start"
+		stop >/dev/null
+	fi
 	mkdir -p "$DIR"
 	{
 		echo '<?xml version="1.0" encoding="UTF-8"?>'
@@ -78,15 +87,18 @@ start() {
 	} >"$PLIST"
 	launchctl load "$PLIST" || exit 1
 	i=0
-	while [ $i -lt 50 ]; do
-		WS_SERVICE_NAME=$SERVICE "$TOOLS/wsctl" sync 2>/dev/null && {
+	# launchd answers for the Mach service even while the server is dead,
+	# so each check gets a hard time limit.
+	while [ $i -lt 20 ]; do
+		WS_SERVICE_NAME=$SERVICE timeout 2 "$TOOLS/wsctl" sync 2>/dev/null && {
 			echo "WindowServer is up (service $SERVICE, log /var/log/WindowServer.log)"
 			return 0
 		}
-		sleep 0.2
+		sleep 0.5
 		i=$((i + 1))
 	done
-	echo "ws-session: WindowServer didn't come up; see /var/log/WindowServer.log" >&2
+	echo "ws-session: WindowServer didn't come up. The end of /var/log/WindowServer.log:" >&2
+	tail -n 5 /var/log/WindowServer.log >&2
 	stop
 	exit 1
 }

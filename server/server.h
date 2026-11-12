@@ -276,7 +276,7 @@ struct ws_server {
 
 	/* VT (vt.c) */
 	int		tty_fd;
-	int		consolectl_fd;
+	int		vtctl_fd;
 	int		vt_num;
 	int		vt_orig;
 	bool		vt_setup;
