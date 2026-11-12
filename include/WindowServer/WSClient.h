@@ -45,6 +45,10 @@ typedef void (*ws_event_handler_t)(ws_connection_t *conn,
  * Connect to WindowServer. The service name comes from the
  * WS_SERVICE_NAME environment variable, or WS_SERVICE_NAME by default.
  * flags: WS_CONNECT_* . Returns NULL with errno set on failure.
+ *
+ * With WS_CONNECT_XKB the connection also gets WS_EVENT_KEYMAP,
+ * WS_EVENT_MODIFIERS and WS_EVENT_KEYS_HELD (WSTypes.h). A keymap event
+ * carries a descriptor in u.keymap.fd that the handler must close.
  */
 ws_connection_t *ws_connect(const char *app_name, uint32_t flags);
 ws_connection_t *ws_connect_service(const char *service, const char *app_name,

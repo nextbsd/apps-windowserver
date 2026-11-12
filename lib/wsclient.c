@@ -243,10 +243,23 @@ parse_event(ws_connection_t *c, ws_event_t *ev)
 	memcpy(ev, c->rbuf, hdr.size);
 	c->rlen -= hdr.size;
 	memmove(c->rbuf, c->rbuf + hdr.size, c->rlen);
-	/* Only snapshots carry a descriptor; it arrived with their bytes. */
+	/* Only snapshots and keymaps carry a descriptor; it arrived with
+	 * their bytes. */
 	if (ev->hdr.type == WS_EVENT_SNAPSHOT)
 		ev->u.snapshot.fd = fd_take(c);
+	else if (ev->hdr.type == WS_EVENT_KEYMAP)
+		ev->u.keymap.fd = fd_take(c);
 	return 1;
+}
+
+/* Close the descriptor an event carries, for events nobody handles. */
+static void
+event_close_fd(const ws_event_t *ev)
+{
+	if (ev->hdr.type == WS_EVENT_SNAPSHOT && ev->u.snapshot.fd >= 0)
+		close(ev->u.snapshot.fd);
+	else if (ev->hdr.type == WS_EVENT_KEYMAP && ev->u.keymap.fd >= 0)
+		close(ev->u.keymap.fd);
 }
 
 /* Returns 1 with an event, 0 if nothing is ready (nonblocking), -1 on error. */
@@ -556,8 +569,7 @@ ws_disconnect(ws_connection_t *c)
 		(void)send_oneway(c, &h);
 	}
 	while (queue_pop(c, &ev))
-		if (ev.hdr.type == WS_EVENT_SNAPSHOT && ev.u.snapshot.fd >= 0)
-			close(ev.u.snapshot.fd);
+		event_close_fd(&ev);
 	while (c->nfds > 0)
 		close(fd_take(c));
 	if (c->sock >= 0)
@@ -642,9 +654,8 @@ ws_dispatch(ws_connection_t *c, ws_event_handler_t handler, void *ctx)
 		note_event(c, &ev);
 		if (handler != NULL)
 			handler(c, &ev, ctx);
-		else if (ev.hdr.type == WS_EVENT_SNAPSHOT &&
-		    ev.u.snapshot.fd >= 0)
-			close(ev.u.snapshot.fd);
+		else
+			event_close_fd(&ev);
 		count++;
 	}
 }
@@ -1099,6 +1110,9 @@ ws_event_name(uint16_t type)
 		[WS_EVENT_SNAPSHOT] = "snapshot",
 		[WS_EVENT_WINDOW_INFO] = "window-info",
 		[WS_EVENT_LIST_END] = "list-end",
+		[WS_EVENT_KEYMAP] = "keymap",
+		[WS_EVENT_MODIFIERS] = "modifiers",
+		[WS_EVENT_KEYS_HELD] = "keys-held",
 	};
 
 	if (type < WS_EVENT_MAX && names[type] != NULL)

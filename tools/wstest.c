@@ -13,11 +13,16 @@
  *   Beta   W3  normal level      (300,250) 500x400  blue
  *   Gamma  W4  normal level      (900,100) 300x200  yellow
  *
- * Alpha activates first, then Beta, so Beta ends up active with W3 as
- * its key window. tests/headless-test.sh drives it with wsctl.
+ * Gamma connects with WS_CONNECT_XKB, so it also gets the keymap, XKB
+ * modifier state and held keys. Alpha activates first, then Beta, so
+ * Beta ends up active with W3 as its key window. tests/headless-test.sh
+ * drives it with wsctl.
  */
 
+#include <sys/mman.h>
+
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -75,11 +80,42 @@ fill(ws_buffer_t *b, uint32_t argb, uint32_t border)
 			    y >= h - 2) ? border : argb;
 }
 
+/* Check a WS_EVENT_KEYMAP's memfd, then close it. */
+static void
+keymap_detail(const ws_event_keymap_t *km, char *buf, size_t len)
+{
+	const char *text = "unreadable";
+	void *p = MAP_FAILED;
+	int seals = -1;
+
+	if (km->fd >= 0 && km->size > 0) {
+		seals = fcntl(km->fd, F_GET_SEALS);
+		p = mmap(NULL, km->size, PROT_READ, MAP_PRIVATE, km->fd, 0);
+	}
+	if (p != MAP_FAILED) {
+		if (((const char *)p)[km->size - 1] != '\0')
+			text = "unterminated";
+		else if (strncmp(p, "xkb_keymap", 10) == 0)
+			text = "xkb_keymap";
+		else
+			text = "other";
+		munmap(p, km->size);
+	}
+	snprintf(buf, len, "format=%u size=%u delay=%u interval=%u text=%s "
+	    "sealed=%s", km->format, km->size, km->repeat_delay,
+	    km->repeat_interval, text,
+	    seals >= 0 && (seals & F_SEAL_WRITE) ? "yes" : "no");
+	if (km->fd >= 0)
+		close(km->fd);
+}
+
 static void
 print_event(ws_connection_t *conn, const ws_event_t *ev, void *ctx)
 {
 	struct app *app = ctx;
-	char detail[160] = "";
+	char detail[200] = "";
+	size_t off;
+	uint32_t i;
 
 	(void)conn;
 	switch (ev->hdr.type) {
@@ -122,6 +158,24 @@ print_event(ws_connection_t *conn, const ws_event_t *ev, void *ctx)
 	case WS_EVENT_ERROR:
 		snprintf(detail, sizeof(detail), "request=0x%x code=%d %s",
 		    ev->u.error.request, ev->u.error.code, ev->u.error.message);
+		break;
+	case WS_EVENT_KEYMAP:
+		keymap_detail(&ev->u.keymap, detail, sizeof(detail));
+		break;
+	case WS_EVENT_MODIFIERS:
+		snprintf(detail, sizeof(detail),
+		    "depressed=0x%x latched=0x%x locked=0x%x group=%u mods=0x%x",
+		    ev->u.modifiers.depressed, ev->u.modifiers.latched,
+		    ev->u.modifiers.locked, ev->u.modifiers.group,
+		    ev->u.modifiers.modifiers);
+		break;
+	case WS_EVENT_KEYS_HELD:
+		off = (size_t)snprintf(detail, sizeof(detail), "count=%u keys=",
+		    ev->u.keys_held.count);
+		for (i = 0; i < ev->u.keys_held.count && i < WS_MAX_KEYS_HELD &&
+		    off < sizeof(detail); i++)
+			off += (size_t)snprintf(detail + off, sizeof(detail) - off,
+			    "%s%u", i ? "," : "", ev->u.keys_held.keycodes[i]);
 		break;
 	default:
 		break;
@@ -215,7 +269,7 @@ main(int argc, char **argv)
 	} else
 		printf("join refused app=Mallory %s\n",
 		    errno == EPERM ? "EPERM" : strerror(errno));
-	apps[2].conn = ws_connect_join(apps[2].name, 0,
+	apps[2].conn = ws_connect_join(apps[2].name, WS_CONNECT_XKB,
 	    ws_client_id(apps[0].conn), ws_client_token(apps[0].conn));
 	if (apps[2].conn == NULL) {
 		fprintf(stderr, "wstest: join %s: %s\n", apps[2].name,

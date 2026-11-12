@@ -92,7 +92,7 @@ handle_hello(struct ws_server *srv, struct ws_mach_item *item)
 	c->token = random_token();
 	c->pid = item->sender_pid;
 	c->uid = item->sender_euid;
-	c->flags = m->flags & WS_CONNECT_CONTROL;
+	c->flags = m->flags & (WS_CONNECT_CONTROL | WS_CONNECT_XKB);
 	c->app = app != NULL ? app : c;
 	c->sock = -1;
 	c->hello_usec = ws_now_usec();
@@ -109,7 +109,7 @@ handle_hello(struct ws_server *srv, struct ws_mach_item *item)
 	r.status = 0;
 	r.u.hello.client_id = c->id;
 	r.u.hello.server_flags = (srv->headless ? WS_SERVER_HEADLESS : 0) |
-	    WS_SERVER_JOIN;
+	    WS_SERVER_FEATURES;
 	r.u.hello.token = c->token;
 	strlcpy(r.u.hello.socket_path, srv->socket_path,
 	    sizeof(r.u.hello.socket_path));

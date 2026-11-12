@@ -141,6 +141,16 @@ Each connection is normally an app of its own. A helper process can join another
 - All connections of an app are activated and deactivated together (`WS_EVENT_APP_ACTIVATED`/`DEACTIVATED` go to each). They share one key window, which can be any connection's window; clicking a joined connection's window only moves the key window. Key events, Command shortcuts included, go to the connection that owns the key window.
 - If the app's first connection goes away, the oldest remaining connection carries the app on.
 
+### XKB state for X servers
+
+Key events carry the keycode, the keysym, text and six coarse `WS_MOD_*` bits, which is all a GNUstep app needs. A client that runs its own XKB, such as an X server, connects with `WS_CONNECT_XKB` (servers that support it set `WS_SERVER_XKB`) and also gets:
+
+- `WS_EVENT_KEYMAP` (`ws_event_keymap_t`), right after the welcome and again if the keymap changes: the compiled keymap (`xkb_keymap_get_as_string()`, text v1, NUL-terminated) in a sealed, read-only memfd passed like a snapshot's, plus the repeat delay and interval in milliseconds. The client maps it with `MAP_PRIVATE` and closes the descriptor.
+- `WS_EVENT_MODIFIERS` (`ws_event_modifiers_t`): depressed, latched and locked modifiers and the effective layout group as XKB masks, like Wayland's `wl_keyboard.modifiers`, after any key that changes them.
+- `WS_EVENT_KEYS_HELD` (`ws_event_keys_held_t`): the XKB keycodes still held down when the connection starts getting key events (its app is activated, or the key window moves to one of its windows), followed by `WS_EVENT_MODIFIERS`. Their key-ups come to it later, so nothing sticks.
+
+Clients without the flag get none of these.
+
 ## License
 
 BSD 2-Clause. See [LICENSE](LICENSE).

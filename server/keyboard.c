@@ -7,9 +7,13 @@
  * active app.
  */
 
+#include <sys/mman.h>
+
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <dev/evdev/input-event-codes.h>
 #include <xkbcommon/xkbcommon.h>
@@ -17,6 +21,56 @@
 #include "server.h"
 
 #define XKB_OFFSET	8	/* XKB keycode = evdev code + 8 */
+
+/*
+ * Put the compiled keymap in a sealed memfd for WS_EVENT_KEYMAP. Every
+ * client gets the same file, so it is sealed against writes and size
+ * changes.
+ */
+static int
+keymap_export(struct ws_server *srv)
+{
+	char *str;
+	size_t len, off;
+	ssize_t n;
+	int fd;
+
+	str = xkb_keymap_get_as_string(srv->xkb_keymap,
+	    XKB_KEYMAP_FORMAT_TEXT_V1);
+	if (str == NULL)
+		return -1;
+	len = strlen(str) + 1;
+	fd = memfd_create("WindowServer-keymap", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	if (fd < 0) {
+		free(str);
+		return -1;
+	}
+	for (off = 0; off < len; off += (size_t)n) {
+		n = write(fd, str + off, len - off);
+		if (n < 0 && errno == EINTR) {
+			n = 0;
+			continue;
+		}
+		if (n <= 0) {
+			free(str);
+			close(fd);
+			return -1;
+		}
+	}
+	free(str);
+	if (fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW |
+	    F_SEAL_WRITE | F_SEAL_SEAL) < 0) {
+		ws_warn("can't seal the keymap memfd: %s", strerror(errno));
+		close(fd);
+		return -1;
+	}
+	(void)lseek(fd, 0, SEEK_SET);
+	if (srv->keymap_fd >= 0)
+		close(srv->keymap_fd);
+	srv->keymap_fd = fd;
+	srv->keymap_size = (uint32_t)len;
+	return 0;
+}
 
 int
 keyboard_init(struct ws_server *srv)
@@ -46,6 +100,9 @@ keyboard_init(struct ws_server *srv)
 	srv->xkb_state = xkb_state_new(srv->xkb_keymap);
 	if (srv->xkb_state == NULL)
 		return -1;
+	if (keymap_export(srv) < 0)
+		ws_warn("can't export the keymap; WS_CONNECT_XKB clients "
+		    "won't get WS_EVENT_KEYMAP");
 	ws_info("keymap: rules %s, model %s, layout %s%s%s",
 	    names.rules, names.model, names.layout,
 	    names.variant ? ", variant " : "", names.variant ? names.variant : "");
@@ -64,6 +121,9 @@ keyboard_fini(struct ws_server *srv)
 	srv->xkb_state = NULL;
 	srv->xkb_keymap = NULL;
 	srv->xkb_ctx = NULL;
+	if (srv->keymap_fd >= 0)
+		close(srv->keymap_fd);
+	srv->keymap_fd = -1;
 }
 
 static uint32_t
@@ -118,6 +178,115 @@ key_target(struct ws_server *srv, struct ws_window **wp)
 		w = NULL;
 	*wp = w;
 	return w != NULL ? w->owner : a;
+}
+
+/* ---- XKB state for WS_CONNECT_XKB clients ---- */
+
+static void
+send_keymap(struct ws_server *srv, struct ws_client *c)
+{
+	ws_event_t ev;
+
+	if (srv->keymap_fd < 0)
+		return;
+	event_init(srv, &ev, WS_EVENT_KEYMAP, sizeof(ev.u.keymap), 0);
+	ev.u.keymap.format = WS_KEYMAP_XKB_V1;
+	ev.u.keymap.size = srv->keymap_size;
+	ev.u.keymap.repeat_delay = (uint32_t)srv->cfg.key_repeat_delay;
+	ev.u.keymap.repeat_interval = srv->cfg.key_repeat_interval > 0 ?
+	    (uint32_t)srv->cfg.key_repeat_interval : 0;
+	ev.u.keymap.fd = -1;
+	client_send(srv, c, &ev, srv->keymap_fd);
+}
+
+static void
+send_modifiers(struct ws_server *srv, struct ws_client *c, uint32_t window)
+{
+	ws_event_t ev;
+
+	event_init(srv, &ev, WS_EVENT_MODIFIERS, sizeof(ev.u.modifiers),
+	    window);
+	ev.u.modifiers.depressed = xkb_state_serialize_mods(srv->xkb_state,
+	    XKB_STATE_MODS_DEPRESSED);
+	ev.u.modifiers.latched = xkb_state_serialize_mods(srv->xkb_state,
+	    XKB_STATE_MODS_LATCHED);
+	ev.u.modifiers.locked = xkb_state_serialize_mods(srv->xkb_state,
+	    XKB_STATE_MODS_LOCKED);
+	ev.u.modifiers.group = xkb_state_serialize_layout(srv->xkb_state,
+	    XKB_STATE_LAYOUT_EFFECTIVE);
+	ev.u.modifiers.modifiers = srv->modifiers;
+	client_send(srv, c, &ev, -1);
+}
+
+static void
+send_keys_held(struct ws_server *srv, struct ws_client *c, uint32_t window)
+{
+	ws_event_t ev;
+	unsigned i;
+
+	event_init(srv, &ev, WS_EVENT_KEYS_HELD,
+	    offsetof(ws_event_keys_held_t, keycodes) +
+	    srv->nkeys_held * sizeof(uint32_t), window);
+	ev.u.keys_held.count = srv->nkeys_held;
+	for (i = 0; i < srv->nkeys_held; i++)
+		ev.u.keys_held.keycodes[i] = srv->keys_held[i];
+	client_send(srv, c, &ev, -1);
+}
+
+static void
+keys_held_update(struct ws_server *srv, xkb_keycode_t kc, bool pressed)
+{
+	unsigned i;
+
+	for (i = 0; i < srv->nkeys_held; i++)
+		if (srv->keys_held[i] == kc)
+			break;
+	if (pressed) {
+		if (i == srv->nkeys_held && i < WS_MAX_KEYS_HELD)
+			srv->keys_held[srv->nkeys_held++] = kc;
+	} else if (i < srv->nkeys_held) {
+		srv->nkeys_held--;
+		memmove(&srv->keys_held[i], &srv->keys_held[i + 1],
+		    (srv->nkeys_held - i) * sizeof(srv->keys_held[0]));
+	}
+}
+
+/* A WS_CONNECT_XKB client got its welcome. */
+void
+keyboard_client_ready(struct ws_server *srv, struct ws_client *c)
+{
+	struct ws_window *w;
+
+	send_keymap(srv, c);
+	if (srv->kbd_focus == c && srv->xkb_state != NULL) {
+		(void)key_target(srv, &w);
+		send_keys_held(srv, c, w != NULL ? w->id : 0);
+		send_modifiers(srv, c, w != NULL ? w->id : 0);
+	}
+}
+
+/*
+ * The connection that gets key events may have changed (activation, key
+ * window, a client gone). A new WS_CONNECT_XKB one hears which keys are
+ * held and the modifier state, so nothing sticks.
+ */
+void
+keyboard_focus_update(struct ws_server *srv)
+{
+	struct ws_client *to;
+	struct ws_window *w;
+
+	to = key_target(srv, &w);
+	if (to != NULL && to->dead)
+		to = NULL;
+	if (to == srv->kbd_focus)
+		return;
+	srv->kbd_focus = to;
+	if (to == NULL || (to->flags & WS_CONNECT_XKB) == 0 ||
+	    srv->xkb_state == NULL)
+		return;
+	send_keys_held(srv, to, w != NULL ? w->id : 0);
+	send_modifiers(srv, to, w != NULL ? w->id : 0);
 }
 
 static void
@@ -201,6 +370,9 @@ void
 keyboard_key(struct ws_server *srv, uint32_t code, bool pressed)
 {
 	xkb_keycode_t kc = code + XKB_OFFSET;
+	enum xkb_state_component changed;
+	struct ws_client *c;
+	struct ws_window *w;
 	xkb_keysym_t sym;
 	uint32_t old_mods;
 	bool consumed;
@@ -213,11 +385,16 @@ keyboard_key(struct ws_server *srv, uint32_t code, bool pressed)
 		deliver_key(srv, code, pressed, false, sym);
 
 	old_mods = srv->modifiers;
-	xkb_state_update_key(srv->xkb_state, kc,
+	changed = xkb_state_update_key(srv->xkb_state, kc,
 	    pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
+	keys_held_update(srv, kc, pressed);
 	srv->modifiers = current_modifiers(srv);
 	if (srv->modifiers != old_mods)
 		send_flags(srv);
+	if ((changed & (XKB_STATE_MODS_DEPRESSED | XKB_STATE_MODS_LATCHED |
+	    XKB_STATE_MODS_LOCKED | XKB_STATE_LAYOUT_EFFECTIVE)) != 0 &&
+	    (c = key_target(srv, &w)) != NULL && (c->flags & WS_CONNECT_XKB))
+		send_modifiers(srv, c, w != NULL ? w->id : 0);
 
 	if (pressed) {
 		repeat_stop(srv);
