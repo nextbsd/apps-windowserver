@@ -73,7 +73,9 @@ enum {
 	WS_MSG_BUFFER_DESTROY,
 	WS_MSG_SET_CURSOR,
 	WS_MSG_CURSOR_VISIBLE,
-	WS_MSG_ACTIVATE,
+	WS_MSG_ACTIVATE,		/* ws_req_int_t: WS_ACTIVATE_* (servers
+					   with WS_SERVER_ACTIVATE_RAISE),
+					   see "Activation" */
 	WS_MSG_DEACTIVATE,
 	WS_MSG_SNAPSHOT,		/* sync; image follows on the socket */
 	WS_MSG_LIST_WINDOWS,		/* answers on the socket */
@@ -561,6 +563,20 @@ typedef struct ws_req_cursor {
  * (`wsctl screen size WxH`), for tests; a DRM server has a single mode
  * for now, so it sends the event once mode changes come (hotplug,
  * Displays).
+ */
+
+/*
+ * Activation. WS_MSG_ACTIVATE (ws_req_int_t) makes the sender's app the
+ * active app; WS_MSG_DEACTIVATE gives it up. On its own, activating
+ * moves no window: an app that activates itself orders its own windows
+ * as it likes. That leaves out the windows of connections that joined
+ * the app (an X server's, for XLibre.app), which the app can't order.
+ * With WS_ACTIVATE_RAISE in `value` (servers with
+ * WS_SERVER_ACTIVATE_RAISE) the server first brings every window of
+ * the app on normal and higher levels, the joined connections'
+ * included, to the front of its level, keeping their order, as a Dock
+ * activation does; their owners hear WS_EVENT_WINDOW_ORDERED. Older
+ * servers ignore `value` and just activate.
  */
 
 /*

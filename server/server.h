@@ -42,7 +42,7 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_POINTER_GRAB | WS_SERVER_POINTER_WARP | \
 				 WS_SERVER_WINDOW_CURSOR | WS_SERVER_INPUT_REGION | \
 				 WS_SERVER_COMMIT_FRAME | WS_SERVER_WINDOW_IDS | \
-				 WS_SERVER_MENU_BAR)
+				 WS_SERVER_MENU_BAR | WS_SERVER_ACTIVATE_RAISE)
 
 /* The standard cursors with a built-in image (cursor.c): kinds 0 to
    WS_CURSOR_NOT_ALLOWED. */
@@ -651,6 +651,7 @@ void	dock_show_minimized(struct ws_server *srv, struct ws_client *c,
 	    bool on);
 int	dock_set_edge(struct ws_server *srv, struct ws_client *c,
 	    uint32_t edge, uint32_t thickness);
+void	raise_app(struct ws_server *srv, struct ws_client *a);
 void	dock_activate(struct ws_server *srv, struct ws_client *c,
 	    uint32_t window, uint32_t app);
 void	dock_restore(struct ws_server *srv, struct ws_client *c,

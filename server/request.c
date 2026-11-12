@@ -729,6 +729,9 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 	}
 	case WS_MSG_ACTIVATE:
 		/* TODO: focus-stealing policy (only on user action). */
+		if ((value & WS_ACTIVATE_RAISE) && !c->dead &&
+		    (c->flags & WS_CONNECT_TOOL) == 0)
+			raise_app(srv, c->app);
 		app_activate(srv, c->app, NULL);
 		break;
 	case WS_MSG_DEACTIVATE:
