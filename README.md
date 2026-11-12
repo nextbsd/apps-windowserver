@@ -40,7 +40,7 @@ libs-base and libs-gui are unmodified. The `nextbsd` backend installs beside the
 | Client library | `/usr/lib/libWindowServerClient.so.1` and `.a` |
 | Headers | `/usr/include/WindowServer/` |
 | pkgconf file | `/usr/libdata/pkgconfig/WindowServerClient.pc` |
-| Test tools | `/usr/libexec/WindowServer/` (`wstest`, `wspointer`, `wstiling`, `wsctl`, `ws-session`) |
+| Test tools | `/usr/libexec/WindowServer/` (`wstest`, `wspointer`, `wstiling`, `wsdrag`, `wsctl`, `ws-session`) |
 | Client socket | `/var/run/WindowServer/ws.sock` |
 | Account | `_windowserver` (uid 88) |
 
@@ -68,6 +68,7 @@ What works, tested headless:
 - The window overview, Exposé and App Exposé, opened by a Start tap, Control+Up/Down, the Mission Control key or a three-finger swipe (see [The overview](#the-overview)).
 - Settings that change while the server runs, per console user: keyboard layouts (a list, switched by a request or a shortcut), key repeat, pointer and touchpad settings (see [Settings](#settings)).
 - Window tiling, switched on and off live, with the dwindle and master-and-stack layouts, gaps, an active-window border, floating windows, keys and the pointer (see [Window tiling](#window-tiling)).
+- Drag and drop between apps, mediated by the server, with the image above every window and the Dock and the cursor showing the operation (see [Drag and drop](#drag-and-drop)).
 
 Written but only compiled:
 
@@ -118,6 +119,8 @@ build/wsctl screen size 1024x600  # change the headless screen's size
 `tests/pointer-test.sh` (also run by `gmake check`) runs `wspointer`, two apps that use what X servers need from WindowServer, and checks windows created without a round trip each, a window's own cursor showing the moment the pointer enters it, input regions (clicks passing through part of a window to the desktop or the window below), pointer grabs (everything to the grabbing app with window 0 outside its windows, `pointer-outside` on an outside press, nothing activated, another app refused; the grab ended by the overview and by another app's activation; popup grabs that end on the first outside press), pointer tracking only while the app is active, warps (only over the app's own window) and queries (only for the active app), and a resize carried in its commit.
 
 `tests/tiling-test.sh` (also run by `gmake check`) runs `wstiling`, two apps whose windows redraw at whatever size they're given, and checks window tiling: stacking by default with the tiling keys reaching the app, tiling switched on live, the dwindle layout's tiles and gaps, the windows' new frames and redraws, a panel and a `WS_WINDOW_NO_TILE` window floating above the tiles, the border, focus, swap, grow and shrink with the keys and `wsctl tiling`, floating a window and tiling it again (with its old frame back meanwhile), a panel refused, dragging a split, dragging a window onto another tile and back onto its own, the master layout, refused settings, a Dock on the right and at the bottom, no gaps, windows hidden, shown, created, minimized and closed, a window whose minimum size doesn't fit, one that insists on a larger frame, one that sizes itself in steps, one that only moves (as an X server's do), a screen change, and tiling switched off with every frame given back.
+
+`tests/drag-test.sh` (also run by `gmake check`) runs `wsdrag`, two apps with six windows, and checks drag and drop: a drag from Alpha onto Beta's window that takes a copy and one inside Alpha that takes a move, the operations each side offers and the modifiers narrowing them, the drag image following the pointer above the windows, the copy and link cursors, the drag state from `wsctl drag`, the release reaching the source before the end of the drag, a window that takes nothing and one that doesn't take drags (the image slides back), Escape cancelling, the overview staying shut during a drag, and who may start one.
 
 `kill -USR1` makes the server write a snapshot to `/tmp/WindowServer-snapshot.ppm`.
 
@@ -331,6 +334,17 @@ wsctl tiling toggle                  # float or tile the key window (float, tile
 ```
 
 GNUstep apps tell WindowServer which windows are panels or can't be resized, and their minimum and maximum sizes, from libs-back's NextBSD backend, and redraw at the frames they're given (`WS_EVENT_WINDOW_FRAME`). A tile's frame comes with `WS_FRAME_TILED`, and the frame given back when tiling ends without it, so the backend keeps a window's saved frame (GNUstep's frame autosave) from before tiling: an app opened again in stacking comes back at its own size, not its tile's. An X server's windows (XLibre.app's Xnextbsd) tile at their own size until it resizes them when WindowServer gives them a frame.
+
+### Drag and drop
+
+WindowServer carries drags between apps the way Darwin's window server does ("Drag and drop" in `WSProtocol.h`). The source puts the data on a named pasteboard (GNUstep's `NSDragPboard` in gpbs) and hands the drag to the server with `WS_MSG_DRAG_BEGIN`: the image, the operations it allows onto its own windows and onto other apps', and the types on the pasteboard. The server then:
+
+- moves the image with the pointer, above every window, the overview and the Dock, at 80% opacity;
+- finds the window under the pointer that takes drags (`WS_WINDOW_ACCEPTS_DRAGS`, set by the GNUstep backend on windows with views registered for dragged types) and sends its owner `WS_EVENT_DRAG` (enter, update, exit, drop) with the operations on offer, narrowed by Control (link), Option (copy) or Command (generic);
+- shows the copy or link cursor for the operation the window answers with (`WS_MSG_DRAG_STATUS`), the arrow otherwise;
+- on release over a window that takes the drag, sends it the drop and the source `WS_EVENT_DRAG_END` with the operation; anywhere else the image slides back to where it started and the source hears the drag ended with nothing. Escape cancels.
+
+No app gets pointer motion while a drag lasts, and the overview doesn't open. Drags inside one app go through the server too. `wsctl drag` shows the drag under way. X11 windows don't take drags yet: that needs an XDND bridge in the X server.
 
 ### Settings
 

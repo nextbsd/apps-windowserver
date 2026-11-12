@@ -456,6 +456,9 @@ overview_open(struct ws_server *srv, int mode)
 	struct ws_window *w;
 	bool was_closed = ov->state == WS_OVERVIEW_STATE_CLOSED;
 
+	/* Not while a drag lasts (drag.c). */
+	if (drag_active(srv))
+		return;
 	if (mode == WS_OVERVIEW_APP && app == NULL) {
 		/* no active app: the app of the frontmost window */
 		for (w = srv->stack_top; w != NULL; w = w->below)
@@ -1057,7 +1060,8 @@ overview_report(struct ws_server *srv, struct ws_client *to)
 	ev.u.overview.state = (uint32_t)ov->state;
 	ev.u.overview.mode = (uint32_t)ov->mode;
 	ev.u.overview.count = ov->nitems;
-	ev.u.overview.selected = ov->selected >= 0 ?
+	ev.u.overview.selected = ov->selected >= 0 &&
+	    (unsigned)ov->selected < ov->nitems ?
 	    ov->items[ov->selected].window : 0;
 	ev.u.overview.app_id = ov->app_id;
 	client_send(srv, to, &ev, -1);

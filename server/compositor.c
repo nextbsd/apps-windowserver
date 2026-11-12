@@ -175,6 +175,9 @@ composite_region(struct ws_server *srv, pixman_region32_t *region)
 		}
 	}
 
+	/* a drag's image, above everything but the cursor (drag.c) */
+	drag_composite(srv);
+
 	if (!srv->cursor_hw && srv->cursor_visible && srv->cursor_image != NULL)
 		pixman_image_composite32(PIXMAN_OP_OVER, srv->cursor_image,
 		    NULL, srv->shadow, 0, 0, 0, 0,

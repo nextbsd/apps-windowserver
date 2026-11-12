@@ -673,6 +673,7 @@ client_destroy(struct ws_server *srv, struct ws_client *c)
 	if (c->dead)
 		return;
 	pointer_ungrab(srv, c, false);
+	drag_client_gone(srv, c);
 	c->dead = true;
 	if (srv->kbd_focus == c)
 		srv->kbd_focus = NULL;

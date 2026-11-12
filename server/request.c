@@ -320,7 +320,12 @@ min_size(mach_msg_id_t id)
 	case WS_MSG_POINTER_GRAB:
 	case WS_MSG_POINTER_TRACK:
 	case WS_MSG_RESERVE_WINDOW_IDS:
+	case WS_MSG_DRAG_CANCEL:
 		return sizeof(ws_req_int_t);
+	case WS_MSG_DRAG_BEGIN:
+		return offsetof(ws_req_drag_begin_t, types);
+	case WS_MSG_DRAG_STATUS:
+		return sizeof(ws_req_drag_status_t);
 	case WS_MSG_WARP_POINTER:
 		return sizeof(ws_req_point_t);
 	case WS_MSG_WINDOW_SET_CURSOR:
@@ -864,6 +869,25 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		break;
 	case WS_MSG_LIST_INPUT_DEVICES:
 		input_list(srv, c);
+		break;
+	case WS_MSG_DRAG_BEGIN:
+		drag_begin(srv, c, item);
+		return;
+	case WS_MSG_DRAG_STATUS:
+		drag_status(srv, c, (ws_req_drag_status_t *)(void *)h);
+		break;
+	case WS_MSG_DRAG_CANCEL:
+		drag_cancel_request(srv, c, (uint32_t)value);
+		break;
+	case WS_MSG_DRAG_QUERY:
+		/* tools, for the console user, as the window list */
+		if ((c->flags & WS_CONNECT_TOOL) == 0 ||
+		    !dock_may_list(srv, item->sender_euid)) {
+			client_error(srv, c, (uint32_t)id, 0, EPERM,
+			    "drag query not allowed");
+			break;
+		}
+		drag_query(srv, c);
 		break;
 	case WS_MSG_INJECT:
 		if (!may_inject(srv, item)) {

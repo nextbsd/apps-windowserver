@@ -72,7 +72,8 @@ usage(void)
 	    "       wsctl tiling focus|swap left|right|up|down\n"
 	    "       wsctl tiling grow|shrink (the focused tile)\n"
 	    "       wsctl tiling float|tile|toggle [WINDOW] (the key window\n"
-	    "                                if none is given)\n");
+	    "                                if none is given)\n"
+	    "       wsctl drag              (the drag and drop under way)\n");
 	exit(2);
 }
 
@@ -1065,6 +1066,21 @@ main(int argc, char **argv)
 			ws_disconnect(c);
 			return 1;
 		}
+	} else if (strcmp(cmd, "drag") == 0 && argc == 2) {
+		ws_event_drag_state_t st;
+
+		r = ws_drag_query(c, &st);
+		if (r == 0 && st.session == 0)
+			printf("drag none sessions=%u\n", st.sessions);
+		else if (r == 0)
+			printf("drag session=%u source=%u target=%u operation=0x%x "
+			    "operations=0x%x image=%d,%d,%dx%d%s%s sessions=%u "
+			    "types=%s\n", st.session, st.source_client, st.target,
+			    st.operation, st.operations, st.image.x, st.image.y,
+			    st.image.width, st.image.height,
+			    (st.flags & WS_DRAG_STATE_RELEASED) ? " released" : "",
+			    (st.flags & WS_DRAG_STATE_SLIDING) ? " sliding" : "",
+			    st.sessions, st.types);
 	} else if (strcmp(cmd, "devices") == 0 && argc == 2) {
 		r = ws_list_input_devices(c, print_device, NULL);
 	} else {

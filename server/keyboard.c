@@ -879,6 +879,9 @@ server_key(struct ws_server *srv, uint32_t code, bool pressed, xkb_keysym_t sym)
 	}
 	if (!pressed)
 		return false;
+	/* Escape cancels a drag (drag.c). */
+	if (drag_key(srv, sym))
+		return true;
 	/* The window overview: the Mission Control key, Control+Up (every
 	 * window) and Control+Down (App Exposé), as on macOS. */
 	if (code == KEY_SCALE || sym == XKB_KEY_XF86LaunchA) {
@@ -982,8 +985,10 @@ keyboard_key(struct ws_server *srv, uint32_t code, bool pressed)
 	    pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
 	keys_held_update(srv, kc, pressed);
 	srv->modifiers = current_modifiers(srv);
-	if (srv->modifiers != old_mods)
+	if (srv->modifiers != old_mods) {
 		send_flags(srv);
+		drag_modifiers_changed(srv);
+	}
 	if ((changed & (XKB_STATE_MODS_DEPRESSED | XKB_STATE_MODS_LATCHED |
 	    XKB_STATE_MODS_LOCKED | XKB_STATE_LAYOUT_EFFECTIVE)) != 0 &&
 	    (c = key_target(srv, &w)) != NULL && (c->flags & WS_CONNECT_XKB))
