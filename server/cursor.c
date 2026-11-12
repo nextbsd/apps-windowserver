@@ -105,7 +105,9 @@ void
 cursor_update(struct ws_server *srv)
 {
 	struct ws_window *w = srv->grab != NULL ? srv->grab : srv->hover;
-	struct ws_client *c = w != NULL ? w->owner : NULL;
+	/* Tiles are the server's: they get the default arrow. */
+	struct ws_client *c = w != NULL && w->tile_for == NULL ? w->owner :
+	    NULL;
 	pixman_image_t *img = srv->cursor_default;
 	int hx = srv->cursor_default_hot_x, hy = srv->cursor_default_hot_y;
 	bool visible = true, hw = false;

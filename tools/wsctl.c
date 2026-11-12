@@ -47,9 +47,10 @@ static void
 print_window(const ws_event_window_info_t *w, void *ctx)
 {
 	(void)ctx;
-	printf("%-3u %-8s pid=%-6d level=%-5d frame=%d,%d,%dx%d%s%s \"%s\"\n",
+	printf("%-3u %-8s pid=%-6d level=%-5d frame=%d,%d,%dx%d%s%s%s \"%s\"\n",
 	    w->stack_index, w->app_name, w->pid, w->level, w->frame.x,
 	    w->frame.y, w->frame.width, w->frame.height,
+	    (w->flags & WS_WINDOW_INFO_MINIMIZED) ? " minimized" : "",
 	    (w->flags & WS_WINDOW_INFO_ACTIVE) ? " active" : "",
 	    (w->flags & WS_WINDOW_INFO_KEY) ? " key" : "", w->title);
 }

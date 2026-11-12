@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * The window model: the visible stack (strictly by level, then by
- * order within a level), key windows and the single active app.
+ * order within a level), key windows and the single active app, and
+ * the tiles that stand in for minimized windows (drawn by tile.c).
  */
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -246,6 +248,8 @@ app_deactivate(struct ws_server *srv, struct ws_client *c)
 	if (srv->active != c)
 		return;
 	for (w = srv->stack_top; w != NULL; w = w->below) {
+		if (w->tile_for != NULL)
+			continue;	/* a minimized window's tile */
 		if (w->owner->app != c && !w->owner->dead &&
 		    (w->owner->flags & WS_CONNECT_CONTROL) == 0 &&
 		    w->level >= WS_LEVEL_NORMAL && w->level <= WS_LEVEL_CLIENT_MAX) {
@@ -305,6 +309,8 @@ window_make_key(struct ws_server *srv, struct ws_window *w)
 }
 
 /* ---- create / destroy ---- */
+
+static void tile_remove(struct ws_server *srv, struct ws_window *w);
 
 static int32_t
 clamp_level(int32_t level)
@@ -367,6 +373,7 @@ window_destroy(struct ws_server *srv, struct ws_window *w)
 	struct ws_window **pp;
 	struct ws_client *c = w->owner;
 
+	tile_remove(srv, w);
 	if (w->visible)
 		window_order(srv, w, WS_ORDER_OUT, NULL);
 	if (c->app->key_window == w)
@@ -443,6 +450,8 @@ place_icon(struct ws_server *srv, struct ws_window *w)
 	if (i == cols * rows)
 		return;		/* the screen is full of icons: leave it */
 	w->frame = r;
+	if (w->tile_for != NULL)
+		return;		/* the server's own tile */
 	event_init(srv, &ev, WS_EVENT_WINDOW_FRAME, sizeof(ev.u.frame), w->id);
 	ev.u.frame.frame = r;
 	client_send(srv, w->owner, &ev, -1);
@@ -454,6 +463,9 @@ window_order(struct ws_server *srv, struct ws_window *w, int op,
 {
 	struct ws_client *c = w->owner;
 
+	/* Ordering a minimized window in restores it; ordering it out
+	 * (its app is hiding) just takes the tile away. */
+	tile_remove(srv, w);
 	if (op == WS_ORDER_OUT) {
 		if (!w->visible)
 			return;
@@ -493,12 +505,12 @@ send_ordered(struct ws_server *srv, struct ws_window *w)
 	ev.u.ordered.op = w->visible ? WS_ORDER_ABOVE : WS_ORDER_OUT;
 	ev.u.ordered.level = w->level;
 	if (w->visible) {
-		for (o = w->below; o != NULL && o->owner != w->owner;
-		    o = o->below)
+		for (o = w->below; o != NULL && (o->owner != w->owner ||
+		    o->tile_for != NULL); o = o->below)
 			;
 		ev.u.ordered.below = o != NULL ? o->id : 0;
-		for (o = w->above; o != NULL && o->owner != w->owner;
-		    o = o->above)
+		for (o = w->above; o != NULL && (o->owner != w->owner ||
+		    o->tile_for != NULL); o = o->above)
 			;
 		ev.u.ordered.above = o != NULL ? o->id : 0;
 	}
@@ -554,6 +566,10 @@ window_set_frame(struct ws_server *srv, struct ws_window *w,
 	if (w->visible) {
 		damage_rect(srv, &w->frame);
 		pointer_recheck(srv);
+	}
+	if (w->tile != NULL) {
+		w->tile->tile_dirty = true;
+		damage_rect(srv, &w->tile->frame);
 	}
 }
 
@@ -618,6 +634,11 @@ window_commit(struct ws_server *srv, struct ws_window *w, uint32_t flags)
 			pixman_region32_fini(&r);
 		}
 	}
+	if (w->tile != NULL) {
+		/* The tile shows the new frame. */
+		w->tile->tile_dirty = true;
+		damage_rect(srv, &w->tile->frame);
+	}
 	pixman_region32_clear(&w->pending_damage);
 	if (flags & WS_COMMIT_FRAME_DONE)
 		w->frame_requested = true;
@@ -633,25 +654,125 @@ list_windows(struct ws_server *srv, struct ws_client *to)
 	uint32_t idx = 0;
 
 	for (w = srv->stack_bottom; w != NULL; w = w->above, idx++) {
+		/* A tile is listed as the minimized window it stands for. */
+		struct ws_window *lw = w->tile_for != NULL ? w->tile_for : w;
+
 		event_init(srv, &ev, WS_EVENT_WINDOW_INFO,
-		    sizeof(ev.u.window_info), w->id);
-		ev.u.window_info.client_id = w->owner->id;
-		ev.u.window_info.pid = w->owner->pid;
-		ev.u.window_info.level = w->level;
-		ev.u.window_info.flags = WS_WINDOW_INFO_VISIBLE;
-		if (srv->active == w->owner->app) {
+		    sizeof(ev.u.window_info), lw->id);
+		ev.u.window_info.client_id = lw->owner->id;
+		ev.u.window_info.pid = lw->owner->pid;
+		ev.u.window_info.level = lw->level;
+		ev.u.window_info.flags = w->tile_for != NULL ?
+		    WS_WINDOW_INFO_MINIMIZED : WS_WINDOW_INFO_VISIBLE;
+		if (srv->active == lw->owner->app) {
 			ev.u.window_info.flags |= WS_WINDOW_INFO_ACTIVE;
-			if (w->owner->app->key_window == w)
+			if (lw->owner->app->key_window == lw)
 				ev.u.window_info.flags |= WS_WINDOW_INFO_KEY;
 		}
-		ev.u.window_info.frame = w->frame;
+		ev.u.window_info.frame = lw->frame;
 		ev.u.window_info.stack_index = idx;
-		strlcpy(ev.u.window_info.app_name, w->owner->app_name,
+		strlcpy(ev.u.window_info.app_name, lw->owner->app_name,
 		    sizeof(ev.u.window_info.app_name));
-		strlcpy(ev.u.window_info.title, w->title,
+		strlcpy(ev.u.window_info.title, lw->title,
 		    sizeof(ev.u.window_info.title));
 		client_send(srv, to, &ev, -1);
 	}
 	event_init(srv, &ev, WS_EVENT_LIST_END, 0, 0);
 	client_send(srv, to, &ev, -1);
+}
+
+/* ---- minimizing ---- */
+
+/*
+ * Minimize w: order it out and put a tile in its place, at the icon
+ * level, in the first free place along the bottom of the screen (the
+ * same placement as app icons). The tile is the server's own: it is in
+ * the stack but not in srv->windows, so clients can't name it, and
+ * tile.c draws it from w's buffer.
+ */
+void
+window_minimize(struct ws_server *srv, struct ws_window *w)
+{
+	struct ws_window *t;
+	int32_t size = srv->cfg.minimize_tile_size;
+
+	if (w->tile != NULL)
+		return;
+	t = calloc(1, sizeof(*t));
+	if (t == NULL) {
+		client_error(srv, w->owner, WS_MSG_WINDOW_MINIMIZE, w->id,
+		    ENOMEM, "no memory for a tile");
+		return;
+	}
+	t->owner = w->owner;
+	t->tile_for = w;
+	t->level = WS_LEVEL_DOCK;
+	t->flags = WS_WINDOW_ICON | WS_WINDOW_NO_KEY | WS_WINDOW_NO_ACTIVATE;
+	t->frame.x = 0;
+	t->frame.y = (int32_t)srv->height - size;
+	t->frame.width = size;
+	t->frame.height = size;
+	pixman_region32_init(&t->pending_damage);
+	if (w->visible)
+		window_order(srv, w, WS_ORDER_OUT, NULL);
+	w->tile = t;
+	place_icon(srv, t);
+	t->visible = true;
+	t->tile_dirty = true;
+	stack_place(srv, t, WS_ORDER_ABOVE, NULL);
+	damage_rect(srv, &t->frame);
+	pointer_recheck(srv);
+	ws_debug("window %u minimized, tile at %d,%d", w->id, t->frame.x,
+	    t->frame.y);
+}
+
+/* Take w's tile away, if it has one (restored, hidden or destroyed). */
+static void
+tile_remove(struct ws_server *srv, struct ws_window *w)
+{
+	struct ws_window *t = w->tile;
+
+	if (t == NULL)
+		return;
+	w->tile = NULL;
+	stack_unlink(srv, t);
+	t->visible = false;
+	damage_rect(srv, &t->frame);
+	if (srv->tile_selected == t)
+		srv->tile_selected = NULL;
+	pointer_window_gone(srv, t);
+	ws_debug("window %u: tile removed", w->id);
+	tile_free(t);
+}
+
+/* The user dragged tile t to x, y. */
+void
+window_tile_move(struct ws_server *srv, struct ws_window *t, int32_t x,
+    int32_t y)
+{
+	if (x > (int32_t)srv->width - t->frame.width)
+		x = (int32_t)srv->width - t->frame.width;
+	if (y > (int32_t)srv->height - t->frame.height)
+		y = (int32_t)srv->height - t->frame.height;
+	if (x < 0)
+		x = 0;
+	if (y < 0)
+		y = 0;
+	if (x == t->frame.x && y == t->frame.y)
+		return;
+	damage_rect(srv, &t->frame);
+	t->frame.x = x;
+	t->frame.y = y;
+	damage_rect(srv, &t->frame);
+}
+
+/* Bring tile t to the top of its level. */
+void
+window_tile_raise(struct ws_server *srv, struct ws_window *t)
+{
+	if (t->above == NULL || t->above->level > t->level)
+		return;
+	stack_unlink(srv, t);
+	stack_place(srv, t, WS_ORDER_ABOVE, NULL);
+	damage_rect(srv, &t->frame);
 }

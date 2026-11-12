@@ -924,6 +924,48 @@ ws_window_commit(ws_connection_t *c, uint32_t window, uint32_t flags)
 	return send_int(c, WS_MSG_WINDOW_COMMIT, window, (int32_t)flags);
 }
 
+/* ---- minimizing ---- */
+
+WS_API int
+ws_window_minimize(ws_connection_t *c, uint32_t window)
+{
+	ws_req_header_t h;
+
+	req_init(c, &h, WS_MSG_WINDOW_MINIMIZE, sizeof(h), window);
+	return send_oneway(c, &h);
+}
+
+WS_API int
+ws_set_app_icon(ws_connection_t *c, uint32_t width, uint32_t height,
+    const void *argb, uint32_t stride)
+{
+	ws_buffer_t *b;
+	uint32_t y;
+	int r, saved;
+
+	if (argb == NULL)
+		return send_int(c, WS_MSG_SET_APP_ICON, 0, 0);
+	if (width == 0 || height == 0 || width > WS_MAX_APP_ICON ||
+	    height > WS_MAX_APP_ICON || stride < width * 4) {
+		errno = EINVAL;
+		return -1;
+	}
+	/* The server copies the pixels when it gets the request, and the
+	 * buffer message goes first on the socket, so the buffer can go
+	 * right after. */
+	b = ws_buffer_create(c, width, height, 1);
+	if (b == NULL)
+		return -1;
+	for (y = 0; y < height; y++)
+		memcpy((char *)b->data + (size_t)y * b->stride,
+		    (const char *)argb + (size_t)y * stride, (size_t)width * 4);
+	r = send_int(c, WS_MSG_SET_APP_ICON, 0, (int32_t)b->id);
+	saved = errno;
+	ws_buffer_destroy(c, b);
+	errno = saved;
+	return r;
+}
+
 /* ---- cursor and activation ---- */
 
 WS_API int
@@ -1123,6 +1165,7 @@ ws_event_name(uint16_t type)
 		[WS_EVENT_MODIFIERS] = "modifiers",
 		[WS_EVENT_KEYS_HELD] = "keys-held",
 		[WS_EVENT_WINDOW_ORDERED] = "window-ordered",
+		[WS_EVENT_WINDOW_RESTORE] = "window-restore",
 	};
 
 	if (type < WS_EVENT_MAX && names[type] != NULL)

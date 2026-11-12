@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Pointer routing: hover, implicit grab while a button is held, click
- * activation and click counting.
+ * activation and click counting. Tiles of minimized windows are the
+ * server's own: they get no events, and tile.c handles their clicks.
  */
 
 #include <math.h>
@@ -20,7 +21,7 @@ send_pointer(struct ws_server *srv, struct ws_window *w, uint16_t type,
 {
 	ws_event_t ev;
 
-	if (w == NULL)
+	if (w == NULL || w->tile_for != NULL)
 		return;
 	event_init(srv, &ev, type, sizeof(ev.u.pointer), w->id);
 	ev.u.pointer.x = srv->ptr_x - w->frame.x;
@@ -80,6 +81,11 @@ pointer_motion(struct ws_server *srv, double x, double y)
 	srv->ptr_y = y;
 	cursor_moved(srv);
 	if (srv->grab != NULL) {
+		if (srv->grab->tile_for != NULL) {
+			if (srv->buttons & (1u << WS_BUTTON_LEFT))
+				tile_drag(srv, srv->grab);
+			return;
+		}
 		if (!srv->grab_suppressed)
 			send_pointer(srv, srv->grab, WS_EVENT_MOUSE_DRAGGED, 0, 0);
 		return;
@@ -134,7 +140,9 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 			w = window_at(srv, srv->ptr_x, srv->ptr_y);
 			srv->grab = w;
 			srv->grab_suppressed = false;
-			if (w != NULL) {
+			if (w == NULL || w->tile_for == NULL)
+				tile_select(srv, NULL);
+			if (w != NULL && w->tile_for == NULL) {
 				c = w->owner->app;
 				if (c != srv->active &&
 				    (w->flags & WS_WINDOW_NO_ACTIVATE) == 0 &&
@@ -154,6 +162,10 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 		}
 		srv->buttons |= mask;
 		count = click_count(srv, button);
+		if (srv->grab != NULL && srv->grab->tile_for != NULL) {
+			tile_press(srv, srv->grab, button, count);
+			return;
+		}
 		if (srv->grab != NULL && !srv->grab_suppressed)
 			send_pointer(srv, srv->grab, WS_EVENT_MOUSE_DOWN, button,
 			    count);
@@ -168,6 +180,7 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 	if (srv->buttons == 0) {
 		srv->grab = NULL;
 		srv->grab_suppressed = false;
+		srv->tile_dragging = false;
 		pointer_recheck(srv);
 	}
 }
@@ -181,7 +194,7 @@ pointer_scroll(struct ws_server *srv, double dx, double dy, int32_t v120_x,
 
 	w = srv->grab != NULL ? srv->grab : window_at(srv, srv->ptr_x,
 	    srv->ptr_y);
-	if (w == NULL)
+	if (w == NULL || w->tile_for != NULL)
 		return;
 	if (srv->cfg.natural_scrolling) {
 		dx = -dx;

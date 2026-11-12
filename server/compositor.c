@@ -93,6 +93,15 @@ composite_region(struct ws_server *srv, pixman_region32_t *region)
 		struct ws_buffer *b = w->buffer;
 		int bw, bh;
 
+		if (w->tile_for != NULL) {
+			/* a minimized window's tile (tile.c) */
+			if (w->tile_image != NULL)
+				pixman_image_composite32(PIXMAN_OP_OVER,
+				    w->tile_image, NULL, srv->shadow, 0, 0, 0,
+				    0, w->frame.x, w->frame.y, w->frame.width,
+				    w->frame.height);
+			continue;
+		}
 		if (b == NULL || w->frame.width <= 0 || w->frame.height <= 0)
 			continue;
 		bw = (int)(b->width / b->scale);
@@ -146,6 +155,7 @@ compositor_repaint(struct ws_server *srv)
 	pixman_region32_copy(&region, &srv->damage);
 	pixman_region32_clear(&srv->damage);
 
+	tiles_render(srv);
 	composite_region(srv, &region);
 	for (w = srv->windows; w != NULL; w = w->next)
 		if (w->frame_requested) {

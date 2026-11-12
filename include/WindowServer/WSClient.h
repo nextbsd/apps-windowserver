@@ -151,6 +151,20 @@ int		 ws_window_damage(ws_connection_t *conn, uint32_t window,
 int		 ws_window_commit(ws_connection_t *conn, uint32_t window,
     uint32_t flags);
 
+/*
+ * Minimizing, on servers with WS_SERVER_MINIMIZE (ws_server_flags()).
+ * ws_window_minimize() replaces the window with a live tile; the
+ * server sends WS_EVENT_WINDOW_RESTORE when the user double-clicks it,
+ * and ordering the window in (ws_window_order) restores it.
+ * ws_set_app_icon() gives the icon shown on the tiles: width x height
+ * premultiplied ARGB8888 pixels, rows `stride` bytes apart, at most
+ * WS_MAX_APP_ICON square. NULL removes it. Older servers ignore both,
+ * so check for WS_SERVER_MINIMIZE first.
+ */
+int		 ws_window_minimize(ws_connection_t *conn, uint32_t window);
+int		 ws_set_app_icon(ws_connection_t *conn, uint32_t width,
+    uint32_t height, const void *argb, uint32_t stride);
+
 /* Cursor: a standard kind, or WS_CURSOR_CUSTOM with a buffer. */
 int		 ws_set_cursor(ws_connection_t *conn, uint32_t kind,
     ws_buffer_t *image, int32_t hot_x, int32_t hot_y);

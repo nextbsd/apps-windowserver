@@ -684,6 +684,10 @@ client_destroy(struct ws_server *srv, struct ws_client *c)
 		app_deactivate(srv, c);
 	keyboard_focus_update(srv);
 
+	if (c->app_icon != NULL) {
+		pixman_image_unref(c->app_icon);
+		c->app_icon = NULL;
+	}
 	if (c->cursor_buffer != NULL) {
 		cursor_buffer_gone(srv, c->cursor_buffer);
 		buffer_unref(srv, c->cursor_buffer);

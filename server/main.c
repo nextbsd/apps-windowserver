@@ -275,6 +275,8 @@ main(int argc, char **argv)
 
 	if (compositor_init(srv) < 0)
 		goto out;
+	if (tile_init(srv) < 0)
+		goto out;
 	srv->display_active = true;
 	srv->ptr_x = srv->width / 2;
 	srv->ptr_y = srv->height / 2;
@@ -312,6 +314,7 @@ out:
 		clients_reap(srv);
 	}
 	cursor_fini(srv);
+	tile_fini(srv);
 	if (srv->output != NULL && srv->output->shutdown != NULL)
 		srv->output->shutdown(srv);
 	vt_close(srv);

@@ -18,6 +18,11 @@
  * modifier state and held keys. Alpha activates first, then Beta, so
  * Beta ends up active with W3 as its key window. tests/headless-test.sh
  * drives it with wsctl.
+ *
+ * Beta also gives the server a magenta app icon and acts like an app
+ * that minimizes: typing "m" minimizes its key window, "c" redraws W3
+ * in green (minimized or not), and on WS_EVENT_WINDOW_RESTORE it
+ * orders the window in again and makes it key.
  */
 
 #include <sys/mman.h>
@@ -54,6 +59,7 @@ static struct app apps[NAPPS] = {
 };
 static struct win wins[NWINS];
 static volatile sig_atomic_t quit;
+static uint32_t beta_key;	/* Beta's key window, for "m" */
 
 static const char *
 win_name(uint32_t id)
@@ -79,6 +85,37 @@ fill(ws_buffer_t *b, uint32_t argb, uint32_t border)
 		for (x = 0; x < w; x++)
 			px[y * stride + x] = (x < 2 || y < 2 || x >= w - 2 ||
 			    y >= h - 2) ? border : argb;
+}
+
+/* Beta, the app that minimizes (see the top of the file). */
+static void
+beta_act(const ws_event_t *ev)
+{
+	ws_connection_t *c = apps[1].conn;
+	ws_rect_t r = { 0, 0, 500, 400 };
+	ws_buffer_t *b;
+
+	if (ev->hdr.type == WS_EVENT_WINDOW_RESTORE) {
+		ws_window_order(c, ev->hdr.window, WS_ORDER_ABOVE, 0);
+		ws_window_make_key(c, ev->hdr.window);
+		printf("restored %s\n", win_name(ev->hdr.window));
+		return;
+	}
+	if (ev->hdr.type != WS_EVENT_KEY_DOWN)
+		return;
+	if (strcmp(ev->u.key.text, "m") == 0 && beta_key != 0) {
+		printf("minimizing %s\n", win_name(beta_key));
+		ws_window_minimize(c, beta_key);
+	} else if (strcmp(ev->u.key.text, "c") == 0) {
+		b = ws_buffer_create(c, 500, 400, 1);
+		if (b == NULL)
+			return;
+		fill(b, 0xff20a050, 0xff105028);
+		ws_window_attach(c, wins[2].id, b);
+		ws_window_damage(c, wins[2].id, &r, 1);
+		ws_window_commit(c, wins[2].id, 0);
+		printf("redrew W3 green\n");
+	}
 }
 
 /* Check a WS_EVENT_KEYMAP's memfd, then close it. */
@@ -176,6 +213,14 @@ print_event(ws_connection_t *conn, const ws_event_t *ev, void *ctx)
 		    "above", win_name(ev->u.ordered.below),
 		    win_name(ev->u.ordered.above), ev->u.ordered.level);
 		break;
+	case WS_EVENT_KEY_WINDOW_GAINED:
+		if (app == &apps[1])
+			beta_key = ev->hdr.window;
+		break;
+	case WS_EVENT_KEY_WINDOW_LOST:
+		if (app == &apps[1] && beta_key == ev->hdr.window)
+			beta_key = 0;
+		break;
 	case WS_EVENT_KEYS_HELD:
 		off = (size_t)snprintf(detail, sizeof(detail), "count=%u keys=",
 		    ev->u.keys_held.count);
@@ -191,6 +236,8 @@ print_event(ws_connection_t *conn, const ws_event_t *ev, void *ctx)
 	    app->name, ws_event_name(ev->hdr.type), win_name(ev->hdr.window),
 	    detail);
 	fflush(stdout);
+	if (app == &apps[1])
+		beta_act(ev);
 }
 
 static int
@@ -321,6 +368,15 @@ main(int argc, char **argv)
 		ws_window_attach(apps[1].conn, wins[2].id, b2);
 		ws_window_damage(apps[1].conn, wins[2].id, &r, 1);
 		ws_window_commit(apps[1].conn, wins[2].id, WS_COMMIT_FRAME_DONE);
+	}
+	/* Beta's app icon, for the tiles of its minimized windows. */
+	if (ws_server_flags(apps[1].conn) & WS_SERVER_MINIMIZE) {
+		static uint32_t icon[16 * 16];
+
+		for (i = 0; i < 16 * 16; i++)
+			icon[i] = 0xffff00ff;
+		if (ws_set_app_icon(apps[1].conn, 16, 16, icon, 16 * 4) < 0)
+			perror("wstest: app icon");
 	}
 	for (i = 0; i < NAPPS; i++)
 		ws_sync(apps[i].conn);

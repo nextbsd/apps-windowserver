@@ -32,7 +32,8 @@ uint64_t ws_now_usec(void);
 
 /* Optional features this server has (WS_SERVER_* in hello and welcome). */
 #define WS_SERVER_FEATURES	(WS_SERVER_JOIN | WS_SERVER_XKB | \
-				 WS_SERVER_XRGB | WS_SERVER_ORDERED)
+				 WS_SERVER_XRGB | WS_SERVER_ORDERED | \
+				 WS_SERVER_MINIMIZE)
 
 /* ---- configuration (config.c) ---- */
 
@@ -58,6 +59,8 @@ struct ws_config {
 	char	user[32];		/* account to drop to */
 	char	group[32];
 	char	snapshot_path[256];	/* SIGUSR1 writes a PPM here */
+	int	minimize_tile_size;	/* minimized-window tiles, pixels */
+	char	minimize_tile_image[256]; /* "" = plain dark rounded tile */
 };
 
 void	config_defaults(struct ws_config *cfg);
@@ -99,6 +102,13 @@ struct ws_window {
 	pixman_region32_t pending_damage; /* window-local */
 	bool		frame_requested;	/* commit asked for FRAME_DONE */
 	bool		frame_inflight;		/* composited, waiting for present */
+	/* minimizing (tile.c) */
+	struct ws_window *tile;		/* minimized: its tile in the stack */
+	struct ws_window *tile_for;	/* a tile: the window it shows. Tiles
+					   are only in the stack, never in
+					   srv->windows, and get no events. */
+	pixman_image_t	*tile_image;	/* a tile: what it shows */
+	bool		tile_dirty;	/* a tile: redraw tile_image */
 	struct ws_window *above;	/* visible stack, bottom -> top */
 	struct ws_window *below;
 	struct ws_window *next;		/* all windows */
@@ -126,6 +136,7 @@ struct ws_client {
 	 */
 	struct ws_client *app;
 	char		app_name[WS_MAX_APP_NAME];
+	pixman_image_t	*app_icon;	/* WS_MSG_SET_APP_ICON, or NULL */
 	int		sock;		/* -1 until WS_SOCK_AUTH */
 	uint64_t	hello_usec;
 	bool		dead;
@@ -262,6 +273,14 @@ struct ws_server {
 	double		last_click_x;
 	double		last_click_y;
 	uint32_t	click_count;
+	/* minimized-window tiles (tile.c) */
+	struct ws_window *tile_selected;
+	bool		tile_dragging;
+	double		tile_grab_x;	/* pointer offset in the grabbed tile */
+	double		tile_grab_y;
+	pixman_image_t	*tile_background; /* MinimizeTileImage, or NULL */
+	pixman_image_t	*tile_mask_outer; /* rounded tile shapes (a8) */
+	pixman_image_t	*tile_mask_inner;
 
 	/* cursor */
 	pixman_image_t	*cursor_default;
@@ -365,6 +384,23 @@ void	app_member_gone(struct ws_server *srv, struct ws_client *c);
 void	damage_rect(struct ws_server *srv, const ws_rect_t *r);
 void	damage_all(struct ws_server *srv);
 void	list_windows(struct ws_server *srv, struct ws_client *to);
+void	window_minimize(struct ws_server *srv, struct ws_window *w);
+void	window_tile_move(struct ws_server *srv, struct ws_window *t,
+	    int32_t x, int32_t y);
+void	window_tile_raise(struct ws_server *srv, struct ws_window *t);
+
+/* ---- tile.c ---- */
+int	tile_init(struct ws_server *srv);
+void	tile_fini(struct ws_server *srv);
+void	tile_free(struct ws_window *t);
+void	tiles_render(struct ws_server *srv);
+void	tiles_redraw_app(struct ws_server *srv, struct ws_client *c);
+void	tile_select(struct ws_server *srv, struct ws_window *t);
+void	tile_press(struct ws_server *srv, struct ws_window *t, uint32_t button,
+	    uint32_t count);
+void	tile_drag(struct ws_server *srv, struct ws_window *t);
+int	tile_set_app_icon(struct ws_server *srv, struct ws_client *c,
+	    struct ws_buffer *b);
 
 /* ---- pointer.c ---- */
 void	pointer_motion(struct ws_server *srv, double x, double y);

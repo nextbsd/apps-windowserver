@@ -217,6 +217,7 @@ min_size(mach_msg_id_t id)
 	case WS_MSG_CURSOR_VISIBLE:
 	case WS_MSG_ACTIVATE:
 	case WS_MSG_SNAPSHOT:
+	case WS_MSG_SET_APP_ICON:
 		return sizeof(ws_req_int_t);
 	case WS_MSG_WINDOW_ORDER:
 		return sizeof(ws_req_order_t);
@@ -248,6 +249,7 @@ needs_window(mach_msg_id_t id)
 	case WS_MSG_WINDOW_DAMAGE:
 	case WS_MSG_WINDOW_COMMIT:
 	case WS_MSG_WINDOW_MAKE_KEY:
+	case WS_MSG_WINDOW_MINIMIZE:
 		return true;
 	default:
 		return false;
@@ -399,6 +401,24 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 	case WS_MSG_WINDOW_MAKE_KEY:
 		window_make_key(srv, w);
 		break;
+	case WS_MSG_WINDOW_MINIMIZE:
+		window_minimize(srv, w);
+		break;
+	case WS_MSG_SET_APP_ICON: {
+		int err;
+
+		b = NULL;
+		if (value != 0 && (b = client_buffer(c, (uint32_t)value)) == NULL) {
+			client_error(srv, c, (uint32_t)id, 0, ENOENT,
+			    "no such icon buffer");
+			break;
+		}
+		err = tile_set_app_icon(srv, c, b);
+		if (err != 0)
+			client_error(srv, c, (uint32_t)id, 0, err,
+			    "bad app icon");
+		break;
+	}
 	case WS_MSG_BUFFER_DESTROY: {
 		struct ws_buffer **pp;
 
