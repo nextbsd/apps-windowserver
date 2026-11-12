@@ -64,7 +64,7 @@ What works, tested headless:
 Written but only compiled:
 
 - DRM/KMS output. It picks the card that has a connected display, sets the preferred mode, uses two dumb buffers with page flips (or `drmModeSetCrtc` if flips fail), and the hardware cursor, with a software cursor as fallback.
-- VT handling: a free VT, `KD_GRAPHICS`, `K_RAW` with a raw termios, `VT_PROCESS` switching that drops and takes back DRM master, Ctrl+Alt+F*n* to switch, and everything restored on exit or crash.
+- VT handling: no VT switching. The server takes over the VT that is on screen when it starts, puts it in `KD_GRAPHICS` and `K_RAW` with a raw termios, and locks switching with `VT_LOCKSWITCH`, so Ctrl+Alt+F*n* and `vidcontrol -s` can't take the screen away. It refuses to start if that VT is already in graphics mode or controlled by another process (Xorg, or another WindowServer). On exit, `SIGTERM`/`SIGINT`/`SIGHUP` or a crash it unlocks switching, gives the same VT back its VT mode, `KD_TEXT`, keyboard mode and termios, and drops DRM master, so the console comes back as it was.
 - libinput on seat0 through the IOKit libudev, with xkbcommon (`evdev` rules), relative and absolute pointers, wheel and touchpad scrolling. Power and sleep keys are logged, never typed.
 - Dropping from root to `_windowserver` after the devices are open.
 
@@ -111,13 +111,13 @@ build/wsctl snapshot out.ppm   # save the screen
 
 ## Running it on the display
 
-Don't do this while Xorg is running: X owns the display. From a text console, as root:
+Don't do this while Xorg is running: X owns the display. Log in on the text console you want to use, and as root:
 
 ```sh
 ws-session --server build/WindowServer
 ```
 
-`ws-session` loads a temporary launchd job for the server, so its Mach service is in the system bootstrap where every user's apps can find it, and stops it on Ctrl-C. `Ctrl+Alt+Backspace` also stops the server, and `Ctrl+Alt+F1` switches to the first text console. For now it only starts the server; once the GNUstep backend exists it will also start gpbs, gdnc, the Dock and FileViewer, like startx does for X.
+`ws-session` loads a temporary launchd job for the server, so its Mach service is in the system bootstrap where every user's apps can find it, and stops it on Ctrl-C. The server takes over the VT that is on screen, the one you typed the command on, and VT switching stays locked while it runs. `Ctrl+Alt+Backspace` stops the server (the `AllowTerminate` default) and gives that console back as it was. From SSH, `ws-session stop` or `kill` (`SIGTERM`, not `SIGKILL`: a killed server can't restore the console) do the same. For now it only starts the server; once the GNUstep backend exists it will also start gpbs, gdnc, the Dock and FileViewer, like startx does for X.
 
 You can also start `WindowServer` directly. That works too, but launchd then registers the Mach service in your own login's bootstrap, so only your own processes can find it.
 

@@ -80,7 +80,7 @@ usage(void)
 {
 	fprintf(stderr,
 	    "usage: WindowServer [--headless WIDTHxHEIGHT] [--config FILE]\n"
-	    "                    [--socket PATH] [--service NAME] [--vt N]\n"
+	    "                    [--socket PATH] [--service NAME]\n"
 	    "                    [--no-drop] [-v]\n");
 	exit(2);
 }
@@ -180,7 +180,6 @@ main(int argc, char **argv)
 		{ "config", required_argument, NULL, 'c' },
 		{ "socket", required_argument, NULL, 's' },
 		{ "service", required_argument, NULL, 'S' },
-		{ "vt", required_argument, NULL, 'T' },
 		{ "no-drop", no_argument, NULL, 'n' },
 		{ "verbose", no_argument, NULL, 'v' },
 		{ "help", no_argument, NULL, 'h' },
@@ -198,7 +197,6 @@ main(int argc, char **argv)
 	memset(srv, 0, sizeof(*srv));
 	srv->listen_fd = -1;
 	srv->tty_fd = -1;
-	srv->vtctl_fd = -1;
 	srv->next_client_id = 1;
 	srv->next_window_id = 1;
 
@@ -217,9 +215,6 @@ main(int argc, char **argv)
 			break;
 		case 'S':
 			opt_service = optarg;
-			break;
-		case 'T':
-			srv->vt_num = atoi(optarg);
 			break;
 		case 'n':
 			no_drop = true;

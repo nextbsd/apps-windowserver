@@ -264,20 +264,6 @@ input_readable(struct ws_server *srv)
 }
 
 void
-input_suspend(struct ws_server *srv)
-{
-	if (srv->libinput != NULL)
-		libinput_suspend(srv->libinput);
-}
-
-void
-input_resume(struct ws_server *srv)
-{
-	if (srv->libinput != NULL && libinput_resume(srv->libinput) != 0)
-		ws_warn("libinput_resume failed");
-}
-
-void
 input_close(struct ws_server *srv)
 {
 	if (srv->libinput != NULL)

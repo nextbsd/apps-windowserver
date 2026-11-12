@@ -357,26 +357,7 @@ drm_cursor_hide(struct ws_server *srv)
 	drm.cursor_shown = false;
 }
 
-/* ---- VT switching ---- */
-
-static void
-drm_suspend(struct ws_server *srv)
-{
-	drm_cursor_hide(srv);
-	if (drmDropMaster(drm.fd) != 0)
-		ws_warn("drmDropMaster: %s", strerror(errno));
-}
-
-static bool
-drm_resume(struct ws_server *srv)
-{
-	if (drmSetMaster(drm.fd) != 0) {
-		ws_err("drmSetMaster: %s", strerror(errno));
-		return false;
-	}
-	srv->present_pending = false;
-	return modeset(srv) == 0;
-}
+/* ---- shutdown: the console's CRTC back, DRM master dropped ---- */
 
 static void
 drm_shutdown(struct ws_server *srv)
@@ -410,8 +391,6 @@ const struct ws_output_ops drm_output_ops = {
 	.cursor_set = drm_cursor_set,
 	.cursor_move = drm_cursor_move,
 	.cursor_hide = drm_cursor_hide,
-	.suspend = drm_suspend,
-	.resume = drm_resume,
 	.shutdown = drm_shutdown,
 };
 

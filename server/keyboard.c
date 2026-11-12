@@ -168,11 +168,6 @@ server_key(struct ws_server *srv, uint32_t code, bool pressed, xkb_keysym_t sym)
 	}
 	if (!pressed)
 		return false;
-	if (sym >= XKB_KEY_XF86Switch_VT_1 && sym <= XKB_KEY_XF86Switch_VT_12) {
-		if (!srv->headless)
-			vt_switch_to(srv, (int)(sym - XKB_KEY_XF86Switch_VT_1) + 1);
-		return true;
-	}
 	if (sym == XKB_KEY_BackSpace && srv->cfg.allow_terminate &&
 	    (srv->modifiers & (WS_MOD_CONTROL | WS_MOD_ALT)) ==
 	    (WS_MOD_CONTROL | WS_MOD_ALT)) {
@@ -233,21 +228,6 @@ keyboard_repeat_fire(struct ws_server *srv)
 		srv->repeat_started = true;
 		ws_timer_set(srv, TIMER_REPEAT, srv->cfg.key_repeat_interval,
 		    false);
-	}
-}
-
-/* Forget held keys (VT switch away): reset the state, stop repeat. */
-void
-keyboard_release_all(struct ws_server *srv)
-{
-	repeat_stop(srv);
-	if (srv->xkb_state != NULL) {
-		xkb_state_unref(srv->xkb_state);
-		srv->xkb_state = xkb_state_new(srv->xkb_keymap);
-	}
-	if (srv->modifiers != 0) {
-		srv->modifiers = 0;
-		send_flags(srv);
 	}
 }
 

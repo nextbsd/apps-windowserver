@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * Privilege drop. Started as root, WindowServer opens the DRM card,
- * the VT (through /dev/ttyv0) and the input devices first, then becomes
- * the _windowserver user in group video. The process keeps its pid,
- * so drm-kmod still lets it drop and set DRM master on VT switches.
+ * the active VT and the input devices first, then becomes the
+ * _windowserver user in group video. The VT and DRM fds stay open, so
+ * it can still give the console back and drop DRM master on exit.
  * Input devices that appear later need a devfs rule that lets the
  * _windowserver user open them (a NextBSD packaging task).
  */

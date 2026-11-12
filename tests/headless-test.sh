@@ -150,6 +150,7 @@ wait "$SPID" 2>/dev/null
 SPID=
 grep -q "exiting" "$LOG/server.log" && pass "server shut down cleanly" || fail "server shutdown"
 [ -e "$SOCK" ] && fail "socket left behind"
+grep -q "VT [0-9]" "$LOG/server.log" && fail "headless server touched a VT"
 
 echo "logs: $LOG"
 if [ $FAILS -ne 0 ]; then

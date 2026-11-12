@@ -176,8 +176,6 @@ struct ws_output_ops {
 		    int hot_x, int hot_y);
 	void	(*cursor_move)(struct ws_server *srv, int x, int y);
 	void	(*cursor_hide)(struct ws_server *srv);
-	void	(*suspend)(struct ws_server *srv);
-	bool	(*resume)(struct ws_server *srv);
 	void	(*shutdown)(struct ws_server *srv);
 };
 
@@ -211,7 +209,7 @@ struct ws_server {
 	const struct ws_output_ops *output;
 	void		*output_data;
 	bool		present_pending;	/* waiting for page flip */
-	bool		display_active;		/* we own the VT/DRM master */
+	bool		display_active;		/* we own the VT and DRM master */
 
 	/* Mach */
 	mach_port_t	service_port;
@@ -276,9 +274,7 @@ struct ws_server {
 
 	/* VT (vt.c) */
 	int		tty_fd;
-	int		vtctl_fd;
-	int		vt_num;
-	int		vt_orig;
+	int		vt_num;		/* the VT that was active at start */
 	bool		vt_setup;
 
 	/* privileges */
@@ -361,7 +357,6 @@ int	keyboard_init(struct ws_server *srv);
 void	keyboard_fini(struct ws_server *srv);
 void	keyboard_key(struct ws_server *srv, uint32_t evdev_code, bool pressed);
 void	keyboard_repeat_fire(struct ws_server *srv);
-void	keyboard_release_all(struct ws_server *srv);
 int	keyboard_inject(struct ws_server *srv, const char *name, int mode);
 
 /* ---- cursor.c ---- */
@@ -392,15 +387,12 @@ extern const struct ws_output_ops drm_output_ops;
 int	vt_open(struct ws_server *srv);
 void	vt_close(struct ws_server *srv);
 void	vt_signal(struct ws_server *srv);
-void	vt_switch_to(struct ws_server *srv, int vt);
 void	vt_drain(struct ws_server *srv);
 void	vt_install_crash_handlers(struct ws_server *srv);
 
 /* ---- input.c ---- */
 int	input_open(struct ws_server *srv);
 void	input_readable(struct ws_server *srv);
-void	input_suspend(struct ws_server *srv);
-void	input_resume(struct ws_server *srv);
 void	input_close(struct ws_server *srv);
 
 /* ---- privs.c ---- */

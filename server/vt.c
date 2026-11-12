@@ -6,11 +6,18 @@
  * the NextBSD XLibre console patch (bsd_init.c: KD_GRAPHICS, K_RAW with
  * a raw termios, VT_SETMODE VT_PROCESS), written from scratch here.
  *
- * WindowServer takes a free VT, switches to it, and from then on
- * vt(4) asks before switching away: SIGUSR2 arrives, the server drops
- * DRM master and input, and acknowledges with VT_RELDISP. On the way
- * back the same signal arrives and the server takes master again and
- * repaints. Everything is restored on exit, including after a crash.
+ * WindowServer doesn't open or switch VTs. It takes over the VT that is
+ * active when it starts, and locks VT switching (VT_LOCKSWITCH) for as
+ * long as it runs, so neither Ctrl+Alt+Fn nor `vidcontrol -s` nor any
+ * other VT_ACTIVATE can take the screen away from it. VT_PROCESS mode is
+ * set as well: it keeps kernel console output off the screen (vt(4)
+ * marks the console unavailable while ttyv0 is in VT_PROCESS mode), and
+ * should a switch request get through anyway, the server refuses it.
+ *
+ * On exit, a fatal signal or a crash the same VT gets back exactly what
+ * it had: switching unlocked, its VT mode, KD_TEXT, its keyboard mode
+ * and its termios. A SIGKILL can't be caught; stop the server with
+ * SIGTERM.
  */
 
 #include <sys/types.h>
@@ -31,39 +38,52 @@
 
 #define VT_SIGNAL	SIGUSR2
 
+/* VT_LOCKSWITCH arguments (vt_core.c: 1 locks, 2 unlocks). */
+#define VT_LOCK_ON	1
+#define VT_LOCK_OFF	2
+
 /* Saved console state, also used by the crash handler. */
 static struct {
 	int		fd;
+	int		kdmode;
 	int		kbmode;
 	struct termios	tios;
+	struct vt_mode	vtmode;
 	bool		have_tios;
 	bool		have_kbmode;
-	int		orig_vt;
-	bool		active;		/* we own the VT */
+	bool		have_vtmode;
+	bool		locked;
 } vt_saved = { .fd = -1 };
 
+/* Only async-signal-safe calls (ioctl, tcsetattr): the crash handler
+ * uses it too. */
 static void
 vt_restore(void)
 {
 	struct vt_mode vm;
-	int fd = vt_saved.fd;
+	int fd = vt_saved.fd, lock = VT_LOCK_OFF;
 
 	if (fd < 0)
 		return;
-	ioctl(fd, KDSETMODE, KD_TEXT);
+	if (vt_saved.locked)
+		ioctl(fd, VT_LOCKSWITCH, &lock);
+	vt_saved.locked = false;
+	ioctl(fd, KDSETMODE, vt_saved.kdmode);
 	if (vt_saved.have_kbmode)
 		ioctl(fd, KDSKBMODE, vt_saved.kbmode);
 	if (vt_saved.have_tios)
 		tcsetattr(fd, TCSANOW, &vt_saved.tios);
+	/* The VT was in VT_AUTO when we took it (vt_open checks). */
 	memset(&vm, 0, sizeof(vm));
 	vm.mode = VT_AUTO;
+	if (vt_saved.have_vtmode)
+		vm = vt_saved.vtmode;
 	ioctl(fd, VT_SETMODE, &vm);
 }
 
 static void
 crash_handler(int sig)
 {
-	/* Only async-signal-safe calls (ioctl, tcsetattr) in vt_restore. */
 	vt_restore();
 	signal(sig, SIG_DFL);
 	raise(sig);
@@ -92,29 +112,23 @@ vt_open(struct ws_server *srv)
 	struct termios raw;
 	struct vt_mode vm;
 	char path[32];
-	int ctl, vtno = -1;
+	int ctl, vtno = -1, lock = VT_LOCK_ON;
 
 	/*
-	 * VT queries (VT_OPENQRY, VT_GETACTIVE, VT_ACTIVATE) need a vt(4)
-	 * terminal: /dev/consolectl doesn't answer them. ttyv0 stays open so
-	 * they keep working after the privilege drop.
+	 * VT_GETACTIVE needs a vt(4) terminal: /dev/consolectl doesn't
+	 * answer it. ttyv0 is only asked which VT is on screen.
 	 */
-	srv->vtctl_fd = open("/dev/ttyv0", O_RDWR | O_CLOEXEC | O_NOCTTY);
-	ctl = srv->vtctl_fd;
+	ctl = open("/dev/ttyv0", O_RDWR | O_CLOEXEC | O_NOCTTY);
 	if (ctl < 0) {
 		ws_err("can't open /dev/ttyv0: %s", strerror(errno));
 		return -1;
 	}
-	if (ioctl(ctl, VT_GETACTIVE, &srv->vt_orig) < 0)
-		srv->vt_orig = -1;
-	if (srv->vt_num > 0)
-		vtno = srv->vt_num;
-	else if (ioctl(ctl, VT_OPENQRY, &vtno) < 0 || vtno <= 0) {
-		ws_err("no free VT (VT_OPENQRY: %s)", strerror(errno));
-		goto fail;
-	}
-	if (ctl != srv->vtctl_fd)
+	if (ioctl(ctl, VT_GETACTIVE, &vtno) < 0 || vtno <= 0) {
+		ws_err("VT_GETACTIVE: %s", strerror(errno));
 		close(ctl);
+		return -1;
+	}
+	close(ctl);
 
 	/* vt(4) numbers VTs from 1; ttyv0 is VT 1. */
 	snprintf(path, sizeof(path), "/dev/ttyv%x", vtno - 1);
@@ -129,12 +143,27 @@ vt_open(struct ws_server *srv)
 		return -1;
 	}
 	srv->vt_num = vtno;
-	vt_saved.fd = srv->tty_fd;
-	vt_saved.orig_vt = srv->vt_orig;
 
-	if (ioctl(srv->tty_fd, VT_ACTIVATE, vtno) < 0 ||
-	    ioctl(srv->tty_fd, VT_WAITACTIVE, vtno) < 0)
-		ws_warn("switching to VT %d: %s", vtno, strerror(errno));
+	/* Someone else (Xorg, another WindowServer) already owns this VT. */
+	if (ioctl(srv->tty_fd, KDGETMODE, &vt_saved.kdmode) < 0)
+		vt_saved.kdmode = KD_TEXT;
+	if (vt_saved.kdmode != KD_TEXT) {
+		ws_err("VT %d is already in graphics mode; is Xorg or another "
+		    "WindowServer running?", vtno);
+		goto fail;
+	}
+	if (ioctl(srv->tty_fd, VT_GETMODE, &vt_saved.vtmode) == 0) {
+		if (vt_saved.vtmode.mode == VT_PROCESS) {
+			ws_err("VT %d is controlled by another process", vtno);
+			goto fail;
+		}
+		vt_saved.have_vtmode = true;
+	}
+	if (tcgetattr(srv->tty_fd, &vt_saved.tios) == 0)
+		vt_saved.have_tios = true;
+	if (ioctl(srv->tty_fd, KDGKBMODE, &vt_saved.kbmode) == 0)
+		vt_saved.have_kbmode = true;
+	vt_saved.fd = srv->tty_fd;
 
 	memset(&vm, 0, sizeof(vm));
 	vm.mode = VT_PROCESS;
@@ -145,16 +174,17 @@ vt_open(struct ws_server *srv)
 		ws_err("VT_SETMODE: %s", strerror(errno));
 		goto fail_restore;
 	}
+	if (ioctl(srv->tty_fd, VT_LOCKSWITCH, &lock) < 0)
+		ws_warn("VT_LOCKSWITCH: %s; switch requests will be refused",
+		    strerror(errno));
+	else
+		vt_saved.locked = true;
 	if (ioctl(srv->tty_fd, KDSETMODE, KD_GRAPHICS) < 0) {
 		ws_err("KDSETMODE KD_GRAPHICS: %s", strerror(errno));
 		goto fail_restore;
 	}
-	if (tcgetattr(srv->tty_fd, &vt_saved.tios) == 0)
-		vt_saved.have_tios = true;
-	if (ioctl(srv->tty_fd, KDGKBMODE, &vt_saved.kbmode) == 0)
-		vt_saved.have_kbmode = true;
 	/* K_RAW keeps keys (and vt's own hotkeys) away from the console;
-	 * libinput reads the keyboard, and Ctrl+Alt+Fn is ours to handle. */
+	 * libinput reads the keyboard. */
 	if (ioctl(srv->tty_fd, KDSKBMODE, K_RAW) < 0) {
 		ws_err("KDSKBMODE K_RAW: %s", strerror(errno));
 		goto fail_restore;
@@ -171,22 +201,19 @@ vt_open(struct ws_server *srv)
 		cfsetospeed(&raw, 9600);
 		tcsetattr(srv->tty_fd, TCSANOW, &raw);
 	}
-	vt_saved.active = true;
 	srv->vt_setup = true;
 	/* Raw scancodes still reach the tty; read and discard them. */
 	ws_kq_add_fd(srv, srv->tty_fd, EVFILT_READ, (void *)(uintptr_t)SRC_TTY);
-	ws_info("using VT %d (was on VT %d)", vtno, srv->vt_orig);
+	ws_info("using VT %d, switching %s", vtno,
+	    vt_saved.locked ? "locked" : "refused");
 	return 0;
 
 fail_restore:
 	vt_restore();
+fail:
 	close(srv->tty_fd);
 	srv->tty_fd = -1;
 	vt_saved.fd = -1;
-	return -1;
-fail:
-	if (ctl != srv->vtctl_fd)
-		close(ctl);
 	return -1;
 }
 
@@ -199,45 +226,20 @@ vt_drain(struct ws_server *srv)
 		;
 }
 
-/* SIGUSR2 from vt(4): release when we're active, acquire when not. */
+/*
+ * SIGUSR2 from vt(4): a request to switch away that got past the lock.
+ * WindowServer keeps the display, so it says no. (An acquire signal
+ * can't come, since the VT is never given up; acknowledge it anyway.)
+ */
 void
 vt_signal(struct ws_server *srv)
 {
 	if (!srv->vt_setup)
 		return;
-	if (vt_saved.active) {
-		ws_info("VT %d: releasing the display", srv->vt_num);
-		keyboard_release_all(srv);
-		input_suspend(srv);
-		if (srv->output->suspend != NULL)
-			srv->output->suspend(srv);
-		srv->display_active = false;
-		vt_saved.active = false;
-		if (ioctl(srv->tty_fd, VT_RELDISP, 1) < 0)
-			ws_warn("VT_RELDISP: %s", strerror(errno));
-	} else {
-		ws_info("VT %d: taking the display back", srv->vt_num);
-		if (ioctl(srv->tty_fd, VT_RELDISP, VT_ACKACQ) < 0)
-			ws_warn("VT_RELDISP ACKACQ: %s", strerror(errno));
-		vt_saved.active = true;
-		if (srv->output->resume != NULL && !srv->output->resume(srv))
-			ws_err("couldn't take the display back");
-		srv->display_active = true;
-		srv->cursor_image = NULL;	/* reload the cursor */
-		cursor_update(srv);
-		input_resume(srv);
-		damage_all(srv);
-	}
-}
-
-void
-vt_switch_to(struct ws_server *srv, int vt)
-{
-	if (!srv->vt_setup || vt == srv->vt_num)
-		return;
-	ws_info("switching to VT %d", vt);
-	if (ioctl(srv->tty_fd, VT_ACTIVATE, vt) < 0)
-		ws_warn("VT_ACTIVATE %d: %s", vt, strerror(errno));
+	if (ioctl(srv->tty_fd, VT_RELDISP, VT_FALSE) == 0)
+		ws_info("VT %d: refused a request to switch away", srv->vt_num);
+	else if (ioctl(srv->tty_fd, VT_RELDISP, VT_ACKACQ) < 0)
+		ws_debug("VT_RELDISP: %s", strerror(errno));
 }
 
 void
@@ -246,13 +248,9 @@ vt_close(struct ws_server *srv)
 	if (!srv->vt_setup)
 		return;
 	vt_restore();
-	if (srv->vt_orig > 0 && srv->vt_orig != srv->vt_num)
-		ioctl(srv->tty_fd, VT_ACTIVATE, srv->vt_orig);
 	close(srv->tty_fd);
 	srv->tty_fd = -1;
 	vt_saved.fd = -1;
-	if (srv->vtctl_fd >= 0)
-		close(srv->vtctl_fd);
-	srv->vtctl_fd = -1;
 	srv->vt_setup = false;
+	ws_info("VT %d given back to the console", srv->vt_num);
 }
