@@ -65,11 +65,12 @@ What works, tested headless:
 - Snapshots and synthetic input for testing.
 - Touchpad scroll phases and momentum scrolling, with synthetic two-finger scrolls (see [Touchpad](#touchpad)).
 - The window overview, Exposé and App Exposé, opened by a Start tap, Control+Up/Down, the Mission Control key or a three-finger swipe (see [The overview](#the-overview)).
+- Settings that change while the server runs, per console user: keyboard layouts (a list, switched by a request or a shortcut), key repeat, pointer and touchpad settings (see [Settings](#settings)).
 
 Written but only compiled:
 
 - DRM/KMS output. It picks the card that has a connected display, sets the preferred mode, uses two dumb buffers with page flips (or `drmModeSetCrtc` if flips fail), and the hardware cursor, with a software cursor as fallback.
-- VT handling: no VT switching. The server takes over the VT that is on screen when it starts, puts it in `KD_GRAPHICS` and `K_RAW` with a raw termios, and locks switching with `VT_LOCKSWITCH`, so Ctrl+Alt+F*n* and `vidcontrol -s` can't take the screen away. It refuses to start if that VT is already in graphics mode or controlled by another process (Xorg, or another WindowServer). On exit, `SIGTERM`/`SIGINT`/`SIGHUP` or a crash it unlocks switching, gives the same VT back its VT mode, `KD_TEXT`, keyboard mode and termios, and drops DRM master, so the console comes back as it was.
+- VT handling: no VT switching. The server takes over the VT that is on screen when it starts, puts it in `KD_GRAPHICS` and `K_RAW` with a raw termios, and locks switching with `VT_LOCKSWITCH`, so Ctrl+Alt+F*n* and `vidcontrol -s` can't take the screen away. It refuses to start if that VT is already in graphics mode or controlled by another process (Xorg, or another WindowServer). On exit, `SIGTERM`/`SIGINT` or a crash it unlocks switching, gives the same VT back its VT mode, `KD_TEXT`, keyboard mode and termios, and drops DRM master, so the console comes back as it was.
 - libinput on seat0 through the IOKit libudev, with xkbcommon (`evdev` rules), relative and absolute pointers, wheel and touchpad scrolling, and the touchpad settings in [Touchpad](#touchpad). Power and sleep keys are logged, never typed.
 - Dropping from root to `_windowserver` after the devices are open.
 
@@ -179,7 +180,13 @@ Two-finger scrolling works as on a Mac. Servers that do this set `WS_SERVER_SCRO
 | `MomentumScrolling` | `true` | Scrolling carries on after the fingers lift. |
 | `NaturalScrolling` | `false` | Content follows the fingers. |
 | `PointerSpeed` | `0` | libinput's pointer acceleration speed, -1 (slowest) to 1, for every pointing device. |
+| `TrackpadSpeed` | empty | The touchpad's speed, -1 to 1; empty uses `PointerSpeed`. |
+| `MouseSpeed` | empty | The speed of other pointing devices (mice, trackpoints), -1 to 1; empty uses `PointerSpeed`. |
+| `MouseAccelProfile` | `adaptive` | Pointer acceleration for mice: `adaptive` (on) or `flat` (off). Touchpads keep libinput's own. |
+| `LeftHanded` | `false` | Swap the primary and secondary buttons, on every device that can. |
 | `ScrollSpeed` | `1` | Multiplies the scroll distance (touchpad, trackpoint and wheel pixel deltas, not the wheel's detents). |
+
+All of these change while the server runs (see [Settings](#settings)). `wsctl devices` (`ws_list_input_devices()`) lists the input devices, each marked keyboard, pointer, touchpad or mouse, so Trackpad and Mouse settings can say when there is none.
 
 `wsctl scroll DX DY finger` injects one two-finger scroll step (`0 0` lifts the fingers), `wsctl flick DX DY [STEPS]` a quick two-finger scroll and lift, and `wsctl hold` fingers resting on the touchpad, like the rest of the synthetic input: on a headless server, or for root and the server's own user.
 
@@ -250,6 +257,50 @@ The usable area is the part of the screen windows should use: the screen minus t
 - **Screen changes.** On servers with `WS_SERVER_SCREEN_CHANGES`, every connection gets `WS_EVENT_SCREEN_CHANGED` with the new `ws_screen_info_t` when the screen's size or mode changes, then `WS_EVENT_USABLE_AREA`. Windows keep their (top-left origin) coordinates, but one that was on the screen and no longer fits moves back onto it, and one that was partly off already keeps at least its top-left part on it; their owners get `WS_EVENT_WINDOW_FRAME` after the two events. A headless server changes size on `WS_INJECT_SCREEN_SIZE` (`ws_inject_screen_size()`), for tests. The DRM output has one mode for now; it will send the event when mode changes come (hotplug, Displays).
 
 `wsctl screen` prints the screen's size and its usable area, `wsctl screen size WxH` changes a headless screen's size and prints the events that follow, and `wsctl screen watch [SECONDS]` prints screen and usable-area changes as they come.
+
+### Settings
+
+Settings change while the server runs, and per user. Servers that can do this set `WS_SERVER_SETTINGS`. The details are in "Settings" in `WSProtocol.h`.
+
+- **Two layers.** The system's settings are the built-in defaults, then `/System/Library/Preferences/org.nextbsd.WindowServer.plist`, then `WS_<Key>` environment variables, then the command line. They're read at start, and again on `SIGHUP`, which no longer stops the server (a change to a server-only key waits for a restart). On top of them go the console user's own values, which `WS_MSG_SET_SETTINGS` sets. When the console user changes (a loginwindow session ends, or another one starts), the user's values are dropped, so the login panel always has the system's keyboard and pointer settings.
+- **Who may change them.** The same check as the Dock role: root, the server's own user, or the console user, who has a root-owned `/var/run/loginwindow/<uid>.session` record. Anyone may on a headless server, or when nobody is logged in through loginwindow. Others get `EPERM`.
+- **The user's settings.** They're the user's `org.nextbsd.WindowServer` defaults: `~/Library/Preferences/org.nextbsd.WindowServer.plist`, with the same key names as the system plist. WindowServer runs as `_windowserver` and can't read users' files (they're `0600`), so the user's session sends them: loginwindow's session script runs `wsctl settings reload` as the user when the session starts, which reads the file and sends it as one set that replaces whatever the session had. A key the server doesn't take (a server-only key, or one from a newer version) is left out, with a warning. Settings apps send each change as the user makes it (`ws_set_settings()`), and can send the whole domain again the same way.
+- **Applying a change.** Settings used on every event (`ScrollSpeed`, `NaturalScrolling`, `MomentumScrolling`, `ClickThrough`, `RaiseOnClick`, `ReduceMotion`, `StartKeyShowsOverview`) take effect with the next event. Pointer and touchpad settings (`PointerSpeed`, `TrackpadSpeed`, `MouseSpeed`, `MouseAccelProfile`, `LeftHanded`, `TapToClick`, `TapToDrag`, `ThreeFingerDrag`, `SecondaryClick`) are applied again to every input device. Keyboard settings (`KeyboardRules`, `KeyboardModel`, `KeyboardLayout`, `KeyboardVariant`, `KeyboardOptions`, `KeyboardLayoutShortcut`) compile the keymap again: every app's key events carry keysyms and text from the new keymap, so GNUstep apps follow without doing anything, and `WS_CONNECT_XKB` connections (X servers) get `WS_EVENT_KEYMAP` again, then `WS_EVENT_MODIFIERS`. Keys held stay held, Caps Lock and Num Lock stay locked, and the active layout stays active if it's still in the list. `KeyRepeatDelay` and `KeyRepeatInterval` resend `WS_EVENT_KEYMAP`, which carries them. The other keys are the server's own (`DRMDevice`, `User`, `Group`, `SocketPath`, `AllowTerminate`...): a request for one fails with `EPERM`, and a change to one in the system plist waits for a restart.
+- **Checked first.** A request is checked as a whole before anything changes. An unknown key, a value of the wrong type or out of range, more than four layouts, or a layout list XKB can't compile fails it with `EINVAL`, and the reply names the key.
+- **Reading back.** `WS_MSG_GET_SETTINGS` (`ws_get_settings()`) gives every key's value in effect, where it comes from (built-in, system or session) and whether it can be set. Tool and Dock connections get `WS_EVENT_SETTINGS_CHANGED` after every change in effect.
+
+**Keyboard layouts.** `KeyboardLayout` is a list of up to four layouts, such as `us,gr`, with variants to match in `KeyboardVariant` (`,polytonic`).
+
+| Key | Default | |
+|---|---|---|
+| `KeyboardLayout` | `us` | The layouts, comma-separated, at most four. |
+| `KeyboardVariant` | empty | Their variants, comma-separated to match. |
+| `KeyboardOptions` | empty | XKB options, comma-separated (`caps:escape`, `altwin:swap_alt_win`). |
+| `KeyboardLayoutShortcut` | `None` | The keys that switch to the next layout: `None`, `ControlSpace`, `AltShift`, `WinSpace` or `CapsLock` (XKB's `grp:` options). Off until the user picks one. |
+| `KeyRepeatDelay` | `500` | Milliseconds before a held key repeats. |
+| `KeyRepeatInterval` | `33` | Milliseconds between repeats; 0 turns repeat off. |
+
+- `WS_MSG_SET_KEYBOARD_LAYOUT` (`ws_set_keyboard_layout()`) makes one layout of the list active, by its index, for the console user as above.
+- `WS_MSG_LIST_KEYBOARD_LAYOUTS` (`ws_list_keyboard_layouts()`) lists them: the XKB layout and variant, XKB's description ("Greek") and which one is active.
+- Tool and Dock connections get `WS_EVENT_KEYBOARD_LAYOUT` (`ws_event_keyboard_layout_t`, marked `WS_KEYBOARD_LAYOUT_CHANGED`) whenever the active layout changes: by the request, the shortcut, or a new list. The Dock's Input menu shows and sets the layout with these.
+
+![Terminal on a headless WindowServer: "echo abc" typed with the us layout, then the same three keys typed after switching to Greek live, giving "abcαβψ"](docs/settings-layouts.png)
+
+From the command line (changing settings needs the console user, root, or a headless server):
+
+```sh
+wsctl settings get                       # every key: value (built-in, system or session)
+wsctl settings set KeyboardLayout us,gr KeyboardLayoutShortcut ControlSpace
+wsctl settings unset KeyboardLayout      # back to the system's
+wsctl settings reload [FILE]             # the user's defaults replace the session's values
+wsctl settings reset                     # drop the session's values
+wsctl layout list
+wsctl layout set gr                      # by name or index
+wsctl layout watch                       # print layout and settings changes
+wsctl devices
+```
+
+`tests/settings-test.sh` checks all of this against a headless server started by `ws-session` (`gmake check-settings WS_SERVICE_NAME=...`): refused keys, a layout list, the new keymap and state reaching an XKB connection, keysyms and text of a plain connection following the active layout, the switching request and shortcuts, the events tools get, key repeat, a setting read on every event, reloading from a defaults file and `SIGHUP`.
 
 ## License
 

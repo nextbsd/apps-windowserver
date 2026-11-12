@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -1410,9 +1411,408 @@ ws_event_name(uint16_t type)
 		[WS_EVENT_OVERVIEW_STATE] = "overview-state",
 		[WS_EVENT_OVERVIEW_ITEM] = "overview-item",
 		[WS_EVENT_USABLE_AREA] = "usable-area",
+		[WS_EVENT_SETTING] = "setting",
+		[WS_EVENT_SETTINGS_CHANGED] = "settings-changed",
+		[WS_EVENT_KEYBOARD_LAYOUT] = "keyboard-layout",
+		[WS_EVENT_INPUT_DEVICE] = "input-device",
 	};
 
 	if (type < WS_EVENT_MAX && names[type] != NULL)
 		return names[type];
 	return "unknown";
+}
+
+/* ---- settings (WS_SERVER_SETTINGS) ---- */
+
+static int
+need_settings(ws_connection_t *c)
+{
+	if ((c->server_flags & WS_SERVER_SETTINGS) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * Send a request that's answered on the socket with `type` events and
+ * WS_EVENT_LIST_END; fn gets each. skip(ev) tells events of that type
+ * that aren't part of the answer.
+ */
+static int
+list_request(ws_connection_t *c, mach_msg_id_t id, uint16_t type,
+    int (*skip)(const ws_event_t *), void (*fn)(const ws_event_t *, void *),
+    void *ctx)
+{
+	ws_req_header_t h;
+	ws_event_t ev;
+	int r, err = 0;
+
+	if (need_settings(c) < 0)
+		return -1;
+	req_init(c, &h, id, sizeof(h), 0);
+	if (send_oneway(c, &h) < 0)
+		return -1;
+	for (;;) {
+		r = read_event(c, &ev);
+		if (r < 0)
+			return -1;
+		if (r == 0) {
+			r = wait_readable(c, RPC_TIMEOUT_MS);
+			if (r <= 0) {
+				if (r == 0)
+					errno = ETIMEDOUT;
+				return -1;
+			}
+			continue;
+		}
+		if (ev.hdr.type == WS_EVENT_LIST_END) {
+			if (err != 0) {
+				errno = err;
+				return -1;
+			}
+			return 0;
+		}
+		if (ev.hdr.type == type && (skip == NULL || !skip(&ev))) {
+			fn(&ev, ctx);
+			continue;
+		}
+		if (ev.hdr.type == WS_EVENT_ERROR &&
+		    ev.u.error.request == (uint32_t)id) {
+			err = ev.u.error.code ? ev.u.error.code : EIO;
+			continue;
+		}
+		if (queue_push(c, &ev) < 0)
+			return -1;
+	}
+}
+
+static int
+send_settings(ws_connection_t *c, ws_req_settings_t *m, uint32_t flags,
+    size_t len, char *failed_key, size_t failed_len)
+{
+	ws_reply_t r;
+	int ret;
+
+	req_init(c, &m->hdr, WS_MSG_SET_SETTINGS,
+	    offsetof(ws_req_settings_t, data) + ((len + 3) & ~(size_t)3), 0);
+	m->flags = flags;
+	m->length = (uint32_t)len;
+	memset(&r, 0, sizeof(r));
+	ret = send_rpc(c, &m->hdr, &r);
+	if (failed_key != NULL && failed_len > 0 && r.u.settings.key[0] != '\0'
+	    && failed_key[0] == '\0') {
+		r.u.settings.key[sizeof(r.u.settings.key) - 1] = '\0';
+		strlcpy(failed_key, r.u.settings.key, failed_len);
+	}
+	return ret;
+}
+
+WS_API int
+ws_set_settings(ws_connection_t *c, uint32_t flags, const ws_setting_t *list,
+    unsigned count, char *failed_key, size_t failed_len)
+{
+	ws_req_settings_t m;
+	size_t len = 0, need, klen, vlen;
+	unsigned i;
+	int sent = 0;
+
+	if (need_settings(c) < 0)
+		return -1;
+	if (failed_key != NULL && failed_len > 0)
+		failed_key[0] = '\0';
+	memset(&m, 0, sizeof(m));
+	for (i = 0; i < count; i++) {
+		const char *v = list[i].value != NULL ? list[i].value : "";
+
+		klen = strlen(list[i].key);
+		vlen = strlen(v);
+		need = 1 + klen + 1 + vlen + 1;
+		if (need > WS_MAX_SETTINGS_DATA || list[i].type <= 0 ||
+		    list[i].type > 0xff) {
+			if (failed_key != NULL && failed_len > 0)
+				strlcpy(failed_key, list[i].key, failed_len);
+			errno = EINVAL;
+			return -1;
+		}
+		if (len + need > WS_MAX_SETTINGS_DATA) {
+			/* Full: send what there is; only the first part
+			   replaces or reloads. */
+			if (send_settings(c, &m, flags, len, failed_key,
+			    failed_len) < 0)
+				return -1;
+			flags &= ~(uint32_t)(WS_SETTINGS_REPLACE |
+			    WS_SETTINGS_RELOAD_SYSTEM);
+			memset(m.data, 0, sizeof(m.data));
+			len = 0;
+			sent = 1;
+		}
+		m.data[len] = (char)list[i].type;
+		memcpy(m.data + len + 1, list[i].key, klen + 1);
+		memcpy(m.data + len + 1 + klen + 1, v, vlen + 1);
+		len += need;
+	}
+	if (len > 0 || !sent)
+		return send_settings(c, &m, flags, len, failed_key, failed_len);
+	return 0;
+}
+
+WS_API int
+ws_set_setting(ws_connection_t *c, const char *key, int type,
+    const char *value)
+{
+	ws_setting_t s;
+
+	s.key = key;
+	s.type = type;
+	s.value = value;
+	return ws_set_settings(c, 0, &s, 1, NULL, 0);
+}
+
+struct settings_cb {
+	void	(*fn)(const ws_event_setting_t *, void *);
+	void	*ctx;
+};
+
+static void
+setting_cb(const ws_event_t *ev, void *arg)
+{
+	struct settings_cb *cb = arg;
+	ws_event_setting_t s = ev->u.setting;
+
+	s.key[sizeof(s.key) - 1] = '\0';
+	s.value[sizeof(s.value) - 1] = '\0';
+	cb->fn(&s, cb->ctx);
+}
+
+WS_API int
+ws_get_settings(ws_connection_t *c,
+    void (*fn)(const ws_event_setting_t *, void *), void *ctx)
+{
+	struct settings_cb cb = { fn, ctx };
+
+	return list_request(c, WS_MSG_GET_SETTINGS, WS_EVENT_SETTING, NULL,
+	    setting_cb, &cb);
+}
+
+WS_API int
+ws_set_keyboard_layout(ws_connection_t *c, uint32_t index)
+{
+	ws_req_int_t m;
+
+	if (need_settings(c) < 0)
+		return -1;
+	req_init(c, &m.hdr, WS_MSG_SET_KEYBOARD_LAYOUT, sizeof(m), 0);
+	m.value = (int32_t)index;
+	m.reserved = 0;
+	return send_rpc(c, &m.hdr, NULL);
+}
+
+struct layout_cb {
+	void	(*fn)(const ws_event_keyboard_layout_t *, void *);
+	void	*ctx;
+};
+
+static int
+layout_announcement(const ws_event_t *ev)
+{
+	return (ev->u.keyboard_layout.flags & WS_KEYBOARD_LAYOUT_CHANGED) != 0;
+}
+
+static void
+layout_cb(const ws_event_t *ev, void *arg)
+{
+	struct layout_cb *cb = arg;
+
+	cb->fn(&ev->u.keyboard_layout, cb->ctx);
+}
+
+WS_API int
+ws_list_keyboard_layouts(ws_connection_t *c,
+    void (*fn)(const ws_event_keyboard_layout_t *, void *), void *ctx)
+{
+	struct layout_cb cb = { fn, ctx };
+
+	return list_request(c, WS_MSG_LIST_KEYBOARD_LAYOUTS,
+	    WS_EVENT_KEYBOARD_LAYOUT, layout_announcement, layout_cb, &cb);
+}
+
+struct device_cb {
+	void	(*fn)(const ws_event_input_device_t *, void *);
+	void	*ctx;
+};
+
+static void
+device_cb(const ws_event_t *ev, void *arg)
+{
+	struct device_cb *cb = arg;
+
+	cb->fn(&ev->u.input_device, cb->ctx);
+}
+
+WS_API int
+ws_list_input_devices(ws_connection_t *c,
+    void (*fn)(const ws_event_input_device_t *, void *), void *ctx)
+{
+	struct device_cb cb = { fn, ctx };
+
+	return list_request(c, WS_MSG_LIST_INPUT_DEVICES,
+	    WS_EVENT_INPUT_DEVICE, NULL, device_cb, &cb);
+}
+
+/* ---- the user's settings file ---- */
+
+WS_API int
+ws_user_settings_path(char *buf, size_t len)
+{
+	const char *home = getenv("HOME");
+	const char *dir = getenv("GNUSTEP_USER_DEFAULTS_DIR");
+	int n;
+
+	if (dir == NULL || *dir == '\0')
+		dir = "Library/Preferences";	/* NextBSD's GNUstep.conf */
+	if (*dir == '/')
+		n = snprintf(buf, len, "%s/%s.plist", dir, WS_SETTINGS_DOMAIN);
+	else {
+		if (home == NULL || *home == '\0') {
+			errno = ENOENT;
+			return -1;
+		}
+		n = snprintf(buf, len, "%s/%s/%s.plist", home, dir,
+		    WS_SETTINGS_DOMAIN);
+	}
+	if (n < 0 || (size_t)n >= len) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+	return 0;
+}
+
+/* Copy the text up to </tag>, decoding XML's five entities. */
+static const char *
+xml_text(const char *p, const char *tag, char *out, size_t outlen)
+{
+	static const struct {
+		const char *ent;
+		char	ch;
+	} ents[] = { { "&amp;", '&' }, { "&lt;", '<' }, { "&gt;", '>' },
+	    { "&quot;", '"' }, { "&apos;", '\'' } };
+	char close_tag[32];
+	const char *e;
+	size_t o = 0, i, n;
+
+	snprintf(close_tag, sizeof(close_tag), "</%s>", tag);
+	e = strstr(p, close_tag);
+	if (e == NULL)
+		return NULL;
+	while (p < e && o + 1 < outlen) {
+		if (*p == '&') {
+			for (i = 0; i < sizeof(ents) / sizeof(ents[0]); i++) {
+				n = strlen(ents[i].ent);
+				if (strncmp(p, ents[i].ent, n) == 0)
+					break;
+			}
+			if (i < sizeof(ents) / sizeof(ents[0])) {
+				out[o++] = ents[i].ch;
+				p += strlen(ents[i].ent);
+				continue;
+			}
+		}
+		out[o++] = *p++;
+	}
+	out[o] = '\0';
+	return e + strlen(close_tag);
+}
+
+#define MAX_FILE_SETTINGS	64
+
+WS_API int
+ws_settings_load_file(ws_connection_t *c, const char *path, uint32_t flags,
+    char *failed_key, size_t failed_len)
+{
+	struct {
+		char	keys[MAX_FILE_SETTINGS][WS_MAX_SETTING_KEY];
+		char	values[MAX_FILE_SETTINGS][256];
+		ws_setting_t list[MAX_FILE_SETTINGS];
+	} *st;
+	unsigned n = 0;
+	char key[128];
+	const char *p;
+	char *buf = NULL;
+	FILE *f;
+	long len;
+	int type, r;
+
+	if (need_settings(c) < 0)
+		return -1;
+	f = fopen(path, "r");
+	if (f == NULL && errno != ENOENT)
+		return -1;
+	st = calloc(1, sizeof(*st));
+	if (st == NULL) {
+		if (f != NULL)
+			fclose(f);
+		return -1;
+	}
+	if (f != NULL) {
+		if (fseek(f, 0, SEEK_END) != 0 || (len = ftell(f)) < 0 ||
+		    len > 1024 * 1024 || fseek(f, 0, SEEK_SET) != 0 ||
+		    (buf = malloc((size_t)len + 1)) == NULL ||
+		    fread(buf, 1, (size_t)len, f) != (size_t)len) {
+			free(buf);
+			free(st);
+			fclose(f);
+			errno = EIO;
+			return -1;
+		}
+		buf[len] = '\0';
+		fclose(f);
+	}
+	/* A flat <dict> of <key> and <string>, <integer>, <real>, <true/>
+	   or <false/>, as NSUserDefaults writes it; other values (arrays,
+	   dictionaries) aren't WindowServer settings and are skipped. */
+	for (p = buf; p != NULL && (p = strstr(p, "<key>")) != NULL &&
+	    n < MAX_FILE_SETTINGS;) {
+		p = xml_text(p + 5, "key", key, sizeof(key));
+		if (p == NULL)
+			break;
+		while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+			p++;
+		st->values[n][0] = '\0';
+		type = WS_SETTING_STRING;
+		if (strncmp(p, "<true/>", 7) == 0) {
+			strlcpy(st->values[n], "true", sizeof(st->values[n]));
+			type = WS_SETTING_BOOLEAN;
+		} else if (strncmp(p, "<false/>", 8) == 0) {
+			strlcpy(st->values[n], "false", sizeof(st->values[n]));
+			type = WS_SETTING_BOOLEAN;
+		} else if (strncmp(p, "<string/>", 9) == 0) {
+			;
+		} else if (strncmp(p, "<string>", 8) == 0) {
+			p = xml_text(p + 8, "string", st->values[n],
+			    sizeof(st->values[n]));
+		} else if (strncmp(p, "<integer>", 9) == 0) {
+			type = WS_SETTING_INTEGER;
+			p = xml_text(p + 9, "integer", st->values[n],
+			    sizeof(st->values[n]));
+		} else if (strncmp(p, "<real>", 6) == 0) {
+			type = WS_SETTING_REAL;
+			p = xml_text(p + 6, "real", st->values[n],
+			    sizeof(st->values[n]));
+		} else
+			type = 0;
+		if (p == NULL)
+			break;
+		if (type == 0 || strlen(key) >= WS_MAX_SETTING_KEY)
+			continue;
+		strlcpy(st->keys[n], key, sizeof(st->keys[n]));
+		st->list[n].key = st->keys[n];
+		st->list[n].type = type;
+		st->list[n].value = st->values[n];
+		n++;
+	}
+	free(buf);
+	r = ws_set_settings(c, flags, st->list, n, failed_key, failed_len);
+	free(st);
+	return r;
 }

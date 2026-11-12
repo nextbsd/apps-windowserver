@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include <dev/evdev/input-event-codes.h>
@@ -72,40 +73,141 @@ keymap_export(struct ws_server *srv)
 	return 0;
 }
 
+/* The grp: option KeyboardLayoutShortcut stands for, or NULL. */
+static const char *
+shortcut_option(const char *name)
+{
+	static const struct {
+		const char *name;
+		const char *option;
+	} map[] = {
+		{ "ControlSpace", "grp:ctrl_space_toggle" },
+		{ "AltShift", "grp:alt_shift_toggle" },
+		{ "WinSpace", "grp:win_space_toggle" },
+		{ "CapsLock", "grp:caps_toggle" },
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+		if (strcasecmp(name, map[i].name) == 0)
+			return map[i].option;
+	return NULL;
+}
+
+/* Is name a KeyboardLayoutShortcut value? */
+bool
+keyboard_shortcut_valid(const char *name)
+{
+	return name[0] == '\0' || strcasecmp(name, "None") == 0 ||
+	    shortcut_option(name) != NULL;
+}
+
+/* Compile the keymap cfg describes. */
+static struct xkb_keymap *
+keymap_compile(struct ws_server *srv, const struct ws_config *cfg)
+{
+	struct xkb_rule_names names;
+	struct xkb_keymap *km;
+	char options[sizeof(cfg->keyboard_options) + 32];
+	const char *grp = shortcut_option(cfg->keyboard_layout_shortcut);
+
+	strlcpy(options, cfg->keyboard_options, sizeof(options));
+	if (grp != NULL) {
+		if (options[0] != '\0')
+			strlcat(options, ",", sizeof(options));
+		strlcat(options, grp, sizeof(options));
+	}
+	memset(&names, 0, sizeof(names));
+	names.rules = cfg->keyboard_rules;
+	names.model = cfg->keyboard_model;
+	names.layout = cfg->keyboard_layout;
+	names.variant = cfg->keyboard_variant[0] ? cfg->keyboard_variant : NULL;
+	names.options = options[0] ? options : NULL;
+	km = xkb_keymap_new_from_names(srv->xkb_ctx, &names,
+	    XKB_KEYMAP_COMPILE_NO_FLAGS);
+	if (km == NULL)
+		ws_warn("can't compile keymap (rules %s model %s layout %s "
+		    "variant %s options %s)", names.rules, names.model,
+		    names.layout, names.variant ? names.variant : "",
+		    names.options ? names.options : "");
+	else
+		ws_info("keymap: rules %s, model %s, layout %s%s%s%s%s",
+		    names.rules, names.model, names.layout,
+		    names.variant ? ", variant " : "",
+		    names.variant ? names.variant : "",
+		    names.options ? ", options " : "",
+		    names.options ? names.options : "");
+	return km;
+}
+
+/* Split a comma-separated list into WS_MAX_KEYBOARD_LAYOUTS slots. */
+static void
+split_list(const char *list, char out[][32])
+{
+	const char *p = list, *e;
+	size_t i, n;
+
+	for (i = 0; i < WS_MAX_KEYBOARD_LAYOUTS; i++) {
+		out[i][0] = '\0';
+		if (p == NULL)
+			continue;
+		e = strchr(p, ',');
+		n = e != NULL ? (size_t)(e - p) : strlen(p);
+		if (n >= 32)
+			n = 31;
+		memcpy(out[i], p, n);
+		out[i][n] = '\0';
+		p = e != NULL ? e + 1 : NULL;
+	}
+}
+
+/* Remember the layout list of the keymap just compiled. */
+static void
+layouts_note(struct ws_server *srv)
+{
+	xkb_layout_index_t n = xkb_keymap_num_layouts(srv->xkb_keymap);
+
+	srv->nlayouts = n < WS_MAX_KEYBOARD_LAYOUTS ? n :
+	    WS_MAX_KEYBOARD_LAYOUTS;
+	split_list(srv->cfg.keyboard_layout, srv->layouts);
+	split_list(srv->cfg.keyboard_variant, srv->variants);
+	srv->layout_active = xkb_state_serialize_layout(srv->xkb_state,
+	    XKB_STATE_LAYOUT_EFFECTIVE);
+}
+
 int
 keyboard_init(struct ws_server *srv)
 {
-	struct xkb_rule_names names;
-
 	srv->xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 	if (srv->xkb_ctx == NULL) {
 		ws_err("xkb_context_new failed");
 		return -1;
 	}
-	memset(&names, 0, sizeof(names));
-	names.rules = srv->cfg.keyboard_rules;
-	names.model = srv->cfg.keyboard_model;
-	names.layout = srv->cfg.keyboard_layout;
-	names.variant = srv->cfg.keyboard_variant[0] ?
-	    srv->cfg.keyboard_variant : NULL;
-	names.options = srv->cfg.keyboard_options[0] ?
-	    srv->cfg.keyboard_options : NULL;
-	srv->xkb_keymap = xkb_keymap_new_from_names(srv->xkb_ctx, &names,
-	    XKB_KEYMAP_COMPILE_NO_FLAGS);
-	if (srv->xkb_keymap == NULL) {
-		ws_err("can't compile keymap (rules %s model %s layout %s)",
-		    names.rules, names.model, names.layout);
+	srv->xkb_keymap = keymap_compile(srv, &srv->cfg);
+	if (srv->xkb_keymap == NULL)
 		return -1;
-	}
 	srv->xkb_state = xkb_state_new(srv->xkb_keymap);
 	if (srv->xkb_state == NULL)
 		return -1;
 	if (keymap_export(srv) < 0)
 		ws_warn("can't export the keymap; WS_CONNECT_XKB clients "
 		    "won't get WS_EVENT_KEYMAP");
-	ws_info("keymap: rules %s, model %s, layout %s%s%s",
-	    names.rules, names.model, names.layout,
-	    names.variant ? ", variant " : "", names.variant ? names.variant : "");
+	layouts_note(srv);
+	return 0;
+}
+
+/* Would cfg's keyboard settings compile? (settings.c, before a change) */
+int
+keyboard_check(struct ws_server *srv, const struct ws_config *cfg)
+{
+	struct xkb_keymap *km;
+
+	if (srv->xkb_ctx == NULL)
+		return -1;
+	km = keymap_compile(srv, cfg);
+	if (km == NULL)
+		return -1;
+	xkb_keymap_unref(km);
 	return 0;
 }
 
@@ -287,6 +389,203 @@ keyboard_focus_update(struct ws_server *srv)
 		return;
 	send_keys_held(srv, to, w != NULL ? w->id : 0);
 	send_modifiers(srv, to, w != NULL ? w->id : 0);
+}
+
+static void	send_flags(struct ws_server *srv);
+
+/* ---- layouts ---- */
+
+static void
+layout_event(struct ws_server *srv, ws_event_t *ev, uint32_t index)
+{
+	const char *name;
+
+	event_init(srv, ev, WS_EVENT_KEYBOARD_LAYOUT,
+	    sizeof(ev->u.keyboard_layout), 0);
+	ev->u.keyboard_layout.index = index;
+	ev->u.keyboard_layout.count = srv->nlayouts;
+	ev->u.keyboard_layout.active = srv->layout_active;
+	ev->u.keyboard_layout.flags = index == srv->layout_active ?
+	    WS_KEYBOARD_LAYOUT_ACTIVE : 0;
+	if (index < WS_MAX_KEYBOARD_LAYOUTS) {
+		strlcpy(ev->u.keyboard_layout.layout, srv->layouts[index],
+		    sizeof(ev->u.keyboard_layout.layout));
+		strlcpy(ev->u.keyboard_layout.variant, srv->variants[index],
+		    sizeof(ev->u.keyboard_layout.variant));
+	}
+	name = xkb_keymap_layout_get_name(srv->xkb_keymap, index);
+	strlcpy(ev->u.keyboard_layout.name, name != NULL ? name : "",
+	    sizeof(ev->u.keyboard_layout.name));
+}
+
+/* Tools and the Dock (its Input menu) hear the active layout. */
+static void
+layout_announce(struct ws_server *srv)
+{
+	ws_event_t ev;
+
+	layout_event(srv, &ev, srv->layout_active);
+	ev.u.keyboard_layout.flags |= WS_KEYBOARD_LAYOUT_CHANGED;
+	settings_tools_notify(srv, &ev);
+}
+
+/* After the XKB state changed: did the active layout? */
+static void
+layout_check(struct ws_server *srv)
+{
+	uint32_t g = xkb_state_serialize_layout(srv->xkb_state,
+	    XKB_STATE_LAYOUT_EFFECTIVE);
+
+	if (g == srv->layout_active)
+		return;
+	srv->layout_active = g;
+	ws_info("keyboard layout %u (%s) is active", g,
+	    g < WS_MAX_KEYBOARD_LAYOUTS ? srv->layouts[g] : "?");
+	layout_announce(srv);
+}
+
+/* WS_MSG_LIST_KEYBOARD_LAYOUTS */
+void
+keyboard_list_layouts(struct ws_server *srv, struct ws_client *c)
+{
+	ws_event_t ev;
+	uint32_t i;
+
+	for (i = 0; i < srv->nlayouts; i++) {
+		layout_event(srv, &ev, i);
+		client_send(srv, c, &ev, -1);
+	}
+	event_init(srv, &ev, WS_EVENT_LIST_END, 0, 0);
+	client_send(srv, c, &ev, -1);
+}
+
+/* The modifier state changed outside a key event: tell whoever gets
+ * key events, as a key event would. */
+static void
+state_changed(struct ws_server *srv)
+{
+	struct ws_client *c;
+	struct ws_window *w;
+	uint32_t old_mods = srv->modifiers;
+
+	srv->modifiers = current_modifiers(srv);
+	if (srv->modifiers != old_mods)
+		send_flags(srv);
+	if ((c = key_target(srv, &w)) != NULL && (c->flags & WS_CONNECT_XKB))
+		send_modifiers(srv, c, w != NULL ? w->id : 0);
+	layout_check(srv);
+}
+
+/* WS_MSG_SET_KEYBOARD_LAYOUT: make layout `index` the active one. */
+int
+keyboard_set_layout(struct ws_server *srv, uint32_t index)
+{
+	if (srv->xkb_state == NULL || index >= srv->nlayouts)
+		return EINVAL;
+	xkb_state_update_mask(srv->xkb_state,
+	    xkb_state_serialize_mods(srv->xkb_state, XKB_STATE_MODS_DEPRESSED),
+	    xkb_state_serialize_mods(srv->xkb_state, XKB_STATE_MODS_LATCHED),
+	    xkb_state_serialize_mods(srv->xkb_state, XKB_STATE_MODS_LOCKED),
+	    xkb_state_serialize_layout(srv->xkb_state,
+	    XKB_STATE_LAYOUT_DEPRESSED),
+	    xkb_state_serialize_layout(srv->xkb_state, XKB_STATE_LAYOUT_LATCHED),
+	    index);
+	state_changed(srv);
+	return 0;
+}
+
+/* KeyRepeatDelay or KeyRepeatInterval changed. */
+void
+keyboard_repeat_changed(struct ws_server *srv)
+{
+	struct ws_client *c;
+
+	repeat_stop(srv);
+	for (c = srv->clients; c != NULL; c = c->next)
+		if ((c->flags & WS_CONNECT_XKB) && c->sock >= 0)
+			send_keymap(srv, c);
+}
+
+/* A locked modifier's mask in keymap km, if km has it. */
+static xkb_mod_mask_t
+locked_mod(struct ws_server *srv, struct xkb_keymap *km, const char *name)
+{
+	xkb_mod_index_t i;
+
+	if (xkb_state_mod_name_is_active(srv->xkb_state, name,
+	    XKB_STATE_MODS_LOCKED) <= 0)
+		return 0;
+	i = xkb_keymap_mod_get_index(km, name);
+	return i == XKB_MOD_INVALID ? 0 : (xkb_mod_mask_t)1 << i;
+}
+
+/*
+ * The keyboard settings in srv->cfg changed: compile the keymap again
+ * and switch to it. Keys held stay held, Caps Lock and Num Lock stay
+ * locked, and the active layout stays active if it's still in the list.
+ * Every key event from now on carries keysyms from the new keymap;
+ * WS_CONNECT_XKB connections get it (WS_EVENT_KEYMAP), then the state
+ * (WS_EVENT_MODIFIERS).
+ */
+int
+keyboard_reload(struct ws_server *srv)
+{
+	char active[32], names[WS_MAX_KEYBOARD_LAYOUTS][32];
+	struct xkb_keymap *km;
+	struct xkb_state *st;
+	xkb_mod_mask_t locked;
+	struct ws_client *c;
+	struct ws_window *w;
+	uint32_t group = 0, i;
+
+	if (srv->xkb_ctx == NULL)
+		return -1;
+	km = keymap_compile(srv, &srv->cfg);
+	if (km == NULL)
+		return -1;
+	st = xkb_state_new(km);
+	if (st == NULL) {
+		xkb_keymap_unref(km);
+		return -1;
+	}
+	strlcpy(active, srv->layout_active < WS_MAX_KEYBOARD_LAYOUTS ?
+	    srv->layouts[srv->layout_active] : "", sizeof(active));
+	split_list(srv->cfg.keyboard_layout, names);
+	for (i = 0; i < WS_MAX_KEYBOARD_LAYOUTS &&
+	    i < xkb_keymap_num_layouts(km); i++)
+		if (active[0] != '\0' && strcmp(names[i], active) == 0) {
+			group = i;
+			break;
+		}
+	locked = locked_mod(srv, km, XKB_MOD_NAME_CAPS) |
+	    locked_mod(srv, km, XKB_MOD_NAME_NUM);
+	for (i = 0; i < srv->nkeys_held; i++)
+		xkb_state_update_key(st, srv->keys_held[i], XKB_KEY_DOWN);
+	xkb_state_update_mask(st,
+	    xkb_state_serialize_mods(st, XKB_STATE_MODS_DEPRESSED),
+	    xkb_state_serialize_mods(st, XKB_STATE_MODS_LATCHED), locked,
+	    xkb_state_serialize_layout(st, XKB_STATE_LAYOUT_DEPRESSED),
+	    xkb_state_serialize_layout(st, XKB_STATE_LAYOUT_LATCHED), group);
+
+	repeat_stop(srv);
+	xkb_state_unref(srv->xkb_state);
+	xkb_keymap_unref(srv->xkb_keymap);
+	srv->xkb_state = st;
+	srv->xkb_keymap = km;
+	if (keymap_export(srv) < 0)
+		ws_warn("can't export the new keymap");
+	srv->layout_active = (uint32_t)-1;	/* announce it below */
+	layouts_note(srv);
+	srv->layout_active = (uint32_t)-1;
+	for (c = srv->clients; c != NULL; c = c->next) {
+		if ((c->flags & WS_CONNECT_XKB) == 0 || c->sock < 0)
+			continue;
+		send_keymap(srv, c);
+		if (c != key_target(srv, &w))
+			send_modifiers(srv, c, 0);
+	}
+	state_changed(srv);
+	return 0;
 }
 
 static bool
@@ -518,6 +817,8 @@ keyboard_key(struct ws_server *srv, uint32_t code, bool pressed)
 	    XKB_STATE_MODS_LOCKED | XKB_STATE_LAYOUT_EFFECTIVE)) != 0 &&
 	    (c = key_target(srv, &w)) != NULL && (c->flags & WS_CONNECT_XKB))
 		send_modifiers(srv, c, w != NULL ? w->id : 0);
+	if (changed & XKB_STATE_LAYOUT_EFFECTIVE)
+		layout_check(srv);
 
 	if (pressed) {
 		repeat_stop(srv);

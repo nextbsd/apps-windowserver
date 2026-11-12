@@ -37,7 +37,8 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_MINIMIZE | WS_SERVER_DOCK | \
 				 WS_SERVER_SCROLL_PHASES | WS_SERVER_OVERVIEW | \
 				 WS_SERVER_DOCK_EDGE | WS_SERVER_MINIMIZE_WHERE | \
-				 WS_SERVER_USABLE_AREA | WS_SERVER_SCREEN_CHANGES)
+				 WS_SERVER_USABLE_AREA | WS_SERVER_SCREEN_CHANGES | \
+				 WS_SERVER_SETTINGS)
 
 /* Connections that aren't apps: wsctl and the Dock's window list. */
 #define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK)
@@ -50,6 +51,8 @@ struct ws_config {
 	char	keyboard_layout[64];
 	char	keyboard_variant[64];
 	char	keyboard_options[128];
+	char	keyboard_layout_shortcut[16]; /* None, ControlSpace, AltShift,
+					   WinSpace, CapsLock */
 	int	key_repeat_delay;	/* ms before the first repeat */
 	int	key_repeat_interval;	/* ms between repeats */
 	bool	click_through;		/* activating click also acts */
@@ -61,6 +64,10 @@ struct ws_config {
 					   to four fingers */
 	char	secondary_click[32];	/* TwoFingers, BottomRightCorner, Off */
 	double	pointer_speed;		/* libinput accel speed, -1 to 1 */
+	double	trackpad_speed;		/* touchpads; NAN = pointer_speed */
+	double	mouse_speed;		/* other pointers; NAN = pointer_speed */
+	char	mouse_accel_profile[16]; /* adaptive or flat (not touchpads) */
+	bool	left_handed;		/* buttons swapped */
 	double	scroll_speed;		/* scroll distance multiplier */
 	bool	momentum_scrolling;
 	bool	natural_scrolling;
@@ -81,9 +88,30 @@ struct ws_config {
 	bool	reduce_motion;		/* no animations */
 };
 
+/* What a live change to a key needs (config.c's key table). */
+#define CONFIG_LIVE	0x01	/* read on every event: nothing */
+#define CONFIG_DEVICE	0x02	/* applied to every input device again */
+#define CONFIG_KEYMAP	0x04	/* the keymap is compiled again */
+#define CONFIG_REPEAT	0x08	/* XKB clients hear the repeat values */
+#define CONFIG_SETTABLE	(CONFIG_LIVE | CONFIG_DEVICE | CONFIG_KEYMAP | \
+			 CONFIG_REPEAT)
+
+#define CONFIG_MAX_KEYS	64
+
 void	config_defaults(struct ws_config *cfg);
 int	config_load(struct ws_config *cfg, const char *path);
 void	config_env(struct ws_config *cfg);
+int	config_nkeys(void);
+int	config_find(const char *name);
+const char *config_key_name(int i);
+unsigned config_key_flags(int i);
+int	config_key_type(int i);
+int	config_set_text(struct ws_config *cfg, int i, const char *value);
+bool	config_get_text(const struct ws_config *cfg, int i, char *buf,
+	    size_t len);
+bool	config_equal(const struct ws_config *a, const struct ws_config *b,
+	    int i);
+void	config_copy(struct ws_config *dst, const struct ws_config *src, int i);
 
 /* ---- objects ---- */
 
@@ -302,8 +330,24 @@ struct ws_mach_item {
 	} msg;
 };
 
+/* An input device libinput reported (input.c). */
+struct ws_input_device {
+	struct libinput_device *dev;	/* ref'd */
+	uint32_t	flags;		/* WS_INPUT_* */
+	struct ws_input_device *next;
+};
+
 struct ws_server {
-	struct ws_config cfg;
+	struct ws_config cfg;		/* in effect: base + session */
+	/* settings layers (settings.c) */
+	struct ws_config base;		/* the system's */
+	struct ws_config session;	/* the console user's values ... */
+	bool		session_set[CONFIG_MAX_KEYS]; /* ... for these keys */
+	uid_t		session_uid;	/* console user they belong to,
+					   -1 = nobody logged in */
+	const char	*config_path;	/* the system plist */
+	const char	*opt_socket;	/* command line */
+	const char	*opt_service;
 	bool		headless;
 	bool		running;
 	int		kq;
@@ -421,10 +465,15 @@ struct ws_server {
 	uint32_t	server_keys[WS_MAX_KEYS_HELD];	/* evdev codes */
 	unsigned	nserver_keys;
 	uint32_t	start_tap;	/* Start key down on its own, 0 = no */
+	uint32_t	layout_active;	/* the active layout (XKB group) */
+	uint32_t	nlayouts;
+	char		layouts[WS_MAX_KEYBOARD_LAYOUTS][32];	/* "us", "gr" */
+	char		variants[WS_MAX_KEYBOARD_LAYOUTS][32];
 
 	/* input (input.c) */
 	struct libinput	*libinput;
 	struct udev	*udev;
+	struct ws_input_device *input_devices;
 
 	/* VT (vt.c) */
 	int		tty_fd;
@@ -534,6 +583,7 @@ int	tile_set_app_icon(struct ws_server *srv, struct ws_client *c,
 
 /* ---- dock.c ---- */
 bool	dock_may_list(struct ws_server *srv, uid_t uid);
+uid_t	console_uid(void);
 bool	dock_shows_minimized(struct ws_server *srv,
 	    const struct ws_window *w);
 void	dock_list_changed(struct ws_server *srv);
@@ -593,8 +643,24 @@ void	scroll_window_gone(struct ws_server *srv, struct ws_window *w);
 void	pointer_window_gone(struct ws_server *srv, struct ws_window *w);
 void	pointer_recheck(struct ws_server *srv);
 
+/* ---- settings.c ---- */
+void	settings_init(struct ws_server *srv);
+int	settings_reload_system(struct ws_server *srv);
+void	settings_housekeeping(struct ws_server *srv);
+void	settings_set(struct ws_server *srv, struct ws_client *c,
+	    struct ws_mach_item *item);
+void	settings_get(struct ws_server *srv, struct ws_client *c);
+void	settings_tools_notify(struct ws_server *srv, ws_event_t *ev);
+void	config_load_system(struct ws_server *srv, struct ws_config *cfg);
+
 /* ---- keyboard.c ---- */
 int	keyboard_init(struct ws_server *srv);
+int	keyboard_check(struct ws_server *srv, const struct ws_config *cfg);
+bool	keyboard_shortcut_valid(const char *name);
+int	keyboard_reload(struct ws_server *srv);
+void	keyboard_repeat_changed(struct ws_server *srv);
+int	keyboard_set_layout(struct ws_server *srv, uint32_t index);
+void	keyboard_list_layouts(struct ws_server *srv, struct ws_client *c);
 void	keyboard_fini(struct ws_server *srv);
 void	keyboard_key(struct ws_server *srv, uint32_t evdev_code, bool pressed);
 void	keyboard_repeat_fire(struct ws_server *srv);
@@ -640,6 +706,8 @@ void	vt_install_crash_handlers(struct ws_server *srv);
 /* ---- input.c ---- */
 int	input_open(struct ws_server *srv);
 void	input_readable(struct ws_server *srv);
+void	input_reconfigure(struct ws_server *srv);
+void	input_list(struct ws_server *srv, struct ws_client *c);
 void	input_close(struct ws_server *srv);
 
 /* ---- privs.c ---- */

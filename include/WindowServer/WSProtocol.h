@@ -93,6 +93,12 @@ enum {
 	WS_MSG_OVERVIEW,		/* ws_req_int_t: WS_OVERVIEW_* */
 	/* WS_CONNECT_DOCK only (servers with WS_SERVER_DOCK_EDGE) */
 	WS_MSG_DOCK_SET_EDGE,		/* ws_req_dock_edge_t */
+	/* servers with WS_SERVER_SETTINGS, see "Settings" */
+	WS_MSG_SET_SETTINGS,		/* sync, ws_req_settings_t */
+	WS_MSG_GET_SETTINGS,		/* answers on the socket */
+	WS_MSG_SET_KEYBOARD_LAYOUT,	/* sync, ws_req_int_t: layout index */
+	WS_MSG_LIST_KEYBOARD_LAYOUTS,	/* answers on the socket */
+	WS_MSG_LIST_INPUT_DEVICES,	/* answers on the socket */
 	WS_MSG_LAST
 };
 
@@ -373,6 +379,102 @@ typedef struct ws_req_cursor {
  */
 
 /*
+ * Settings (servers with WS_SERVER_SETTINGS). WindowServer's settings
+ * (README, "Settings") change while it runs, in layers:
+ *
+ *   1. the system's: built-in defaults, the system plist
+ *      (/System/Library/Preferences/org.nextbsd.WindowServer.plist),
+ *      WS_<Key> environment variables and the command line, read at
+ *      start and again on SIGHUP or WS_SETTINGS_RELOAD_SYSTEM;
+ *   2. the console user's session: values sent with WS_MSG_SET_SETTINGS,
+ *      normally the user's org.nextbsd.WindowServer defaults, sent once
+ *      at login (wsctl settings reload, from loginwindow's session
+ *      script), then each change the settings apps make.
+ *
+ * The session's values are dropped when the console user changes (a
+ * loginwindow session ends or another one starts), so the login panel
+ * always has the system's settings.
+ *
+ * WS_MSG_SET_SETTINGS (sync, ws_req_settings_t) changes the session's
+ * values. Who may: the same check as the Dock role (see "The Dock"):
+ * root, the server's own user, or the console user; anyone on a
+ * headless server or when nobody is logged in through loginwindow.
+ * Others get EPERM. `data` holds `length` bytes of entries, each
+ *
+ *	one type byte (WS_SETTING_*), the key, NUL, the value as text, NUL
+ *
+ * using the key names of the system plist. A value of the key's own type
+ * fits, an integer fits a real, and a string fits any key and is parsed
+ * (as `defaults write` stores strings). WS_SETTING_DEFAULT drops the
+ * session's value of the key, so the system's applies again. The
+ * request is checked as a whole before anything changes: a key only
+ * the server may set (DRMDevice, User, Group, SocketPath,
+ * AllowTerminate... WS_SETTING_SETTABLE in the answer to
+ * WS_MSG_GET_SETTINGS says which aren't) fails it with EPERM; an
+ * unknown key, a value of the wrong type or out of range, or a keyboard
+ * layout XKB can't compile with EINVAL. The reply then names the key
+ * in u.settings.key. Flags:
+ *   WS_SETTINGS_REPLACE	drop every session value first: the entries
+ *				are the whole set (a login, a reload)
+ *   WS_SETTINGS_RELOAD_SYSTEM	read the system's layer again first
+ *   WS_SETTINGS_SKIP_INVALID	leave out entries that would fail instead
+ *				of failing (a user's defaults may hold keys
+ *				this server doesn't take); the reply still
+ *				names the first one left out, with status 0
+ * Larger sets go in several requests; only the first says REPLACE.
+ *
+ * What a change does:
+ *   - ScrollSpeed, NaturalScrolling, MomentumScrolling, ClickThrough,
+ *     RaiseOnClick, ReduceMotion, StartKeyShowsOverview: used from the
+ *     next event on.
+ *   - PointerSpeed, TrackpadSpeed, MouseSpeed, MouseAccelProfile,
+ *     LeftHanded, TapToClick, TapToDrag, ThreeFingerDrag,
+ *     SecondaryClick: applied again to every input device.
+ *   - KeyboardRules, KeyboardModel, KeyboardLayout, KeyboardVariant,
+ *     KeyboardOptions, KeyboardLayoutShortcut: the keymap is compiled
+ *     again. Key events of every connection carry keysyms and text from
+ *     the new keymap. WS_CONNECT_XKB connections get WS_EVENT_KEYMAP
+ *     again, then WS_EVENT_MODIFIERS with the new state. Keys
+ *     held stay held, Caps Lock and Num Lock stay locked, and the
+ *     active layout stays active if it's still in the list.
+ *   - KeyRepeatDelay, KeyRepeatInterval: WS_CONNECT_XKB connections
+ *     get WS_EVENT_KEYMAP again, which carries them.
+ * Tool and Dock connections get WS_EVENT_SETTINGS_CHANGED after any
+ * change in effect, from any layer.
+ *
+ * WS_MSG_GET_SETTINGS (any connection): a WS_EVENT_SETTING for every
+ * key with the value in effect and where it comes from, then
+ * WS_EVENT_LIST_END.
+ *
+ * Keyboard layouts. KeyboardLayout is a list ("us,gr", variants to
+ * match in KeyboardVariant, ",polytonic"), at most
+ * WS_MAX_KEYBOARD_LAYOUTS. KeyboardLayoutShortcut picks the key that
+ * switches to the next one: None (the default), ControlSpace, AltShift,
+ * WinSpace or CapsLock; a grp: option in KeyboardOptions works too.
+ * WS_MSG_SET_KEYBOARD_LAYOUT (sync, ws_req_int_t, same check as
+ * WS_MSG_SET_SETTINGS) makes layout `value` active (EINVAL past the
+ * end). WS_MSG_LIST_KEYBOARD_LAYOUTS (any connection) answers with a
+ * WS_EVENT_KEYBOARD_LAYOUT per layout, then WS_EVENT_LIST_END. Tool and
+ * Dock connections (the Dock's Input menu) get a WS_EVENT_KEYBOARD_LAYOUT
+ * naming the active layout whenever it changes: the request, the
+ * shortcut, or a new layout list.
+ *
+ * WS_MSG_LIST_INPUT_DEVICES (any connection): a WS_EVENT_INPUT_DEVICE
+ * per input device, then WS_EVENT_LIST_END, so Trackpad and Mouse
+ * settings can say there is none. A headless server has none.
+ */
+#define WS_MAX_SETTINGS_DATA	896
+
+/* WS_SETTINGS_* flags are in WSTypes.h. */
+
+typedef struct ws_req_settings {	/* SET_SETTINGS */
+	ws_req_header_t	hdr;
+	uint32_t	flags;		/* WS_SETTINGS_* */
+	uint32_t	length;		/* bytes used in data */
+	char		data[WS_MAX_SETTINGS_DATA];
+} ws_req_settings_t;
+
+/*
  * Synthetic input. Accepted when the server runs headless, or from a
  * process running as root or as the server's own user.
  */
@@ -411,6 +513,10 @@ typedef struct ws_reply {
 			uint32_t window;
 			uint32_t reserved;
 		} create;
+		struct {
+			char	 key[64];	/* SET_SETTINGS: the key that
+						   failed, or was left out */
+		} settings;
 		uint8_t	raw[128];
 	} u;
 } ws_reply_t;

@@ -6,6 +6,9 @@
 
   WindowServer defaults. Every key can also be set from the environment
   as WS_<Key>, e.g. WS_KeyboardLayout=de. These are the built-in values.
+  The console user's own org.nextbsd.WindowServer defaults go on top of
+  them while their session runs (README, "Settings"). SIGHUP makes the
+  server read this file again.
 -->
 <plist version="1.0">
 <dict>
@@ -13,12 +16,17 @@
 	<string>evdev</string>
 	<key>KeyboardModel</key>
 	<string>pc105</string>
+	<!-- up to four layouts, e.g. us,gr, with variants to match -->
 	<key>KeyboardLayout</key>
 	<string>us</string>
 	<key>KeyboardVariant</key>
 	<string></string>
 	<key>KeyboardOptions</key>
 	<string></string>
+	<!-- the keys that switch layouts: None, ControlSpace, AltShift,
+	     WinSpace or CapsLock -->
+	<key>KeyboardLayoutShortcut</key>
+	<string>None</string>
 	<!-- milliseconds before the first repeat, and between repeats -->
 	<key>KeyRepeatDelay</key>
 	<integer>500</integer>
@@ -52,6 +60,17 @@
 	<false/>
 	<key>PointerSpeed</key>
 	<real>0</real>
+	<!-- touchpads' and mice's own speeds; empty: PointerSpeed -->
+	<key>TrackpadSpeed</key>
+	<string></string>
+	<key>MouseSpeed</key>
+	<string></string>
+	<!-- mouse acceleration: adaptive (on) or flat (off) -->
+	<key>MouseAccelProfile</key>
+	<string>adaptive</string>
+	<!-- swap the primary and secondary buttons -->
+	<key>LeftHanded</key>
+	<false/>
 	<key>ScrollSpeed</key>
 	<real>1</real>
 	<!-- Ctrl+Alt+Backspace stops the server (development) -->

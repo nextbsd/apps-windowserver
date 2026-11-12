@@ -99,6 +99,11 @@ handle_signal(struct ws_server *srv, int sig)
 	case SIGUSR2:
 		vt_signal(srv);
 		break;
+	case SIGHUP:
+		/* Read the system's settings again, as Darwin daemons do. */
+		ws_info("SIGHUP: reading %s again", srv->config_path);
+		(void)settings_reload_system(srv);
+		break;
 	default:
 		ws_info("signal %d: shutting down", sig);
 		ws_quit(srv);
@@ -119,8 +124,10 @@ handle_kevent(struct ws_server *srv, struct kevent *kev)
 	if (kev->filter == EVFILT_TIMER) {
 		if (kev->ident == TIMER_REPEAT)
 			keyboard_repeat_fire(srv);
-		else if (kev->ident == TIMER_HOUSEKEEPING)
+		else if (kev->ident == TIMER_HOUSEKEEPING) {
 			clients_housekeeping(srv);
+			settings_housekeeping(srv);
+		}
 		else if (kev->ident == TIMER_MOMENTUM)
 			scroll_momentum_fire(srv);
 		else if (kev->ident == TIMER_OVERVIEW)
@@ -232,16 +239,10 @@ main(int argc, char **argv)
 		}
 	}
 
-	config_defaults(&srv->cfg);
-	if (config_load(&srv->cfg, config_path) < 0)
-		ws_warn("can't read %s: %s", config_path, strerror(errno));
-	config_env(&srv->cfg);
-	if (opt_socket != NULL)
-		strlcpy(srv->cfg.socket_path, opt_socket,
-		    sizeof(srv->cfg.socket_path));
-	if (opt_service != NULL)
-		strlcpy(srv->cfg.service_name, opt_service,
-		    sizeof(srv->cfg.service_name));
+	srv->config_path = config_path;
+	srv->opt_socket = opt_socket;
+	srv->opt_service = opt_service;
+	settings_init(srv);
 
 	srv->kq = kqueue();
 	if (srv->kq < 0) {

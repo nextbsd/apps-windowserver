@@ -280,6 +280,72 @@ int		 ws_dock_set_edge(ws_connection_t *conn, uint32_t edge,
 int		 ws_dock_preview(ws_connection_t *conn, uint32_t window,
     uint32_t max_size, ws_snapshot_t *out);
 
+/*
+ * Settings, on servers with WS_SERVER_SETTINGS (others fail with
+ * ENOTSUP); see "Settings" in WSProtocol.h. Changing them is for the
+ * console user (EPERM otherwise).
+ *
+ *   ws_set_settings	change the session's values: count entries of
+ *			key, WS_SETTING_* type and value as text (a string
+ *			is parsed for any key; WS_SETTING_DEFAULT drops
+ *			the session's value). flags: WS_SETTINGS_*. If a
+ *			key is refused, failed_key (may be NULL) gets its
+ *			name; with WS_SETTINGS_SKIP_INVALID the call
+ *			succeeds and failed_key names the first key left
+ *			out ("" if none). Long lists go in several
+ *			requests.
+ *   ws_set_setting	one key
+ *   ws_get_settings	fn gets every key's value in effect
+ *   ws_settings_load_file
+ *			send a flat plist of settings (a user's
+ *			org.nextbsd.WindowServer defaults) as one set:
+ *			flags WS_SETTINGS_REPLACE | WS_SETTINGS_SKIP_INVALID
+ *			is what a login does. A missing file is an
+ *			empty set.
+ *   ws_user_settings_path
+ *			that file for this user: $HOME/Library/Preferences/
+ *			org.nextbsd.WindowServer.plist (the directory
+ *			follows GNUSTEP_USER_DEFAULTS_DIR when it's set)
+ *   ws_set_keyboard_layout
+ *			make layout `index` of the KeyboardLayout list
+ *			active (EINVAL past its end)
+ *   ws_list_keyboard_layouts
+ *			fn gets each layout in the list
+ *			(WS_KEYBOARD_LAYOUT_ACTIVE marks the active one).
+ *			Tool and Dock connections also get a
+ *			WS_EVENT_KEYBOARD_LAYOUT with
+ *			WS_KEYBOARD_LAYOUT_CHANGED whenever the active
+ *			layout changes, and WS_EVENT_SETTINGS_CHANGED
+ *			when settings do.
+ *   ws_list_input_devices
+ *			fn gets each input device (WS_INPUT_TOUCHPAD,
+ *			WS_INPUT_MOUSE...)
+ */
+#define WS_SETTINGS_DOMAIN	"org.nextbsd.WindowServer"
+
+typedef struct ws_setting {
+	const char	*key;
+	int		type;		/* WS_SETTING_* */
+	const char	*value;
+} ws_setting_t;
+
+int		 ws_set_settings(ws_connection_t *conn, uint32_t flags,
+    const ws_setting_t *settings, unsigned count, char *failed_key,
+    size_t failed_len);
+int		 ws_set_setting(ws_connection_t *conn, const char *key, int type,
+    const char *value);
+int		 ws_get_settings(ws_connection_t *conn,
+    void (*fn)(const ws_event_setting_t *setting, void *ctx), void *ctx);
+int		 ws_settings_load_file(ws_connection_t *conn, const char *path,
+    uint32_t flags, char *failed_key, size_t failed_len);
+int		 ws_user_settings_path(char *buf, size_t len);
+int		 ws_set_keyboard_layout(ws_connection_t *conn, uint32_t index);
+int		 ws_list_keyboard_layouts(ws_connection_t *conn,
+    void (*fn)(const ws_event_keyboard_layout_t *layout, void *ctx),
+    void *ctx);
+int		 ws_list_input_devices(ws_connection_t *conn,
+    void (*fn)(const ws_event_input_device_t *device, void *ctx), void *ctx);
+
 /* Names for event types and helpers, for logging. */
 const char	*ws_event_name(uint16_t type);
 

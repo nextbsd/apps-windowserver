@@ -6,6 +6,8 @@
 #   gmake                 build everything into build/
 #   gmake install         install (honours DESTDIR and the *DIR variables)
 #   gmake check           run the headless test (tests/headless-test.sh)
+#   gmake check-settings  the settings test against a running headless
+#                         server (WS_SERVICE_NAME=..., tests/settings-test.sh)
 #   gmake clean
 
 CC		?= cc
@@ -118,7 +120,10 @@ install: all
 check: all
 	sh tests/headless-test.sh $(B)
 
+check-settings: all
+	sh tests/settings-test.sh $(B)
+
 clean:
 	rm -rf $(B)
 
-.PHONY: all install check clean
+.PHONY: all install check check-settings clean
