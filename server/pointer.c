@@ -146,7 +146,8 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 					window_make_key(srv, w);
 				}
 				if (srv->cfg.raise_on_click)
-					window_order(srv, w, WS_ORDER_ABOVE, NULL);
+					window_order_by_server(srv, w,
+					    WS_ORDER_ABOVE, NULL);
 				if (activated && !srv->cfg.click_through)
 					srv->grab_suppressed = true;
 			}

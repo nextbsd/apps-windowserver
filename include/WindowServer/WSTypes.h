@@ -124,6 +124,7 @@ extern "C" {
 #define WS_SERVER_JOIN		0x0004	/* accepts WS_CONNECT_JOIN */
 #define WS_SERVER_XKB		0x0008	/* accepts WS_CONNECT_XKB */
 #define WS_SERVER_XRGB		0x0010	/* accepts WS_FORMAT_XRGB8888 buffers */
+#define WS_SERVER_ORDERED	0x0020	/* sends WS_EVENT_WINDOW_ORDERED */
 
 /* Synthetic input kinds (wsctl, headless testing). */
 #define WS_INJECT_MOTION	1	/* absolute: x, y */
@@ -182,6 +183,7 @@ enum {
 	WS_EVENT_KEYMAP,		/* WS_CONNECT_XKB only */
 	WS_EVENT_MODIFIERS,		/* WS_CONNECT_XKB only */
 	WS_EVENT_KEYS_HELD,		/* WS_CONNECT_XKB only */
+	WS_EVENT_WINDOW_ORDERED,
 	WS_EVENT_MAX
 };
 
@@ -325,6 +327,25 @@ typedef struct ws_event_keys_held {
 	uint32_t	keycodes[WS_MAX_KEYS_HELD]; /* XKB keycodes */
 } ws_event_keys_held_t;
 
+/*
+ * WS_EVENT_WINDOW_ORDERED (about hdr.window): the server moved one of
+ * the client's windows in the stack, or ordered it out, on its own
+ * (RaiseOnClick, for now), so a client that keeps its own copy of the
+ * stacking order, such as an X server, can follow. A client's own
+ * ordering, level and destroy requests never cause one. The new place
+ * is given by the client's own visible windows next to it, on any
+ * level.
+ */
+typedef struct ws_event_ordered {
+	int32_t		op;		/* WS_ORDER_ABOVE: in the stack at a new
+					   place; WS_ORDER_OUT: ordered out */
+	uint32_t	below;		/* the client's nearest visible window
+					   below it, 0 = none (or ordered out) */
+	uint32_t	above;		/* its nearest visible window above it,
+					   0 = none (or ordered out) */
+	int32_t		level;
+} ws_event_ordered_t;
+
 /* Window list entry (wsctl list). */
 #define WS_WINDOW_INFO_VISIBLE	0x0001
 #define WS_WINDOW_INFO_KEY	0x0002	/* key window of the active app */
@@ -360,6 +381,7 @@ typedef struct ws_event {
 		ws_event_keymap_t	keymap;
 		ws_event_modifiers_t	modifiers;
 		ws_event_keys_held_t	keys_held;
+		ws_event_ordered_t	ordered;
 		uint8_t			raw[232];
 	} u;
 } ws_event_t;
