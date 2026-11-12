@@ -215,7 +215,11 @@ enter(struct ws_server *srv, struct ws_window *w, unsigned at)
 		w->has_saved_frame = true;
 	}
 	w->tiled = true;
-	w->tiling_fresh = true;
+	/* A window shown just now may still settle its frame; one that was
+	   on screen when tiling started has its frame already, the one it
+	   gets back, whatever its owner does on hearing of the tile (a
+	   GNUstep app also changing its menu style for tiling). */
+	w->tiling_fresh = !srv->tiling.starting;
 	w->tiling_insist = 0;
 	w->tiling_drawn = 0;
 	w->tiling_own_size = false;
@@ -626,6 +630,7 @@ settle(struct ws_server *srv)
 	if (!t->on)
 		return;
 	sync_windows(srv);
+	t->starting = false;
 	layout(srv);
 }
 
@@ -1382,6 +1387,7 @@ tiling_config_changed(struct ws_server *srv, const struct ws_config *old)
 		ws_info("tiling: %s", on ? "on" : "off, windows stack");
 	if (on && !t->on) {
 		t->on = true;
+		t->starting = true;
 		t->focus = NULL;
 	} else if (!on && t->on)
 		tiling_off(srv);

@@ -213,8 +213,8 @@ expect_tile O1 962,404,310x388 "the other app's window too"
     fail "P1 marked tiled" || pass "P1 isn't marked tiled"
 mark
 P2=$M
-check "T3's app heard its new frame" "$P1" "$P2" \
-    'app=Tiler type=window-frame win=T3 frame=8,8,628x784'
+check "T3's app heard its new frame, marked as a tile" "$P1" "$P2" \
+    'app=Tiler type=window-frame win=T3 frame=8,8,628x784 tiled'
 check "O1's app too" "$P1" "$P2" \
     'app=Other type=window-frame win=O1 frame=962,404,310x388'
 expect_pixel 322 400 3050c0 "T3 redrawn at its new size"
@@ -478,6 +478,8 @@ expect_status 'area=8,8,1584x884 ' "a bigger screen: laid out again"
 settle
 
 # ---- tiling off ----
+mark
+POFF=$M
 "$B/wsctl" tiling off || fail "wsctl tiling off"
 settle
 expect_status '^mode=stacking .*tiled=0 ' "tiling off"
@@ -492,6 +494,10 @@ expect_pixel 7 400 202020 "no border"
 "$B/wsctl" snapshot "$LOG/tiling-stacking.ppm" >/dev/null
 mark
 P6=$M
+check "T3's app heard its old frame back, not as a tile" "$POFF" "$P6" \
+    'win=T3 frame=300,200,400x300$'
+check_not "no frame given back is marked as a tile" "$POFF" "$P6" \
+    'type=window-frame .* tiled$'
 check_not "no errors" 0 "$P6" 'type=error'
 "$B/wsctl" tiling focus left 2>/dev/null &&
     fail "focus while stacking" || pass "tiling requests fail while stacking"

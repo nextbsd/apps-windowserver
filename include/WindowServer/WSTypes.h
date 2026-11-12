@@ -424,7 +424,20 @@ typedef struct ws_event_app {
 
 typedef struct ws_event_frame {
 	ws_rect_t	frame;
+	/* added after protocol 1 shipped (WS_SERVER_TILING); older servers
+	   send the event without them, and they read as 0 */
+	uint32_t	flags;		/* WS_FRAME_* */
+	uint32_t	reserved;
 } ws_event_frame_t;
+
+/*
+ * WS_EVENT_WINDOW_FRAME flags. WS_FRAME_TILED: the frame is the window's
+ * tile (see "Window tiling" in WSProtocol.h), not one the owner or the
+ * user chose. An owner that saves its windows' frames (GNUstep's frame
+ * autosave) keeps the frame from before tiling instead; a frame without
+ * it (leaving tiling gives the old frame back) is an ordinary one.
+ */
+#define WS_FRAME_TILED		0x0001
 
 typedef struct ws_event_buffer {
 	uint32_t	buffer_id;

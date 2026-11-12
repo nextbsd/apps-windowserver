@@ -1237,7 +1237,7 @@ window_tile_raise(struct ws_server *srv, struct ws_window *t)
 }
 
 /* The server gives w a new frame: its owner hears it
- * (WS_EVENT_WINDOW_FRAME). */
+ * (WS_EVENT_WINDOW_FRAME, with WS_FRAME_TILED for a tile). */
 void
 window_server_frame(struct ws_server *srv, struct ws_window *w,
     const ws_rect_t *frame)
@@ -1247,6 +1247,8 @@ window_server_frame(struct ws_server *srv, struct ws_window *w,
 	window_set_frame(srv, w, frame);
 	event_init(srv, &ev, WS_EVENT_WINDOW_FRAME, sizeof(ev.u.frame), w->id);
 	ev.u.frame.frame = w->frame;
+	if (w->tiled)
+		ev.u.frame.flags = WS_FRAME_TILED;
 	client_send(srv, w->owner, &ev, -1);
 }
 

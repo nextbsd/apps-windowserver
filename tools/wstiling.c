@@ -253,9 +253,10 @@ print_event(ws_connection_t *conn, const ws_event_t *ev, void *ctx)
 	(void)conn;
 	switch (ev->hdr.type) {
 	case WS_EVENT_WINDOW_FRAME:
-		snprintf(detail, sizeof(detail), "frame=%d,%d,%dx%d",
+		snprintf(detail, sizeof(detail), "frame=%d,%d,%dx%d%s",
 		    ev->u.frame.frame.x, ev->u.frame.frame.y,
-		    ev->u.frame.frame.width, ev->u.frame.frame.height);
+		    ev->u.frame.frame.width, ev->u.frame.frame.height,
+		    (ev->u.frame.flags & WS_FRAME_TILED) ? " tiled" : "");
 		break;
 	case WS_EVENT_MOUSE_DOWN:
 	case WS_EVENT_MOUSE_UP:
