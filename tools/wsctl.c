@@ -63,7 +63,16 @@ usage(void)
 	    "       wsctl layout list\n"
 	    "       wsctl layout set N|NAME  (make a layout of the list active)\n"
 	    "       wsctl layout watch [SECONDS] (print layout and settings changes)\n"
-	    "       wsctl devices           (input devices)\n");
+	    "       wsctl devices           (input devices)\n"
+	    "       wsctl tiling [status]   (the layout: tiled windows, in order)\n"
+	    "       wsctl tiling on|off     (WindowMode tiling or stacking)\n"
+	    "       wsctl tiling layout dwindle|master\n"
+	    "       wsctl tiling gaps INNER [OUTER]\n"
+	    "       wsctl tiling border PIXELS [RRGGBB]\n"
+	    "       wsctl tiling focus|swap left|right|up|down\n"
+	    "       wsctl tiling grow|shrink (the focused tile)\n"
+	    "       wsctl tiling float|tile|toggle [WINDOW] (the key window\n"
+	    "                                if none is given)\n");
 	exit(2);
 }
 
@@ -83,12 +92,13 @@ static void
 print_window(const ws_event_window_info_t *w, void *ctx)
 {
 	(void)ctx;
-	printf("%-3u %-8s pid=%-6d level=%-5d frame=%d,%d,%dx%d%s%s%s \"%s\"\n",
+	printf("%-3u %-8s pid=%-6d level=%-5d frame=%d,%d,%dx%d%s%s%s%s \"%s\"\n",
 	    w->stack_index, w->app_name, w->pid, w->level, w->frame.x,
 	    w->frame.y, w->frame.width, w->frame.height,
 	    (w->flags & WS_WINDOW_INFO_MINIMIZED) ? " minimized" : "",
 	    (w->flags & WS_WINDOW_INFO_ACTIVE) ? " active" : "",
-	    (w->flags & WS_WINDOW_INFO_KEY) ? " key" : "", w->title);
+	    (w->flags & WS_WINDOW_INFO_KEY) ? " key" : "",
+	    (w->flags & WS_WINDOW_INFO_TILED) ? " tiled" : "", w->title);
 }
 
 static void
@@ -630,6 +640,114 @@ dock_main(int argc, char **argv)
 	return r == 0 ? 0 : 1;
 }
 
+/* ---- tiling ---- */
+
+static int settings_fail(const char *what, const char *key);
+
+static void
+print_tiling_item(const ws_event_tiling_item_t *it, void *ctx)
+{
+	(void)ctx;
+	if (it->flags & WS_TILING_ITEM_TILED)
+		printf("tile %u window=%u app=%u tile=%d,%d,%dx%d "
+		    "frame=%d,%d,%dx%d%s\n", it->index, it->window, it->app_id,
+		    it->tile.x, it->tile.y, it->tile.width, it->tile.height,
+		    it->frame.x, it->frame.y, it->frame.width, it->frame.height,
+		    (it->flags & WS_TILING_ITEM_FOCUSED) ? " focused" : "");
+	else
+		printf("float window=%u app=%u frame=%d,%d,%dx%d%s%s\n",
+		    it->window, it->app_id, it->frame.x, it->frame.y,
+		    it->frame.width, it->frame.height,
+		    (it->flags & WS_TILING_ITEM_FLOATED) ? " floated" : "",
+		    (it->flags & WS_TILING_ITEM_REFUSED) ? " too-big" : "");
+}
+
+static int
+tiling_dir(const char *s)
+{
+	if (strcmp(s, "left") == 0)
+		return WS_TILING_DIR_LEFT;
+	if (strcmp(s, "right") == 0)
+		return WS_TILING_DIR_RIGHT;
+	if (strcmp(s, "up") == 0)
+		return WS_TILING_DIR_UP;
+	if (strcmp(s, "down") == 0)
+		return WS_TILING_DIR_DOWN;
+	usage();
+	return 0;
+}
+
+static int
+tiling_cmd(ws_connection_t *c, int argc, char **argv)
+{
+	static const char *const mods[] = { "", "Shift+", "Control+",
+	    "Option+", "Command+" };
+	const char *what = argc >= 3 ? argv[2] : "status";
+	ws_setting_t set[2];
+	ws_event_tiling_t st;
+	char key[64] = "";
+	uint32_t op = WS_TILING_QUERY, win = 0;
+	int32_t arg = 0;
+	unsigned n = 0, i;
+	int r;
+
+	if (strcmp(what, "on") == 0 || strcmp(what, "off") == 0) {
+		set[n++] = (ws_setting_t){ "WindowMode", WS_SETTING_STRING,
+		    what[1] == 'n' ? "tiling" : "stacking" };
+	} else if (strcmp(what, "layout") == 0 && argc == 4) {
+		set[n++] = (ws_setting_t){ "TilingLayout", WS_SETTING_STRING,
+		    argv[3] };
+	} else if (strcmp(what, "gaps") == 0 && (argc == 4 || argc == 5)) {
+		set[n++] = (ws_setting_t){ "TilingGapsInner",
+		    WS_SETTING_STRING, argv[3] };
+		set[n++] = (ws_setting_t){ "TilingGapsOuter",
+		    WS_SETTING_STRING, argv[argc == 5 ? 4 : 3] };
+	} else if (strcmp(what, "border") == 0 && (argc == 4 || argc == 5)) {
+		set[n++] = (ws_setting_t){ "TilingBorder", WS_SETTING_STRING,
+		    argv[3] };
+		if (argc == 5)
+			set[n++] = (ws_setting_t){ "TilingBorderColor",
+			    WS_SETTING_STRING, argv[4] };
+	} else if ((strcmp(what, "focus") == 0 || strcmp(what, "swap") == 0) &&
+	    argc == 4) {
+		op = what[0] == 'f' ? WS_TILING_FOCUS : WS_TILING_SWAP;
+		arg = tiling_dir(argv[3]);
+	} else if ((strcmp(what, "grow") == 0 || strcmp(what, "shrink") == 0) &&
+	    argc == 3) {
+		op = WS_TILING_RESIZE;
+		arg = what[0] == 'g' ? 1 : -1;
+	} else if ((strcmp(what, "float") == 0 || strcmp(what, "tile") == 0 ||
+	    strcmp(what, "toggle") == 0) && argc <= 4) {
+		op = WS_TILING_FLOAT;
+		arg = what[0] == 'f' ? 1 : what[1] == 'i' ? 0 : 2;
+		win = argc == 4 ? (uint32_t)strtoul(argv[3], NULL, 0) : 0;
+	} else if (strcmp(what, "status") != 0 || argc > 3)
+		usage();
+	if (n > 0) {
+		if (ws_set_settings(c, 0, set, n, key, sizeof(key)) < 0)
+			return settings_fail("set", key);
+		return 0;
+	}
+	memset(&st, 0, sizeof(st));
+	if (op == WS_TILING_QUERY) {
+		r = ws_tiling(c, op, win, arg, &st, NULL, NULL);
+		if (r != 0)
+			return r;
+		printf("mode=%s layout=%s tiled=%u focused=%u "
+		    "area=%d,%d,%dx%d gaps=%u,%u border=%u modifier=",
+		    st.mode == WS_TILING_TILING ? "tiling" : "stacking",
+		    st.layout == WS_TILING_MASTER ? "master" : "dwindle",
+		    st.count, st.focused, st.area.x, st.area.y, st.area.width,
+		    st.area.height, st.gaps_inner, st.gaps_outer, st.border);
+		for (i = 4; i > 0; i--)
+			if (st.modifier & (1u << (i - 1)))
+				printf("%s", mods[i]);
+		printf("arrows\n");
+		fflush(stdout);
+	}
+	return ws_tiling(c, op, win, arg, NULL, print_tiling_item, NULL);
+}
+
 /* ---- settings ---- */
 
 static const char *const sources[] = { "built-in", "system", "session" };
@@ -941,6 +1059,12 @@ main(int argc, char **argv)
 		}
 	} else if (strcmp(cmd, "layout") == 0) {
 		r = layout_cmd(c, argc, argv);
+	} else if (strcmp(cmd, "tiling") == 0) {
+		r = tiling_cmd(c, argc, argv);
+		if (r == 2) {		/* it said what failed */
+			ws_disconnect(c);
+			return 1;
+		}
 	} else if (strcmp(cmd, "devices") == 0 && argc == 2) {
 		r = ws_list_input_devices(c, print_device, NULL);
 	} else {

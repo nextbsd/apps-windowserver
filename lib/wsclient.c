@@ -1061,6 +1061,25 @@ ws_window_commit_frame(ws_connection_t *c, uint32_t window, uint32_t flags,
 }
 
 WS_API int
+ws_window_set_size_limits(ws_connection_t *c, uint32_t window,
+    uint32_t min_width, uint32_t min_height, uint32_t max_width,
+    uint32_t max_height)
+{
+	ws_req_size_limits_t m;
+
+	if ((c->server_flags & WS_SERVER_TILING) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	req_init(c, &m.hdr, WS_MSG_WINDOW_SET_SIZE_LIMITS, sizeof(m), window);
+	m.min_width = min_width;
+	m.min_height = min_height;
+	m.max_width = max_width;
+	m.max_height = max_height;
+	return send_oneway(c, &m.hdr);
+}
+
+WS_API int
 ws_window_set_input_region(ws_connection_t *c, uint32_t window,
     const ws_rect_t *rects, unsigned count)
 {
@@ -1590,6 +1609,64 @@ ws_overview(ws_connection_t *c, uint32_t request, ws_event_overview_t *state,
 	}
 }
 
+WS_API int
+ws_tiling(ws_connection_t *c, uint32_t op, uint32_t window, int32_t arg,
+    ws_event_tiling_t *state,
+    void (*fn)(const ws_event_tiling_item_t *, void *), void *ctx)
+{
+	ws_req_tiling_t m;
+	ws_event_t ev;
+	int r, err = 0;
+
+	if ((c->server_flags & WS_SERVER_TILING) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	req_init(c, &m.hdr, WS_MSG_TILING, sizeof(m), window);
+	m.op = op;
+	m.arg = arg;
+	if (send_oneway(c, &m.hdr) < 0)
+		return -1;
+	for (;;) {
+		r = read_event(c, &ev);
+		if (r < 0)
+			return -1;
+		if (r == 0) {
+			r = wait_readable(c, RPC_TIMEOUT_MS);
+			if (r <= 0) {
+				if (r == 0)
+					errno = ETIMEDOUT;
+				return -1;
+			}
+			continue;
+		}
+		if (ev.hdr.type == WS_EVENT_LIST_END) {
+			if (err != 0) {
+				errno = err;
+				return -1;
+			}
+			return 0;
+		}
+		if (ev.hdr.type == WS_EVENT_TILING_STATE) {
+			if (state != NULL)
+				*state = ev.u.tiling;
+			continue;
+		}
+		if (ev.hdr.type == WS_EVENT_TILING_ITEM) {
+			if (fn != NULL)
+				fn(&ev.u.tiling_item, ctx);
+			continue;
+		}
+		if (ev.hdr.type == WS_EVENT_ERROR &&
+		    ev.u.error.request == WS_MSG_TILING) {
+			err = ev.u.error.code ? ev.u.error.code : EIO;
+			continue;
+		}
+		if (queue_push(c, &ev) < 0)
+			return -1;
+	}
+}
+
 WS_API const char *
 ws_event_name(uint16_t type)
 {
@@ -1635,6 +1712,8 @@ ws_event_name(uint16_t type)
 		[WS_EVENT_INPUT_DEVICE] = "input-device",
 		[WS_EVENT_POINTER_OUTSIDE] = "pointer-outside",
 		[WS_EVENT_POINTER_UNGRABBED] = "pointer-ungrabbed",
+		[WS_EVENT_TILING_STATE] = "tiling-state",
+		[WS_EVENT_TILING_ITEM] = "tiling-item",
 	};
 
 	if (type < WS_EVENT_MAX && names[type] != NULL)

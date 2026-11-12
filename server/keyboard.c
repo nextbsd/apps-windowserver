@@ -894,6 +894,8 @@ server_key(struct ws_server *srv, uint32_t code, bool pressed, xkb_keysym_t sym)
 	}
 	if (overview_active(srv))
 		return overview_key(srv, code, sym);
+	if (tiling_key(srv, sym))
+		return true;
 	if (sym == XKB_KEY_BackSpace && srv->cfg.allow_terminate &&
 	    (srv->modifiers & (WS_MOD_CONTROL | WS_MOD_ALT)) ==
 	    (WS_MOD_CONTROL | WS_MOD_ALT)) {

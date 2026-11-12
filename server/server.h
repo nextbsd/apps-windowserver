@@ -43,7 +43,7 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_WINDOW_CURSOR | WS_SERVER_INPUT_REGION | \
 				 WS_SERVER_COMMIT_FRAME | WS_SERVER_WINDOW_IDS | \
 				 WS_SERVER_MENU_BAR | WS_SERVER_ACTIVATE_RAISE | \
-				 WS_SERVER_DOCK_NOT_ACTIVE)
+				 WS_SERVER_DOCK_NOT_ACTIVE | WS_SERVER_TILING)
 
 /* The standard cursors with a built-in image (cursor.c): kinds 0 to
    WS_CURSOR_NOT_ALLOWED. */
@@ -95,6 +95,15 @@ struct ws_config {
 					   where go into the Dock */
 	bool	start_key_overview;	/* a Start tap opens the overview */
 	bool	reduce_motion;		/* no animations */
+	/* window tiling (tiling.c) */
+	char	window_mode[16];	/* stacking or tiling */
+	char	tiling_layout[16];	/* dwindle or master */
+	int	tiling_gaps_inner;	/* pixels between tiles */
+	int	tiling_gaps_outer;	/* pixels around them */
+	double	tiling_master_ratio;	/* master's share, 0.1 to 0.9 */
+	int	tiling_border;		/* active-window border, 0 = none */
+	uint32_t tiling_border_color;	/* 0xRRGGBB */
+	char	tiling_modifier[48];	/* "Command+Option" */
 };
 
 /* What a live change to a key needs (config.c's key table). */
@@ -102,8 +111,9 @@ struct ws_config {
 #define CONFIG_DEVICE	0x02	/* applied to every input device again */
 #define CONFIG_KEYMAP	0x04	/* the keymap is compiled again */
 #define CONFIG_REPEAT	0x08	/* XKB clients hear the repeat values */
+#define CONFIG_TILING	0x10	/* window tiling follows (tiling.c) */
 #define CONFIG_SETTABLE	(CONFIG_LIVE | CONFIG_DEVICE | CONFIG_KEYMAP | \
-			 CONFIG_REPEAT)
+			 CONFIG_REPEAT | CONFIG_TILING)
 
 #define CONFIG_MAX_KEYS	64
 
@@ -182,6 +192,28 @@ struct ws_window {
 	bool		tile_dirty;	/* a tile: redraw tile_image */
 	bool		tile_moved;	/* a tile the user dragged: it stays
 					   where it was put */
+	/* window tiling (tiling.c); not to be confused with the tiles of
+	   minimized windows above */
+	bool		tiled;		/* laid out by tiling: below the
+					   windows that float on its level */
+	bool		tiling_float;	/* the user floated it */
+	bool		tiling_refused;	/* too big for its tile: it floats */
+	unsigned	tiling_insist;	/* owner's other frames in a row */
+	unsigned	tiling_drawn;	/* commits in a row of a buffer
+					   another size than the frame */
+	bool		tiling_own_size; /* it only draws at its own size */
+	bool		tiling_follows;	/* it has drawn at a tile's size */
+	uint64_t	tiling_given_usec; /* when tiling_given changed */
+	bool		tiling_short;	/* its owner took a smaller frame
+					   than tiling_given: it keeps it */
+	bool		tiling_fresh;	/* tiled, no frame from its owner yet */
+	bool		has_saved_frame;
+	ws_rect_t	saved_frame;	/* its frame before it was tiled */
+	ws_rect_t	tiling_given;	/* the tile frame it was last given */
+	uint32_t	min_width;	/* WS_MSG_WINDOW_SET_SIZE_LIMITS, */
+	uint32_t	min_height;	/* 0 = none */
+	uint32_t	max_width;
+	uint32_t	max_height;
 	struct ws_window *above;	/* visible stack, bottom -> top */
 	struct ws_window *below;
 	struct ws_window *next;		/* all windows */
@@ -303,6 +335,55 @@ struct ws_overview {
 	bool		swipe_fired;
 	double		swipe_dx;
 	double		swipe_dy;
+};
+
+/* Window tiling (tiling.c). */
+struct ws_tiling_slot {
+	struct ws_window *w;
+	double		ratio;		/* dwindle: share of the area left
+					   that this slot takes */
+	double		weight;		/* master: share of the stack */
+	ws_rect_t	tile;		/* where it goes, gaps left out */
+};
+
+enum { SPLIT_RATIO, SPLIT_MASTER, SPLIT_STACK };
+
+struct ws_tiling_split {
+	int		kind;		/* SPLIT_* */
+	unsigned	slot;		/* RATIO: the slot whose ratio it is;
+					   STACK: the slot before the line */
+	bool		vertical;	/* a vertical line: sides left, right */
+	ws_rect_t	area;		/* both sides and the gap */
+	int32_t		pos;		/* where the first side ends */
+	ws_rect_t	handle;		/* where a press takes it */
+};
+
+/*
+ * The windows tiled in one area. There is one, for the screen; once
+ * there are workspaces (apps-windowserver#13) each gets its own.
+ */
+struct ws_tiling_space {
+	struct ws_tiling_slot *slots;	/* in layout order */
+	unsigned	nslots;
+	unsigned	cap;
+	struct ws_tiling_split *splits;	/* cap of them */
+	unsigned	nsplits;
+	double		master_ratio;
+	ws_rect_t	area;		/* usable area minus the outer gaps */
+};
+
+struct ws_tiling {
+	bool		on;		/* WindowMode is tiling */
+	int		layout;		/* WS_TILING_DWINDLE or _MASTER */
+	uint32_t	modifier;	/* WS_MOD_* of TilingModifier */
+	bool		dirty;		/* lay out again before the next frame */
+	struct ws_tiling_space space;
+	struct ws_window *focus;	/* tiled window that had the focus */
+	struct ws_window *border;	/* has the border drawn round it */
+	ws_rect_t	border_rect;
+	int		drag_split;	/* split being dragged, -1 = none */
+	int		hover_split;	/* split under the pointer, -1 = none */
+	struct ws_window *moving;	/* tiled window the user drags */
 };
 
 /* Touchpad scrolling in progress (scroll.c). */
@@ -475,6 +556,8 @@ struct ws_server {
 	   the Dock's strips, and the menu bar height last sent with it. */
 	ws_rect_t	usable;
 	uint32_t	usable_menu_bar;
+	/* window tiling (tiling.c) */
+	struct ws_tiling tiling;
 
 	/* cursor */
 	pixman_image_t	*cursor_std[WS_NSTD_CURSORS]; /* built-in kinds */
@@ -635,6 +718,32 @@ void	window_tile_raise(struct ws_server *srv, struct ws_window *t);
 void	window_tiles_place(struct ws_server *srv);
 void	windows_keep_on_screen(struct ws_server *srv, uint32_t old_width,
 	    uint32_t old_height);
+void	window_restack(struct ws_server *srv, struct ws_window *w);
+void	window_server_frame(struct ws_server *srv, struct ws_window *w,
+	    const ws_rect_t *frame);
+
+/* ---- tiling.c ---- */
+void	tiling_init(struct ws_server *srv);
+void	tiling_fini(struct ws_server *srv);
+void	tiling_config_changed(struct ws_server *srv,
+	    const struct ws_config *old);
+bool	tiling_modifier_parse(const char *s, uint32_t *mods);
+void	tiling_changed(struct ws_server *srv);
+void	tiling_window_gone(struct ws_server *srv, struct ws_window *w);
+void	tiling_client_frame(struct ws_server *srv, struct ws_window *w);
+void	tiling_committed(struct ws_server *srv, struct ws_window *w);
+void	tiling_set_size_limits(struct ws_server *srv, struct ws_window *w,
+	    const ws_req_size_limits_t *m);
+void	tiling_flush(struct ws_server *srv);
+bool	tiling_key(struct ws_server *srv, xkb_keysym_t sym);
+bool	tiling_press(struct ws_server *srv, uint32_t button);
+bool	tiling_release(struct ws_server *srv, uint32_t button);
+bool	tiling_motion(struct ws_server *srv);
+void	tiling_grab_end(struct ws_server *srv, struct ws_window *w);
+int	tiling_cursor(struct ws_server *srv);
+void	tiling_draw_border(struct ws_server *srv, struct ws_window *w);
+void	tiling_request(struct ws_server *srv, struct ws_client *c,
+	    uint32_t op, uint32_t window, int32_t arg);
 
 /* ---- tile.c ---- */
 int	tile_init(struct ws_server *srv);

@@ -349,6 +349,12 @@ cursor_update(struct ws_server *srv)
 			hy = c->cursor_hot_y;
 		}
 	}
+	/* Over a split between tiles, or dragging one: the server's. */
+	if (tiling_cursor(srv) >= 0) {
+		kind = (uint32_t)tiling_cursor(srv);
+		buf = NULL;
+		visible = true;
+	}
 	if (kind == WS_CURSOR_CUSTOM && buf != NULL) {
 		img = buf->image;
 	} else {

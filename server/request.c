@@ -341,6 +341,10 @@ min_size(mach_msg_id_t id)
 		return sizeof(ws_req_inject_t);
 	case WS_MSG_DOCK_SET_EDGE:
 		return sizeof(ws_req_dock_edge_t);
+	case WS_MSG_WINDOW_SET_SIZE_LIMITS:
+		return sizeof(ws_req_size_limits_t);
+	case WS_MSG_TILING:
+		return sizeof(ws_req_tiling_t);
 	default:
 		return sizeof(ws_req_header_t);
 	}
@@ -364,6 +368,7 @@ needs_window(mach_msg_id_t id)
 	case WS_MSG_WINDOW_MINIMIZE:
 	case WS_MSG_WINDOW_SET_CURSOR:
 	case WS_MSG_WINDOW_SET_INPUT_REGION:
+	case WS_MSG_WINDOW_SET_SIZE_LIMITS:
 		return true;
 	default:
 		return false;
@@ -488,6 +493,7 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		break;
 	case WS_MSG_WINDOW_SET_FRAME:
 		window_set_frame(srv, w, &((ws_req_frame_t *)(void *)h)->frame);
+		tiling_client_frame(srv, w);
 		break;
 	case WS_MSG_WINDOW_SET_LEVEL:
 		window_set_level(srv, w, value);
@@ -513,6 +519,8 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 	case WS_MSG_WINDOW_SET_FLAGS:
 		if (w->flags != (uint32_t)value)
 			dock_list_changed(srv);
+		if (w->flags != (uint32_t)value)
+			tiling_changed(srv);
 		w->flags = (uint32_t)value;
 		if (w->visible)
 			damage_rect(srv, &w->frame);
@@ -551,6 +559,8 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		}
 		window_commit(srv, w, (uint32_t)value,
 		    (value & WS_COMMIT_SET_FRAME) ? &m->frame : NULL);
+		if (value & WS_COMMIT_SET_FRAME)
+			tiling_client_frame(srv, w);
 		break;
 	}
 	case WS_MSG_WINDOW_MAKE_KEY:
@@ -559,6 +569,26 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 	case WS_MSG_WINDOW_MINIMIZE:
 		window_minimize(srv, w, value);
 		break;
+	case WS_MSG_WINDOW_SET_SIZE_LIMITS:
+		tiling_set_size_limits(srv, w, (ws_req_size_limits_t *)(void *)h);
+		break;
+	case WS_MSG_TILING: {
+		ws_req_tiling_t *m = (void *)h;
+
+		/* tools and the Dock, for the console user */
+		if ((c->flags & WS_CONNECT_TOOL) == 0 ||
+		    !dock_may_list(srv, item->sender_euid)) {
+			ws_event_t ev;
+
+			client_error(srv, c, (uint32_t)id, 0, EPERM,
+			    "tiling requests not allowed");
+			event_init(srv, &ev, WS_EVENT_LIST_END, 0, 0);
+			client_send(srv, c, &ev, -1);
+			break;
+		}
+		tiling_request(srv, c, m->op, h->window, m->arg);
+		break;
+	}
 	case WS_MSG_SET_APP_ICON: {
 		int err;
 
