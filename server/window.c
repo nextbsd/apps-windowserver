@@ -481,6 +481,48 @@ window_order(struct ws_server *srv, struct ws_window *w, int op,
 	pointer_recheck(srv);
 }
 
+/* Tell w's owner where the server put w (WS_EVENT_WINDOW_ORDERED). */
+static void
+send_ordered(struct ws_server *srv, struct ws_window *w)
+{
+	struct ws_window *o;
+	ws_event_t ev;
+
+	event_init(srv, &ev, WS_EVENT_WINDOW_ORDERED, sizeof(ev.u.ordered),
+	    w->id);
+	ev.u.ordered.op = w->visible ? WS_ORDER_ABOVE : WS_ORDER_OUT;
+	ev.u.ordered.level = w->level;
+	if (w->visible) {
+		for (o = w->below; o != NULL && o->owner != w->owner;
+		    o = o->below)
+			;
+		ev.u.ordered.below = o != NULL ? o->id : 0;
+		for (o = w->above; o != NULL && o->owner != w->owner;
+		    o = o->above)
+			;
+		ev.u.ordered.above = o != NULL ? o->id : 0;
+	}
+	client_send(srv, w->owner, &ev, -1);
+}
+
+/*
+ * window_order() for the server's own reasons, not the owner's request:
+ * if w's place changed, the owner hears about it.
+ */
+void
+window_order_by_server(struct ws_server *srv, struct ws_window *w, int op,
+    struct ws_window *rel)
+{
+	struct ws_window *below = w->below, *above = w->above;
+	bool visible = w->visible;
+
+	window_order(srv, w, op, rel);
+	if (w->visible == visible &&
+	    (!visible || (w->below == below && w->above == above)))
+		return;
+	send_ordered(srv, w);
+}
+
 void
 window_set_level(struct ws_server *srv, struct ws_window *w, int32_t level)
 {

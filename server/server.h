@@ -31,7 +31,8 @@ void	ws_log(int level, const char *fmt, ...)
 uint64_t ws_now_usec(void);
 
 /* Optional features this server has (WS_SERVER_* in hello and welcome). */
-#define WS_SERVER_FEATURES	(WS_SERVER_JOIN | WS_SERVER_XKB | WS_SERVER_XRGB)
+#define WS_SERVER_FEATURES	(WS_SERVER_JOIN | WS_SERVER_XKB | \
+				 WS_SERVER_XRGB | WS_SERVER_ORDERED)
 
 /* ---- configuration (config.c) ---- */
 
@@ -343,6 +344,8 @@ void	window_destroy(struct ws_server *srv, struct ws_window *w);
 struct ws_window *window_lookup(struct ws_server *srv, uint32_t id);
 void	window_order(struct ws_server *srv, struct ws_window *w, int op,
 	    struct ws_window *rel);
+void	window_order_by_server(struct ws_server *srv, struct ws_window *w,
+	    int op, struct ws_window *rel);
 void	window_set_level(struct ws_server *srv, struct ws_window *w,
 	    int32_t level);
 void	window_set_frame(struct ws_server *srv, struct ws_window *w,

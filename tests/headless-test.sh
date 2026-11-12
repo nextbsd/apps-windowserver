@@ -116,6 +116,8 @@ expect_pixel 1000 700 202020 "desktop background"
 # W4 is XRGB8888 with alpha byte 0: opaque, without WS_WINDOW_OPAQUE.
 expect_pixel 1000 200 c0c030 "XRGB8888 window W4 opaque"
 expect_pixel 901 101 606018 "XRGB8888 window W4 border"
+mark
+P0=$MARKS
 
 # Click into Alpha's W1 where nothing covers it: Alpha becomes active.
 "$B/wsctl" click 150 450 || fail "wsctl click"
@@ -232,6 +234,22 @@ in_part "$P3" "$P4" 'app=Alpha type=app-activated' &&
 grep -q '"W4"$' "$LOG/list3.txt" && grep '"W4"$' "$LOG/list3.txt" | grep -q ' active key ' &&
     grep '"W1"$' "$LOG/list3.txt" | grep -q ' active ' &&
     pass "wsctl list: W4 key, W1 active (one app)" || fail "wsctl list after the join"
+
+# Restack notices: only for the server's own raises (RaiseOnClick), to
+# the window's owner, with its place among the owner's own windows.
+in_part 0 "$P0" 'type=window-ordered' &&
+    fail "window-ordered for a client's own ordering requests" ||
+    pass "no window-ordered for the clients' own requests"
+in_part "$P0" "$P1" 'app=Alpha type=window-ordered win=W1 op=above below=- above=W2 level=0' &&
+    pass "raising W1 on click told Alpha (below none of its windows, under W2)" ||
+    fail "no window-ordered for W1"
+in_part "$P0" "$P1" 'app=(Beta|Gamma) type=window-ordered' &&
+    fail "window-ordered went to a client whose window didn't move" ||
+    pass "window-ordered only to the raised window's owner"
+in_part "$P1" "$P2" 'app=Gamma type=window-ordered win=W4 op=above below=- above=- level=0' &&
+    pass "raising W4 told its owner, the joined connection" || fail "no window-ordered for W4"
+in_part "$P2" "$P3" 'app=Beta type=window-ordered win=W3 op=above ' &&
+    pass "raising W3 told Beta" || fail "no window-ordered for W3"
 
 # XKB state (Gamma connected with WS_CONNECT_XKB; the others didn't).
 grep -q 'app=Gamma type=keymap win=- format=1 size=[1-9][0-9]* delay=500 interval=33 text=xkb_keymap sealed=yes' "$LOG/wstest.log" &&

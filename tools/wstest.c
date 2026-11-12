@@ -170,6 +170,12 @@ print_event(ws_connection_t *conn, const ws_event_t *ev, void *ctx)
 		    ev->u.modifiers.locked, ev->u.modifiers.group,
 		    ev->u.modifiers.modifiers);
 		break;
+	case WS_EVENT_WINDOW_ORDERED:
+		snprintf(detail, sizeof(detail), "op=%s below=%s above=%s "
+		    "level=%d", ev->u.ordered.op == WS_ORDER_OUT ? "out" :
+		    "above", win_name(ev->u.ordered.below),
+		    win_name(ev->u.ordered.above), ev->u.ordered.level);
+		break;
 	case WS_EVENT_KEYS_HELD:
 		off = (size_t)snprintf(detail, sizeof(detail), "count=%u keys=",
 		    ev->u.keys_held.count);

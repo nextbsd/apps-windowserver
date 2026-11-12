@@ -105,7 +105,7 @@ build/wsctl key a              # type "a" into the active app
 build/wsctl snapshot out.ppm   # save the screen
 ```
 
-`wstest` prints every event it gets. `tests/headless-test.sh` (`gmake check`) does all of this with its own service name and socket, and checks the screen colours, the order of the activation events, and that only the active app gets keys.
+`wstest` prints every event it gets. `tests/headless-test.sh` (`gmake check`) does all of this with its own service name and socket, and checks the screen colours, the order of the activation events, that only the active app gets keys, joining an app, the XKB events, XRGB8888 buffers and restack notices.
 
 `kill -USR1` makes the server write a snapshot to `/tmp/WindowServer-snapshot.ppm`.
 
@@ -150,6 +150,10 @@ Key events carry the keycode, the keysym, text and six coarse `WS_MOD_*` bits, w
 - `WS_EVENT_KEYS_HELD` (`ws_event_keys_held_t`): the XKB keycodes still held down when the connection starts getting key events (its app is activated, or the key window moves to one of its windows), followed by `WS_EVENT_MODIFIERS`. Their key-ups come to it later, so nothing sticks.
 
 Clients without the flag get none of these.
+
+### Restack notices
+
+When the server itself moves a window in the stack or orders it out (today that is RaiseOnClick), it sends the window's owner `WS_EVENT_WINDOW_ORDERED` (`ws_event_ordered_t`): `WS_ORDER_ABOVE` with the owner's own nearest visible windows below and above it, or `WS_ORDER_OUT`. A client's own ordering, level and destroy requests never cause one. An X server uses it to keep its stacking order right; clients that don't care ignore it. Servers that send it set `WS_SERVER_ORDERED`.
 
 ## License
 

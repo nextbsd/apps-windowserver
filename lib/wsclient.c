@@ -1122,6 +1122,7 @@ ws_event_name(uint16_t type)
 		[WS_EVENT_KEYMAP] = "keymap",
 		[WS_EVENT_MODIFIERS] = "modifiers",
 		[WS_EVENT_KEYS_HELD] = "keys-held",
+		[WS_EVENT_WINDOW_ORDERED] = "window-ordered",
 	};
 
 	if (type < WS_EVENT_MAX && names[type] != NULL)
