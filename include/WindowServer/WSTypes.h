@@ -154,6 +154,8 @@ extern "C" {
 #define WS_SERVER_DOCK		0x0080	/* accepts WS_CONNECT_DOCK */
 #define WS_SERVER_SCROLL_PHASES	0x0100	/* scroll phases and momentum
 					   scrolling (WS_SCROLL_PHASE_*) */
+#define WS_SERVER_OVERVIEW	0x0200	/* the window overview (Exposé),
+					   WS_MSG_OVERVIEW */
 
 /* Synthetic input kinds (wsctl, headless testing). */
 #define WS_INJECT_MOTION	1	/* absolute: x, y */
@@ -166,6 +168,15 @@ extern "C" {
 					   scroll; 0, 0: the fingers lift */
 #define WS_INJECT_HOLD		7	/* fingers rest on the touchpad
 					   (pressed 1) or lift (0) */
+/* added after protocol 1 shipped (WS_SERVER_OVERVIEW) */
+#define WS_INJECT_SWIPE		8	/* a touchpad swipe: button = fingers,
+					   pressed = WS_GESTURE_*, dx, dy */
+
+/* Gesture phases (WS_INJECT_SWIPE). */
+#define WS_GESTURE_BEGIN	1
+#define WS_GESTURE_UPDATE	2
+#define WS_GESTURE_END		3
+#define WS_GESTURE_CANCEL	4
 
 typedef struct ws_rect {
 	int32_t		x;
@@ -224,6 +235,10 @@ enum {
 	WS_EVENT_WINDOW_LIST_CHANGED,	/* no payload: list again */
 	WS_EVENT_PREVIEW_CHANGED,	/* about hdr.window; no payload */
 	WS_EVENT_PREVIEW,		/* ws_event_snapshot_t, with a memfd */
+	/* WS_SERVER_OVERVIEW: to tools that ask (WS_MSG_OVERVIEW) and to
+	   Dock connections when the overview opens and closes */
+	WS_EVENT_OVERVIEW_STATE,	/* ws_event_overview_t */
+	WS_EVENT_OVERVIEW_ITEM,		/* ws_event_overview_item_t */
 	WS_EVENT_MAX
 };
 
@@ -454,6 +469,44 @@ typedef struct ws_event_dock_state {
 	uint32_t	reserved;
 } ws_event_dock_state_t;
 
+/*
+ * The window overview (Exposé / Mission Control, servers with
+ * WS_SERVER_OVERVIEW). WindowServer shows every window of every app,
+ * or only one app's (App Exposé), as live scaled-down previews grouped
+ * by app with the app's icon under each group, over the dimmed
+ * desktop. See "The overview" in WSProtocol.h.
+ */
+#define WS_OVERVIEW_CLOSE	0	/* WS_MSG_OVERVIEW values */
+#define WS_OVERVIEW_ALL		1	/* every app's windows */
+#define WS_OVERVIEW_APP		2	/* the active app's (App Exposé) */
+#define WS_OVERVIEW_QUERY	3	/* state and items, nothing changes */
+
+#define WS_OVERVIEW_STATE_CLOSED  0
+#define WS_OVERVIEW_STATE_OPENING 1	/* animating in */
+#define WS_OVERVIEW_STATE_OPEN	  2
+#define WS_OVERVIEW_STATE_CLOSING 3	/* animating out */
+
+typedef struct ws_event_overview {
+	uint32_t	state;		/* WS_OVERVIEW_STATE_* */
+	uint32_t	mode;		/* WS_OVERVIEW_ALL or _APP */
+	uint32_t	count;		/* windows shown */
+	uint32_t	selected;	/* the selected window, 0 = none */
+	uint32_t	app_id;		/* App Exposé: the app shown */
+	uint32_t	reserved;
+} ws_event_overview_t;
+
+#define WS_OVERVIEW_ITEM_SELECTED  0x0001
+#define WS_OVERVIEW_ITEM_MINIMIZED 0x0002
+
+typedef struct ws_event_overview_item {
+	uint32_t	window;		/* as in hdr.window */
+	uint32_t	app_id;		/* client id of the window's app */
+	ws_rect_t	frame;		/* where its preview is, open */
+	ws_rect_t	icon;		/* its group's app icon, 0x0 = none */
+	uint32_t	flags;		/* WS_OVERVIEW_ITEM_* */
+	uint32_t	group;		/* 0 = the first app group */
+} ws_event_overview_item_t;
+
 typedef struct ws_event {
 	ws_event_header_t hdr;
 	union {
@@ -475,6 +528,8 @@ typedef struct ws_event {
 		ws_event_ordered_t	ordered;
 		ws_event_dock_state_t	dock_state;
 		ws_event_snapshot_t	preview;	/* WS_EVENT_PREVIEW */
+		ws_event_overview_t	overview;
+		ws_event_overview_item_t overview_item;
 		uint8_t			raw[232];
 	} u;
 } ws_event_t;

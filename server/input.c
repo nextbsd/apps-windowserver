@@ -252,6 +252,8 @@ handle_event(struct ws_server *srv, struct libinput_event *ev)
 	struct libinput_device *dev = libinput_event_get_device(ev);
 	struct libinput_event_pointer *p;
 	struct libinput_event_keyboard *k;
+	struct libinput_event_gesture *g;
+	enum libinput_event_type type;
 	uint32_t key, count;
 	bool pressed;
 
@@ -321,6 +323,25 @@ handle_event(struct ws_server *srv, struct libinput_event *ev)
 	case LIBINPUT_EVENT_GESTURE_HOLD_BEGIN:
 		/* Fingers resting on the touchpad stop momentum scrolling. */
 		scroll_touch(srv);
+		break;
+	case LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN:
+	case LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE:
+	case LIBINPUT_EVENT_GESTURE_SWIPE_END:
+		/* Three-finger swipes up and down: the overview. */
+		g = libinput_event_get_gesture_event(ev);
+		type = libinput_event_get_type(ev);
+		overview_swipe(srv,
+		    type == LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN ?
+		    WS_GESTURE_BEGIN :
+		    type == LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE ?
+		    WS_GESTURE_UPDATE :
+		    libinput_event_gesture_get_cancelled(g) ?
+		    WS_GESTURE_CANCEL : WS_GESTURE_END,
+		    (unsigned)libinput_event_gesture_get_finger_count(g),
+		    type == LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE ?
+		    libinput_event_gesture_get_dx_unaccelerated(g) : 0,
+		    type == LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE ?
+		    libinput_event_gesture_get_dy_unaccelerated(g) : 0);
 		break;
 	default:
 		/* LIBINPUT_EVENT_POINTER_AXIS is the deprecated duplicate of

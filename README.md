@@ -63,6 +63,7 @@ What works, tested headless:
 - The Dock's view of every app's windows, with change notices, activation, restoring and previews (see [The Dock](#the-dock)).
 - Snapshots and synthetic input for testing.
 - Touchpad scroll phases and momentum scrolling, with synthetic two-finger scrolls (see [Touchpad](#touchpad)).
+- The window overview, Exposé and App Exposé, opened by a Start tap, Control+Up/Down, the Mission Control key or a three-finger swipe (see [The overview](#the-overview)).
 
 Written but only compiled:
 
@@ -76,7 +77,7 @@ Not done yet:
 - The GNUstep backend (`libgnustep-nextbsd` in the libs-back fork) and a real `ws-session`.
 - Waiting for the GPU kext's IOKit match, and display hotplug through IOKit.
 - Images for the standard cursors other than the arrow.
-- Touch, tablets, most gestures and switches. Per-device keyboard settings.
+- Touch, tablets, gestures other than swipes up and down, and switches. Per-device keyboard settings.
 - Skipping windows hidden behind opaque ones while compositing.
 - GPU compositing (EGL/GBM), several displays, HiDPI.
 - A focus-stealing policy: today any app can make itself active.
@@ -108,7 +109,7 @@ build/wsctl key a              # type "a" into the active app
 build/wsctl snapshot out.ppm   # save the screen
 ```
 
-`wstest` prints every event it gets. `tests/headless-test.sh` (`gmake check`) does all of this with its own service name and socket, and checks the screen colours, the order of the activation events, that only the active app gets keys, joining an app, the XKB events, XRGB8888 buffers, restack notices, and minimizing: the tile's picture, icon and live update, selecting and dragging it, and restoring the window with a double-click. It also checks the Dock's requests (`wsctl dock`): that apps can't list other apps' windows, the list with app ids, change notices, minimized windows going into the Dock instead of tiles, previews, activating and restoring from the Dock, and the tiles coming back when the Dock goes away. Then it checks touchpad scrolling: a two-finger flick's phases, momentum that slows down and stops when a finger rests on the touchpad, and no momentum when the fingers stopped before lifting.
+`wstest` prints every event it gets. `tests/headless-test.sh` (`gmake check`) does all of this with its own service name and socket, and checks the screen colours, the order of the activation events, that only the active app gets keys, joining an app, the XKB events, XRGB8888 buffers, restack notices, and minimizing: the tile's picture, icon and live update, selecting and dragging it, and restoring the window with a double-click. It also checks the Dock's requests (`wsctl dock`): that apps can't list other apps' windows, the list with app ids, change notices, minimized windows going into the Dock instead of tiles, previews, activating and restoring from the Dock, and the tiles coming back when the Dock goes away. Then it checks touchpad scrolling: a two-finger flick's phases, momentum that slows down and stops when a finger rests on the touchpad, and no momentum when the fingers stopped before lifting. Last, the overview: opening it with a Start tap (animated), Control+Up, the Mission Control key and three-finger swipes, but not with Command+Q or Start held over a click; its layout (every app's windows, grouped by app, active app first, minimized ones included, menus left out, nothing overlapping, on screen), the dimmed desktop and live previews; keys and clicks going to no app; the arrow keys and Return, a click on a preview (which restores a minimized window), App Exposé, Escape, a second Start tap and a click on empty space.
 
 `kill -USR1` makes the server write a snapshot to `/tmp/WindowServer-snapshot.ppm`.
 
@@ -179,6 +180,28 @@ Two-finger scrolling works as on a Mac. Servers that do this set `WS_SERVER_SCRO
 | `ScrollSpeed` | `1` | Multiplies the scroll distance (touchpad, trackpoint and wheel pixel deltas, not the wheel's detents). |
 
 `wsctl scroll DX DY finger` injects one two-finger scroll step (`0 0` lifts the fingers), `wsctl flick DX DY [STEPS]` a quick two-finger scroll and lift, and `wsctl hold` fingers resting on the touchpad, like the rest of the synthetic input: on a headless server, or for root and the server's own user.
+
+### The overview
+
+Exposé and Mission Control, without workspaces yet: WindowServer shows every window at once, and apps don't change. Servers that have it set `WS_SERVER_OVERVIEW`.
+
+![The overview: two Terminal windows with Terminal's icon under them on the left, Workspace's File Viewer with the NextBSD cube on the right, the frontmost Terminal window selected with a blue border, over the dimmed desktop](docs/overview.png)
+
+- **Opening it.** Tap the Start key on its own (pressed and released with no other key or click in between, so Command shortcuts work as before; `StartKeyShowsOverview`), press Control+Up or the Mission Control key (`KEY_SCALE`, F3 on Apple keyboards), or swipe up with three fingers.
+- **App Exposé.** Control+Down or a three-finger swipe down show only the active app's windows. A swipe up from there shows every window.
+- **What it shows.** Every normal and floating window, visible or minimized, as a live scaled-down preview that follows what the app draws. Windows are grouped by app, the active app first, with the app's icon (`WS_MSG_SET_APP_ICON`) under each group. They're laid out without overlap and never enlarged, in as many group columns as give the largest previews. Desktop-level windows stay, dimmed; menus, the Dock, app icons and tiles fade out. WindowServer draws no text, so there are no titles. A workspace strip comes with workspaces (#13).
+- **Choosing.** Hovering or the arrow keys (and Tab) select a window. A click or Return activates its app with that window in front and key, or restores a minimized one as its tile does. Escape, a click on empty space, Control+Up again or another Start tap close the overview. While it's open, no app gets pointer or key events, except modifier keys.
+- **Animation.** Windows move from their places into the overview and back, about 0.25 s with an ease-out, while the desktop dims. `ReduceMotion` turns the animations off.
+- **Three-finger drag.** With `ThreeFingerDrag` on, the swipes take four fingers.
+
+| Key | Default | |
+|---|---|---|
+| `StartKeyShowsOverview` | `true` | A tap of the Start key on its own opens and closes the overview. |
+| `ReduceMotion` | `false` | No animations. |
+
+`WS_MSG_OVERVIEW` (`ws_overview()`, from `WS_CONNECT_CONTROL` and `WS_CONNECT_DOCK` connections, with the window list's user check) opens it (`WS_OVERVIEW_ALL`, `WS_OVERVIEW_APP`), closes it (`WS_OVERVIEW_CLOSE`) or only asks (`WS_OVERVIEW_QUERY`). It's answered with `WS_EVENT_OVERVIEW_STATE`, then a `WS_EVENT_OVERVIEW_ITEM` for each window with where its preview and its group's icon are, then `WS_EVENT_LIST_END`. Dock connections get `WS_EVENT_OVERVIEW_STATE` when it starts opening and when it has closed.
+
+`wsctl overview [all|app|close|status]` does this from the command line, and `wsctl swipe FINGERS DX DY [STEPS]` injects a touchpad swipe, like the rest of the synthetic input.
 
 ### Minimized windows
 

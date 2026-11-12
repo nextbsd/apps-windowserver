@@ -14,6 +14,7 @@
 
 #include <pixman.h>
 #include <mach/mach.h>
+#include <xkbcommon/xkbcommon.h>
 
 #include <WindowServer/WSTypes.h>
 #include <WindowServer/WSProtocol.h>
@@ -34,7 +35,7 @@ uint64_t ws_now_usec(void);
 #define WS_SERVER_FEATURES	(WS_SERVER_JOIN | WS_SERVER_XKB | \
 				 WS_SERVER_XRGB | WS_SERVER_ORDERED | \
 				 WS_SERVER_MINIMIZE | WS_SERVER_DOCK | \
-				 WS_SERVER_SCROLL_PHASES)
+				 WS_SERVER_SCROLL_PHASES | WS_SERVER_OVERVIEW)
 
 /* Connections that aren't apps: wsctl and the Dock's window list. */
 #define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK)
@@ -74,6 +75,8 @@ struct ws_config {
 	char	minimize_tile_image[256]; /* "" = plain dark rounded tile */
 	bool	minimize_into_dock;	/* a connected Dock shows minimized
 					   windows instead of tiles */
+	bool	start_key_overview;	/* a Start tap opens the overview */
+	bool	reduce_motion;		/* no animations */
 };
 
 void	config_defaults(struct ws_config *cfg);
@@ -206,6 +209,37 @@ enum {
 	TIMER_REPEAT = 1,
 	TIMER_HOUSEKEEPING,
 	TIMER_MOMENTUM,
+	TIMER_OVERVIEW,
+};
+
+/* The window overview (overview.c). */
+struct ws_overview_item {
+	uint32_t	window;
+	uint32_t	app_id;
+	unsigned	group;
+	ws_rect_t	to;		/* place in the overview */
+	ws_rect_t	icon;		/* its group's icon (first item only) */
+	pixman_image_t	*cache;		/* the preview at `to`, box-filtered */
+	bool		cache_dirty;
+};
+
+struct ws_overview {
+	int		state;		/* WS_OVERVIEW_STATE_* */
+	int		mode;		/* WS_OVERVIEW_ALL or _APP */
+	uint32_t	app_id;		/* App Exposé's app */
+	struct ws_overview_item *items;
+	unsigned	nitems;
+	int		selected;	/* item index, -1 = none */
+	bool		dirty;		/* windows changed: lay out again */
+	double		t;		/* 0 closed .. 1 open */
+	double		t_start;	/* t when the animation started */
+	uint64_t	anim_start;
+	uint32_t	buttons;	/* pointer buttons pressed while open */
+	/* touchpad swipe in progress */
+	bool		swiping;
+	bool		swipe_fired;
+	double		swipe_dx;
+	double		swipe_dy;
 };
 
 /* Touchpad scrolling in progress (scroll.c). */
@@ -322,6 +356,8 @@ struct ws_server {
 	double		tile_grab_y;
 	/* touchpad scrolling (scroll.c) */
 	struct ws_scroll_state scroll;
+	/* the window overview (overview.c) */
+	struct ws_overview ov;
 	pixman_image_t	*tile_background; /* MinimizeTileImage, or NULL */
 	pixman_image_t	*tile_mask_outer; /* rounded tile shapes (a8) */
 	pixman_image_t	*tile_mask_inner;
@@ -360,6 +396,10 @@ struct ws_server {
 	 */
 	uint32_t	equiv_keys[WS_MAX_KEYS_HELD];	/* XKB keycodes */
 	unsigned	nequiv_keys;
+	/* keys whose press the server took: their release is its too */
+	uint32_t	server_keys[WS_MAX_KEYS_HELD];	/* evdev codes */
+	unsigned	nserver_keys;
+	uint32_t	start_tap;	/* Start key down on its own, 0 = no */
 
 	/* input (input.c) */
 	struct libinput	*libinput;
@@ -482,6 +522,24 @@ int	dock_preview_memfd(struct ws_server *srv, struct ws_window *w,
 void	tile_scale(pixman_image_t *src, pixman_image_t *dst, int dx, int dy,
 	    int dw, int dh, int sw, int sh);
 
+/* ---- overview.c ---- */
+bool	overview_active(struct ws_server *srv);
+void	overview_open(struct ws_server *srv, int mode);
+void	overview_close(struct ws_server *srv);
+void	overview_toggle(struct ws_server *srv, int mode);
+void	overview_anim_fire(struct ws_server *srv);
+void	overview_flush(struct ws_server *srv);
+void	overview_composite(struct ws_server *srv, pixman_region32_t *region);
+void	overview_window_committed(struct ws_server *srv, struct ws_window *w);
+void	overview_motion(struct ws_server *srv);
+void	overview_button(struct ws_server *srv, uint32_t button);
+bool	overview_key(struct ws_server *srv, uint32_t code, xkb_keysym_t sym);
+void	overview_swipe(struct ws_server *srv, int phase, unsigned fingers,
+	    double dx, double dy);
+void	overview_report(struct ws_server *srv, struct ws_client *to);
+void	overview_fini(struct ws_server *srv);
+void	app_bring_forward(struct ws_server *srv, struct ws_window *w);
+
 /* ---- pointer.c ---- */
 void	pointer_motion(struct ws_server *srv, double x, double y);
 void	pointer_button(struct ws_server *srv, uint32_t button, bool pressed);
@@ -521,6 +579,8 @@ void	cursor_buffer_gone(struct ws_server *srv, struct ws_buffer *b);
 int	compositor_init(struct ws_server *srv);
 void	compositor_fini(struct ws_server *srv);
 void	compositor_repaint(struct ws_server *srv);
+void	composite_window(struct ws_server *srv, struct ws_window *w,
+	    const pixman_box32_t *ext, double opacity);
 void	compositor_present_done(struct ws_server *srv);
 int	snapshot_memfd(struct ws_server *srv, uint32_t *stride);
 int	snapshot_write_ppm(struct ws_server *srv, const char *path);

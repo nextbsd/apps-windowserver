@@ -215,6 +215,19 @@ int		 ws_inject_scroll(ws_connection_t *conn, double dx, double dy);
 int		 ws_inject_scroll_finger(ws_connection_t *conn, double dx,
     double dy);
 int		 ws_inject_hold(ws_connection_t *conn, int down);
+/* A touchpad swipe step (WS_GESTURE_*), on servers with WS_SERVER_OVERVIEW. */
+int		 ws_inject_swipe(ws_connection_t *conn, uint32_t fingers,
+    int phase, double dx, double dy);
+
+/*
+ * The window overview (servers with WS_SERVER_OVERVIEW; tool and Dock
+ * connections only). request is WS_OVERVIEW_ALL or _APP (open), _CLOSE
+ * or _QUERY; then *state (if not NULL) gets the state and fn is called
+ * for each window shown.
+ */
+int		 ws_overview(ws_connection_t *conn, uint32_t request,
+    ws_event_overview_t *state,
+    void (*fn)(const ws_event_overview_item_t *item, void *ctx), void *ctx);
 
 /*
  * The Dock (WS_CONNECT_DOCK on servers with WS_SERVER_DOCK; see "The

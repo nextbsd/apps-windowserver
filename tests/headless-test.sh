@@ -8,7 +8,8 @@
 # synthetic input, including minimizing a window to a tile and
 # restoring it, and the Dock's window list (wsctl dock), with minimized
 # windows handed to the Dock instead of tiles (MinimizeIntoDock), and
-# touchpad scroll phases and momentum scrolling.
+# touchpad scroll phases and momentum scrolling, and the window overview
+# (Exposé).
 #
 #   sh tests/headless-test.sh [BUILD_DIR]
 #
@@ -344,6 +345,144 @@ in_part "$PS2" "$PS3" 'type=scroll .*phase=ended' &&
 # Wheel and other scrolls have no phases.
 grep -q 'app=Alpha type=scroll win=W1 dx=0.00 dy=15.00 source=2 phase=none momentum=none' "$LOG/wstest.log" &&
     pass "a non-touchpad scroll has no phases" || fail "phases on a non-touchpad scroll"
+
+# The window overview (WS_SERVER_OVERVIEW). W3 is minimized (its tile
+# is at the bottom left); Beta is the active app.
+# ov_wait STATE: wait for the overview to be open or closed.
+ov_wait() {
+	i=0
+	while [ $i -lt 30 ]; do
+		"$B/wsctl" overview status >"$LOG/ov.txt" 2>&1
+		grep -q "^state=$1 " "$LOG/ov.txt" && return 0
+		sleep 0.1
+		i=$((i + 1))
+	done
+	cat "$LOG/ov.txt"
+	return 1
+}
+# ov_item WIN FIELD: an item's field (frame, group, icon) from ov.txt.
+ov_item() {
+	awk -v w="window=$1" -v f="$2=" '$2 == w { for (i = 3; i <= NF; i++)
+	    if (index($i, f) == 1) { sub(f, "", $i); print $i } }' "$LOG/ov.txt"
+}
+# ov_center WIN: the centre of its preview, "X Y".
+ov_center() {
+	ov_item "$1" frame | awk -F'[,x]' '{ printf "%d %d\n", $1 + $3 / 2, $2 + $4 / 2 }'
+}
+W1ID=$(awk '/"W1"$/ { sub("id=", "", $1); print $1 }' "$LOG/dock-list.txt")
+W4ID=$(awk '/"W4"$/ { sub("id=", "", $1); print $1 }' "$LOG/dock-list.txt")
+W2ID=$(awk '/"W2"$/ { sub("id=", "", $1); print $1 }' "$LOG/dock-list.txt")
+mark
+PO0=$MARKS
+"$B/wsctl" key Super_L || fail "wsctl key Super_L"
+"$B/wsctl" overview status | grep -q '^state=opening ' &&
+    pass "a Start tap opens the overview, animated" || fail "no opening animation"
+ov_wait open && pass "the overview opened" || fail "overview didn't open"
+cat "$LOG/ov.txt"
+grep -q '^state=open mode=all count=3 ' "$LOG/ov.txt" &&
+    pass "every app's windows: W1, W4 and minimized W3" || fail "overview items"
+[ -z "$(ov_item "$W2ID" frame)" ] && pass "W2 (main-menu level) left out" || fail "W2 in the overview"
+ov_item "$W3ID" group | grep -qx 0 && ov_item "$W1ID" group | grep -qx 1 &&
+    ov_item "$W4ID" group | grep -qx 1 &&
+    pass "grouped by app, the active app (Beta) first" || fail "overview groups"
+grep "window=$W3ID " "$LOG/ov.txt" | grep -q ' selected minimized$' &&
+    pass "W3 shown as minimized, and selected" || fail "W3's item"
+ov_item "$W3ID" icon | grep -q 'x48$' && ov_item "$W1ID" icon | grep -qx '0,0,0x0' &&
+    pass "Beta's group has its icon; Alpha (no icon) none" || fail "group icons"
+awk -F'[ =,x]+' '/^item/ { for (i = 1; i <= NF; i++) if ($i == "frame") {
+	    x[n] = $(i + 1); y[n] = $(i + 2); w[n] = $(i + 3); h[n] = $(i + 4); n++ } }
+    END { bad = 0
+	for (i = 0; i < n; i++) {
+		if (x[i] < 0 || y[i] < 0 || x[i] + w[i] > 1280 || y[i] + h[i] > 800) bad = 1
+		for (j = i + 1; j < n; j++)
+			if (x[i] < x[j] + w[j] && x[j] < x[i] + w[i] &&
+			    y[i] < y[j] + h[j] && y[j] < y[i] + h[i]) bad = 1
+	}
+	exit bad }' "$LOG/ov.txt" &&
+    pass "previews on screen and not overlapping" || fail "overview layout overlaps"
+expect_pixel 5 5 0e0e0e "the desktop dimmed"
+set -- $(ov_center "$W3ID")
+expect_pixel "$1" "$2" 20a050 "minimized W3's live preview"
+set -- $(ov_center "$W1ID")
+expect_pixel "$1" "$2" c03030 "W1's preview"
+"$B/wsctl" snapshot "$LOG/overview.ppm" >/dev/null
+# Keys and the pointer are the overview's while it's open.
+"$B/wsctl" key a || fail "wsctl key a (overview)"
+"$B/wsctl" key Right || fail "wsctl key Right"
+"$B/wsctl" overview status >"$LOG/ov.txt"
+SEL=$(awk -F'selected=' '/^state=/ { split($2, a, " "); print a[1] }' "$LOG/ov.txt")
+[ "$SEL" = "$W1ID" ] || [ "$SEL" = "$W4ID" ] &&
+    pass "Right moved the selection to Alpha's group ($SEL)" || fail "arrow keys (selected $SEL)"
+"$B/wsctl" key Return || fail "wsctl key Return"
+ov_wait closed && pass "Return closed the overview" || fail "Return didn't close it"
+mark
+PO1=$MARKS
+in_part "$PO0" "$PO1" 'type=key-(down|up) .*keycode=38 ' &&
+    fail "a key reached an app through the overview" ||
+    pass "keys went to no app while the overview was open"
+SELNAME=W1
+[ "$SEL" = "$W4ID" ] && SELNAME=W4
+in_part "$PO0" "$PO1" 'app=Alpha type=app-activated' &&
+    in_part "$PO0" "$PO1" "type=key-window-gained win=$SELNAME" &&
+    pass "Return activated Alpha with $SELNAME key" || fail "Return didn't activate the chosen window"
+"$B/wsctl" list | grep "\"$SELNAME\"\$" | grep -q ' active key ' &&
+    pass "$SELNAME is the active key window" || fail "$SELNAME not key after the overview"
+# Control+Up opens it; a click on W3's preview restores W3.
+"$B/wsctl" key ctrl+Up || fail "wsctl key ctrl+Up"
+ov_wait open && pass "Control+Up opened the overview" || fail "Control+Up"
+set -- $(ov_center "$W3ID")
+"$B/wsctl" click "$1" "$2" || fail "wsctl click W3's preview"
+ov_wait closed && pass "a click on a preview closed the overview" || fail "click didn't close it"
+mark
+PO2=$MARKS
+in_part "$PO1" "$PO2" 'app=Beta type=window-restore win=W3' &&
+    pass "clicking minimized W3's preview restored it" || fail "no window-restore from the overview"
+in_part "$PO1" "$PO2" 'type=mouse-(down|up|dragged)' &&
+    fail "the click reached an app" || pass "the click went to no app"
+in_part "$PO1" "$PO2" 'app=Alpha type=mouse-exited' &&
+    pass "the window under the pointer heard it leave when the overview opened" ||
+    fail "no mouse-exited when the overview opened"
+expect_pixel 690 590 20a050 "W3 back on screen"
+# App Exposé: Control+Down shows only the active app's (Beta's) windows.
+"$B/wsctl" key ctrl+Down || fail "wsctl key ctrl+Down"
+ov_wait open || fail "Control+Down"
+grep -q '^state=open mode=app count=1 ' "$LOG/ov.txt" && grep -q "window=$W3ID " "$LOG/ov.txt" &&
+    pass "Control+Down: App Exposé with Beta's W3 only" || fail "App Exposé"
+"$B/wsctl" snapshot "$LOG/app-expose.ppm" >/dev/null
+"$B/wsctl" key Escape || fail "wsctl key Escape"
+ov_wait closed && pass "Escape closed it" || fail "Escape"
+# Command shortcuts don't open it, nor does Start held over a click.
+"$B/wsctl" key cmd+q || fail "wsctl key cmd+q"
+"$B/wsctl" keydown Super_L && "$B/wsctl" click 150 450 && "$B/wsctl" keyup Super_L ||
+    fail "Start held over a click"
+sleep 0.3
+"$B/wsctl" overview status | grep -q '^state=closed ' &&
+    pass "Command+Q and Start with a click don't open it" || fail "the overview opened on a shortcut"
+# The Mission Control key opens it, another Start tap closes it, and
+# so does a click on empty space.
+"$B/wsctl" key XF86LaunchA || fail "wsctl key XF86LaunchA"
+ov_wait open && pass "the Mission Control key opened it" || fail "Mission Control key"
+"$B/wsctl" key Super_L || fail "wsctl key Super_L (close)"
+ov_wait closed && pass "another Start tap closed it" || fail "Start tap didn't close it"
+"$B/wsctl" overview all | grep -q '^state=open ' || fail "wsctl overview all"
+"$B/wsctl" click 5 5 || fail "wsctl click (empty)"
+ov_wait closed && pass "a click on empty space closed it" || fail "click on empty space"
+# Three-finger swipes: up opens, down closes; down from closed is App
+# Exposé; four fingers do nothing (ThreeFingerDrag is off).
+"$B/wsctl" swipe 3 0 -200 || fail "wsctl swipe up"
+ov_wait open && grep -q 'mode=all' "$LOG/ov.txt" &&
+    pass "three-finger swipe up opened it" || fail "swipe up"
+"$B/wsctl" swipe 3 0 200 || fail "wsctl swipe down"
+ov_wait closed && pass "three-finger swipe down closed it" || fail "swipe down"
+"$B/wsctl" swipe 4 0 -200 && "$B/wsctl" swipe 3 300 -100 || fail "wsctl swipe (ignored)"
+sleep 0.3
+"$B/wsctl" overview status | grep -q '^state=closed ' &&
+    pass "four fingers and sideways swipes leave it alone" || fail "a swipe opened it"
+"$B/wsctl" swipe 3 0 200 || fail "wsctl swipe down (closed)"
+ov_wait open && grep -q 'mode=app' "$LOG/ov.txt" &&
+    pass "three-finger swipe down opened App Exposé" || fail "swipe down to App Exposé"
+"$B/wsctl" overview close | grep -q '^state=closed ' &&
+    pass "wsctl overview close" || fail "wsctl overview close"
 
 kill "$TPID"
 wait "$TPID" 2>/dev/null

@@ -43,7 +43,9 @@ pointer_recheck(struct ws_server *srv)
 
 	if (srv->grab != NULL)
 		return;
-	w = window_at(srv, srv->ptr_x, srv->ptr_y);
+	/* While the overview is open, no window is under the pointer. */
+	w = overview_active(srv) ? NULL : window_at(srv, srv->ptr_x,
+	    srv->ptr_y);
 	if (w == srv->hover)
 		return;
 	if (srv->hover != NULL)
@@ -82,6 +84,10 @@ pointer_motion(struct ws_server *srv, double x, double y)
 	srv->ptr_x = x;
 	srv->ptr_y = y;
 	cursor_moved(srv);
+	if (overview_active(srv) && srv->grab == NULL) {
+		overview_motion(srv);
+		return;
+	}
 	if (srv->grab != NULL) {
 		if (srv->grab->tile_for != NULL) {
 			if (srv->buttons & (1u << WS_BUTTON_LEFT))
@@ -134,7 +140,21 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 	if (button >= 32)
 		return;
 	scroll_touch(srv);
+	srv->start_tap = 0;	/* a click: Start isn't tapped on its own */
 	mask = 1u << button;
+	/* The overview takes the buttons pressed while it is open, up to
+	 * their release (even if it closed meanwhile). */
+	if (pressed && overview_active(srv) && (srv->buttons & mask) == 0) {
+		if ((srv->ov.buttons & mask) == 0) {
+			srv->ov.buttons |= mask;
+			overview_button(srv, button);
+		}
+		return;
+	}
+	if (!pressed && (srv->ov.buttons & mask)) {
+		srv->ov.buttons &= ~mask;
+		return;
+	}
 	if (pressed) {
 		if (srv->buttons & mask)
 			return;
@@ -212,7 +232,7 @@ pointer_scroll_send(struct ws_server *srv, struct ws_window *w, double dx,
 {
 	ws_event_t ev;
 
-	if (w == NULL || w->owner->dead)
+	if (w == NULL || w->owner->dead || overview_active(srv))
 		return;
 	dx *= srv->cfg.scroll_speed;
 	dy *= srv->cfg.scroll_speed;

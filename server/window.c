@@ -577,6 +577,7 @@ window_set_frame(struct ws_server *srv, struct ws_window *w,
 		damage_rect(srv, &w->frame);
 		pointer_recheck(srv);
 	}
+	srv->ov.dirty = true;	/* the overview lays out again */
 	if (w->tile != NULL) {
 		w->tile->tile_dirty = true;
 		damage_rect(srv, &w->tile->frame);
@@ -645,6 +646,7 @@ window_commit(struct ws_server *srv, struct ws_window *w, uint32_t flags)
 			pixman_region32_fini(&r);
 		}
 	}
+	overview_window_committed(srv, w);
 	if (w->tile != NULL) {
 		/* The tile shows the new frame. */
 		w->tile->tile_dirty = true;
