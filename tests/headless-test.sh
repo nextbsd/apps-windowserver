@@ -68,7 +68,7 @@ serial() {
 		END { print s }' "$LOG/wstest.log"
 }
 
-"$B/WindowServer" --headless 1280x800 --socket "$SOCK" -v \
+"$B/WindowServer" --headless 1280x800 --socket "$SOCK" --config /dev/null -v \
     >"$LOG/server.log" 2>&1 &
 SPID=$!
 wait_for "$LOG/server.log" "ready:" 10 || { fail "server didn't start"; cat "$LOG/server.log"; exit 1; }
@@ -87,7 +87,7 @@ expect_pixel 150 150 30a040 "W2 at main-menu level"
 expect_pixel 320 300 30a040 "W2 over W1 and W3"
 expect_pixel 700 600 3050c0 "W3 only"
 expect_pixel 120 450 c03030 "W1 only"
-expect_pixel 1000 700 4a5a6a "desktop background"
+expect_pixel 1000 700 000000 "desktop background"
 
 # Click into Alpha's W1 where nothing covers it: Alpha becomes active.
 "$B/wsctl" click 150 450 || fail "wsctl click"

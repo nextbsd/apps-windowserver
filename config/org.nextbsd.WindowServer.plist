@@ -42,7 +42,7 @@
 	<key>HardwareCursor</key>
 	<true/>
 	<key>BackgroundColor</key>
-	<string>4a5a6a</string>
+	<string>000000</string>
 	<!-- empty: the first /dev/dri/card* with a connected display -->
 	<key>DRMDevice</key>
 	<string></string>
