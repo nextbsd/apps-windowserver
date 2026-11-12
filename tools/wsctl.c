@@ -7,7 +7,8 @@
  * headless, or for root and the server's own user. `wsctl dock ...`
  * connects as a Dock (WS_CONNECT_DOCK) to try the Dock's requests.
  * `wsctl settings` and `wsctl layout` change settings while the server
- * runs, which only the console user may do.
+ * runs, which only the console user may do. `wsctl menubar` connects as
+ * an app with a Mac-style menu bar.
  */
 
 #include <errno.h>
@@ -42,6 +43,10 @@ usage(void)
 	    "       wsctl screen watch [SECONDS] (print screen and usable-area\n"
 	    "                                changes)\n"
 	    "       wsctl sync\n"
+	    "       wsctl menubar HEIGHT [SECONDS] [inactive]\n"
+	    "                                (an app with a menu bar HEIGHT\n"
+	    "                                pixels high, active unless\n"
+	    "                                inactive; stay SECONDS)\n"
 	    "       wsctl dock list [-a]     (every window, with ids; -a: hidden too)\n"
 	    "       wsctl dock activate APP_ID [WINDOW]\n"
 	    "       wsctl dock restore WINDOW\n"
@@ -233,6 +238,94 @@ print_screen_event(const ws_event_t *ev)
 }
 
 /*
+ * wsctl menubar: connect as an app, become active (unless "inactive"),
+ * say the app's menu bar is `height` pixels, and print the usable area
+ * once the server confirms the strip (or at once for an inactive app,
+ * whose report doesn't count yet). Then stay `seconds`, printing each
+ * usable-area change.
+ */
+static int
+menubar_main(int argc, char **argv)
+{
+	ws_connection_t *c;
+	uint32_t height;
+	int seconds, inactive, confirmed = 0, r;
+	time_t end;
+	ws_event_t ev;
+	ws_rect_t u;
+
+	if (argc < 3 || argc > 5)
+		usage();
+	height = (uint32_t)strtoul(argv[2], NULL, 0);
+	seconds = argc >= 4 ? atoi(argv[3]) : 0;
+	inactive = argc == 5 && strcmp(argv[4], "inactive") == 0;
+	if (argc == 5 && !inactive)
+		usage();
+	c = ws_connect("menubar", 0);
+	if (c == NULL) {
+		fprintf(stderr, "wsctl: can't connect to WindowServer: %s\n",
+		    strerror(errno));
+		return 1;
+	}
+	if ((ws_server_flags(c) & WS_SERVER_MENU_BAR) == 0) {
+		fprintf(stderr, "wsctl menubar: %s\n", strerror(ENOTSUP));
+		ws_disconnect(c);
+		return 1;
+	}
+	signal(SIGTERM, on_signal);
+	signal(SIGINT, on_signal);
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	printf("client %u\n", ws_client_id(c));
+	if ((!inactive && ws_activate(c) < 0) || ws_set_menu_bar(c, height) < 0 ||
+	    ws_sync(c) < 0) {
+		fprintf(stderr, "wsctl menubar: %s\n", strerror(errno));
+		ws_disconnect(c);
+		return 1;
+	}
+	/* Two seconds for the strip (an inactive app: what's queued). */
+	end = time(NULL) + (inactive ? 0 : 2);
+	confirmed = !inactive && ws_menu_bar_height(c) == height;
+	while (!confirmed && time(NULL) <= end) {
+		r = ws_next_event(c, &ev, 200);
+		if (r < 0)
+			break;
+		if (r == 0)
+			continue;
+		if (ev.hdr.type == WS_EVENT_ERROR) {
+			fprintf(stderr, "wsctl: server: %s\n",
+			    ev.u.error.message);
+			ws_disconnect(c);
+			return 1;
+		}
+		if (!inactive && ev.hdr.type == WS_EVENT_USABLE_AREA &&
+		    ev.u.usable_area.menu_bar == height)
+			confirmed = 1;
+	}
+	if (!inactive && !confirmed) {
+		fprintf(stderr, "wsctl menubar: %s\n", strerror(ETIMEDOUT));
+		ws_disconnect(c);
+		return 1;
+	}
+	(void)ws_usable_area(c, &u);
+	printf("menubar %u ", ws_menu_bar_height(c));
+	print_usable(&u);
+	end = time(NULL) + seconds;
+	while (!stop && seconds > 0 && time(NULL) < end) {
+		r = ws_next_event(c, &ev, 200);
+		if (r < 0)
+			break;
+		if (r > 0 && ev.hdr.type == WS_EVENT_USABLE_AREA) {
+			printf("menubar %u ", ev.u.usable_area.menu_bar);
+			print_usable(&ev.u.usable_area.usable);
+		} else if (r > 0 && ev.hdr.type == WS_EVENT_ERROR)
+			fprintf(stderr, "wsctl: server: %s\n",
+			    ev.u.error.message);
+	}
+	ws_disconnect(c);
+	return 0;
+}
+
+/*
  * wsctl screen: the screen and its usable area. With "size WxH" the
  * (headless) screen changes size first, and this waits for the
  * screen-changed and usable-area events that confirm it. With "watch",
@@ -257,6 +350,8 @@ screen_cmd(ws_connection_t *c, int argc, char **argv)
 		(void)ws_usable_area(c, &u);
 		printf("screen %ux%u\n", s->width, s->height);
 		print_usable(&u);
+		if (ws_server_flags(c) & WS_SERVER_MENU_BAR)
+			printf("menubar %u\n", ws_menu_bar_height(c));
 		return 0;
 	}
 	if (strcmp(argv[2], "size") == 0 && argc == 4) {
@@ -738,6 +833,8 @@ main(int argc, char **argv)
 	cmd = argv[1];
 	if (strcmp(cmd, "dock") == 0)
 		return dock_main(argc - 1, argv + 1);
+	if (strcmp(cmd, "menubar") == 0)
+		return menubar_main(argc, argv);
 	c = ws_connect("wsctl", WS_CONNECT_CONTROL);
 	if (c == NULL) {
 		fprintf(stderr, "wsctl: can't connect to WindowServer: %s\n",

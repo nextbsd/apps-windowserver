@@ -298,6 +298,8 @@ app_activate(struct ws_server *srv, struct ws_client *c, struct ws_window *key)
 		send_simple(srv, c->key_window->owner,
 		    WS_EVENT_KEY_WINDOW_GAINED, c->key_window->id, 0);
 	keyboard_focus_update(srv);
+	/* Its menu bar, if it has said, sets the strip. */
+	menu_bar_update(srv);
 }
 
 /*
@@ -360,6 +362,7 @@ app_member_gone(struct ws_server *srv, struct ws_client *c)
 			m->app = heir;
 	heir->key_window = c->key_window;
 	c->key_window = NULL;
+	menu_bar_app_gone(srv, c, heir);
 	if (srv->active == c)
 		srv->active = heir;
 	ws_info("client %u (%s) carries on app %u", heir->id, heir->app_name,

@@ -41,7 +41,8 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_SETTINGS | WS_SERVER_LATIN_SHORTCUTS | \
 				 WS_SERVER_POINTER_GRAB | WS_SERVER_POINTER_WARP | \
 				 WS_SERVER_WINDOW_CURSOR | WS_SERVER_INPUT_REGION | \
-				 WS_SERVER_COMMIT_FRAME | WS_SERVER_WINDOW_IDS)
+				 WS_SERVER_COMMIT_FRAME | WS_SERVER_WINDOW_IDS | \
+				 WS_SERVER_MENU_BAR)
 
 /* Connections that aren't apps: wsctl and the Dock's window list. */
 #define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK)
@@ -212,6 +213,9 @@ struct ws_client {
 	uint32_t	dock_edge;	/* WS_MSG_DOCK_SET_EDGE: WS_DOCK_EDGE_* */
 	uint32_t	dock_thickness;
 	uint64_t	dock_edge_serial; /* when it said so (newest wins) */
+	/* WS_MSG_SET_MENU_BAR, on c->app only: the bar's height, or -1
+	   if the app never said */
+	int32_t		menu_bar;
 	struct ws_buffer *buffers;
 	struct ws_window *key_window;	/* app's key window (kept while
 					   inactive); set on c->app only, and
@@ -447,8 +451,16 @@ struct ws_server {
 	uint32_t	dock_thickness;		/* pixels from that edge */
 	uint32_t	dock_edge_client;	/* client id, 0 = none */
 	uint64_t	dock_edge_serial;
-	/* The usable area (screen.c): the screen minus the Dock's strip. */
+	/*
+	 * The menu bar strip along the top (screen.c, WS_MSG_SET_MENU_BAR):
+	 * its height, and the app whose report set it (NULL = none).
+	 */
+	uint32_t	menu_bar;
+	struct ws_client *menu_bar_app;
+	/* The usable area (screen.c): the screen minus the menu bar's and
+	   the Dock's strips, and the menu bar height last sent with it. */
 	ws_rect_t	usable;
+	uint32_t	usable_menu_bar;
 
 	/* cursor */
 	pixman_image_t	*cursor_default;
@@ -549,6 +561,11 @@ void	screen_info(struct ws_server *srv, ws_screen_info_t *si);
 /* ---- screen.c ---- */
 void	screen_usable_compute(struct ws_server *srv, ws_rect_t *r);
 void	screen_usable_update(struct ws_server *srv);
+int	menu_bar_set(struct ws_server *srv, struct ws_client *c,
+	    uint32_t height);
+void	menu_bar_update(struct ws_server *srv);
+void	menu_bar_app_gone(struct ws_server *srv, struct ws_client *c,
+	    struct ws_client *heir);
 int	screen_resize(struct ws_server *srv, uint32_t width, uint32_t height);
 void	screen_changed(struct ws_server *srv);
 

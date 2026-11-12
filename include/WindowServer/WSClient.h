@@ -90,6 +90,13 @@ const ws_screen_info_t *ws_main_screen(ws_connection_t *conn);
  * in the whole screen and fails with ENOTSUP.
  */
 int		 ws_usable_area(ws_connection_t *conn, ws_rect_t *area);
+/*
+ * The height of the menu bar strip along the top of the main screen
+ * (see "The menu bar strip" in WSProtocol.h), as of the last event
+ * dispatched: a Dock on the top edge sits directly below it. 0 when
+ * there is none, or from servers without WS_SERVER_MENU_BAR.
+ */
+uint32_t	 ws_menu_bar_height(ws_connection_t *conn);
 
 /*
  * Read and dispatch all available events without blocking. Returns
@@ -256,6 +263,14 @@ int		 ws_pointer_track(ws_connection_t *conn, int on);
 /* Activation: make this app the active app, or give it up. */
 int		 ws_activate(ws_connection_t *conn);
 int		 ws_deactivate(ws_connection_t *conn);
+
+/*
+ * The Mac menu style: this app's menu bar along the top of the screen
+ * is `height` pixels, 0 when it shows none. The active app's sets the
+ * menu bar strip that comes off the usable area (see "The menu bar
+ * strip" in WSProtocol.h). Servers with WS_SERVER_MENU_BAR.
+ */
+int		 ws_set_menu_bar(ws_connection_t *conn, uint32_t height);
 
 /*
  * Tool requests (wsctl). ws_snapshot returns the composited screen

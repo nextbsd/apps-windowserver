@@ -114,6 +114,7 @@ handle_hello(struct ws_server *srv, struct ws_mach_item *item)
 	c->hello_usec = ws_now_usec();
 	c->outq_tail = &c->outq;
 	c->cursor_kind = WS_CURSOR_ARROW;
+	c->menu_bar = -1;
 	m->app_name[sizeof(m->app_name) - 1] = '\0';
 	strlcpy(c->app_name, m->app_name[0] ? m->app_name : "unnamed",
 	    sizeof(c->app_name));
@@ -733,6 +734,20 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 	case WS_MSG_DEACTIVATE:
 		app_deactivate(srv, c->app);
 		break;
+	case WS_MSG_SET_MENU_BAR: {
+		int err;
+
+		if (c->flags & WS_CONNECT_TOOL) {
+			client_error(srv, c, (uint32_t)id, 0, EPERM,
+			    "only apps have a menu bar");
+			break;
+		}
+		err = menu_bar_set(srv, c->app, (uint32_t)value);
+		if (err != 0)
+			client_error(srv, c, (uint32_t)id, 0, err,
+			    "bad menu bar height");
+		break;
+	}
 	case WS_MSG_SNAPSHOT:
 		handle_snapshot(srv, c, item, h->seq);
 		return;

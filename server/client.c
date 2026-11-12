@@ -268,6 +268,7 @@ conn_readable(struct ws_server *srv, struct ws_conn *conn)
 	ev.u.welcome.screen_count = 1;
 	screen_info(srv, &ev.u.welcome.screen);
 	ev.u.welcome.usable = srv->usable;
+	ev.u.welcome.menu_bar = srv->usable_menu_bar;
 	client_send(srv, c, &ev, -1);
 	if (c->flags & WS_CONNECT_XKB)
 		keyboard_client_ready(srv, c);
@@ -688,6 +689,9 @@ client_destroy(struct ws_server *srv, struct ws_client *c)
 		dock_client_gone(srv, c);
 	if (srv->active == c)
 		app_deactivate(srv, c);
+	/* After the deactivation: the next active app's bar may count. */
+	if (srv->menu_bar_app == c)
+		menu_bar_app_gone(srv, c, NULL);
 	keyboard_focus_update(srv);
 
 	if (c->app_icon != NULL) {

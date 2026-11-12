@@ -203,10 +203,11 @@ print_event(ws_connection_t *conn, const ws_event_t *ev, void *ctx)
 		    ev->u.screen.width, ev->u.screen.height);
 		break;
 	case WS_EVENT_USABLE_AREA:
-		snprintf(detail, sizeof(detail), "area=%d,%d,%dx%d",
+		snprintf(detail, sizeof(detail), "area=%d,%d,%dx%d menubar=%u",
 		    ev->u.usable_area.usable.x, ev->u.usable_area.usable.y,
 		    ev->u.usable_area.usable.width,
-		    ev->u.usable_area.usable.height);
+		    ev->u.usable_area.usable.height,
+		    ev->u.usable_area.menu_bar);
 		break;
 	case WS_EVENT_WINDOW_FRAME:
 		snprintf(detail, sizeof(detail), "frame=%d,%d,%dx%d",
