@@ -22,8 +22,11 @@
 
 SERVER=/System/Library/CoreServices/WindowServer
 TOOLS=$(cd "$(dirname "$0")" && pwd)
-LABEL=org.nextbsd.WindowServer.dev
 SERVICE=${WS_SERVICE_NAME:-org.nextbsd.windowserver}
+# One launchd job per service name, so a second test server (another
+# WS_SERVICE_NAME) never replaces or stops the first.
+LABEL=org.nextbsd.WindowServer.dev
+[ "$SERVICE" = org.nextbsd.windowserver ] || LABEL=$LABEL.$SERVICE
 DIR=/var/run/ws-session
 PLIST=$DIR/$LABEL.plist
 CMD=run
