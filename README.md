@@ -130,7 +130,7 @@ Apps use `libWindowServerClient` (`<WindowServer/WSClient.h>`). The wire format 
 - **Mach** carries the requests: hello, create and destroy windows, frame, level, ordering, title, flags, attach a buffer, damage, commit, make key, cursor, activate and deactivate. Apps find the server by looking up `org.nextbsd.windowserver` (or `$WS_SERVICE_NAME`) in the bootstrap. The server reads each sender's pid from the Mach audit trailer.
 - **A Unix socket** carries what Mach can't yet. NextBSD's Mach can't pass file descriptors or shared memory, so window buffers are memfds sent over the socket, and the server sends its events there too: input, key window and app activation changes, buffer release, frame done and screen info. Apps get one file descriptor to poll. The hello reply over Mach tells the app where the socket is and gives it a one-time token to connect with.
 
-Window buffers are premultiplied ARGB8888, drawn by the app (with cairo, in the GNUstep backend). After a buffer is sent once, each frame only sends damage rectangles and a commit.
+Window buffers are premultiplied ARGB8888, drawn by the app (with cairo, in the GNUstep backend), or XRGB8888 (`ws_buffer_create_format()`, `WS_FORMAT_XRGB8888` in `ws_sock_buffer_t.format`), whose top byte is ignored and whose window is always composited opaque, as an X server's depth-24 windows need. Servers that take XRGB8888 set `WS_SERVER_XRGB`. After a buffer is sent once, each frame only sends damage rectangles and a commit.
 
 ### One app, several connections
 

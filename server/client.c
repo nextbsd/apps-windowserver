@@ -469,7 +469,8 @@ buffer_create(struct ws_server *srv, struct ws_client *c,
 		    "bad or duplicate buffer id");
 		return;
 	}
-	if (m->format != WS_FORMAT_ARGB8888 || m->width == 0 ||
+	if ((m->format != WS_FORMAT_ARGB8888 &&
+	    m->format != WS_FORMAT_XRGB8888) || m->width == 0 ||
 	    m->height == 0 || m->width > 16384 || m->height > 16384 ||
 	    m->stride < m->width * 4 || (m->stride & 3) != 0 ||
 	    (m->offset & 3) != 0) {
@@ -506,7 +507,10 @@ buffer_create(struct ws_server *srv, struct ws_client *c,
 	b->height = m->height;
 	b->stride = m->stride;
 	b->scale = m->scale ? m->scale : 1;
-	b->image = pixman_image_create_bits(PIXMAN_a8r8g8b8, (int)m->width,
+	b->format = m->format;
+	/* x8r8g8b8 makes pixman treat every pixel as opaque. */
+	b->image = pixman_image_create_bits(m->format == WS_FORMAT_XRGB8888 ?
+	    PIXMAN_x8r8g8b8 : PIXMAN_a8r8g8b8, (int)m->width,
 	    (int)m->height, (uint32_t *)(void *)((char *)b->map + m->offset),
 	    (int)m->stride);
 	if (b->image == NULL) {

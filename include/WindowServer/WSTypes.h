@@ -65,9 +65,14 @@ extern "C" {
 #define WS_WINDOW_ICON		0x0010	/* app icon or miniwindow: the server
 					   finds it a free place (see window.c) */
 
-/* Pixel formats. Only premultiplied ARGB is accepted in protocol 1. */
+/*
+ * Pixel formats. Window buffers can be either (XRGB8888 only on servers
+ * with WS_SERVER_XRGB); snapshots are XRGB8888. An XRGB8888 buffer's
+ * top byte is ignored and the window is composited opaque, as an X
+ * server's depth-24 windows need.
+ */
 #define WS_FORMAT_ARGB8888	1	/* 32 bpp, premultiplied, native endian */
-#define WS_FORMAT_XRGB8888	2	/* used for snapshots */
+#define WS_FORMAT_XRGB8888	2	/* 32 bpp, top byte unused, native endian */
 
 /* Modifier flags. */
 #define WS_MOD_SHIFT		0x0001
@@ -118,6 +123,7 @@ extern "C" {
 #define WS_SERVER_HW_CURSOR	0x0002
 #define WS_SERVER_JOIN		0x0004	/* accepts WS_CONNECT_JOIN */
 #define WS_SERVER_XKB		0x0008	/* accepts WS_CONNECT_XKB */
+#define WS_SERVER_XRGB		0x0010	/* accepts WS_FORMAT_XRGB8888 buffers */
 
 /* Synthetic input kinds (wsctl, headless testing). */
 #define WS_INJECT_MOTION	1	/* absolute: x, y */

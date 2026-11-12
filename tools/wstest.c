@@ -11,7 +11,8 @@
  *   Alpha  W1  normal level      (100,100) 500x400  red
  *   Alpha  W2  main-menu level   ( 50, 50) 300x300  green  (never key)
  *   Beta   W3  normal level      (300,250) 500x400  blue
- *   Gamma  W4  normal level      (900,100) 300x200  yellow
+ *   Gamma  W4  normal level      (900,100) 300x200  yellow, XRGB8888
+ *                                                      with alpha byte 0
  *
  * Gamma connects with WS_CONNECT_XKB, so it also gets the keymap, XKB
  * modifier state and held keys. Alpha activates first, then Beta, so
@@ -188,7 +189,8 @@ print_event(ws_connection_t *conn, const ws_event_t *ev, void *ctx)
 
 static int
 make_window(struct win *w, struct app *app, const char *name, int x, int y,
-    int width, int height, int32_t level, uint32_t flags, uint32_t color)
+    int width, int height, int32_t level, uint32_t flags, uint32_t color,
+    uint32_t format)
 {
 	ws_rect_t frame = { x, y, width, height };
 
@@ -199,8 +201,8 @@ make_window(struct win *w, struct app *app, const char *name, int x, int y,
 		fprintf(stderr, "wstest: create %s: %s\n", name, strerror(errno));
 		return -1;
 	}
-	w->buf = ws_buffer_create(app->conn, (uint32_t)width,
-	    (uint32_t)height, 1);
+	w->buf = ws_buffer_create_format(app->conn, (uint32_t)width,
+	    (uint32_t)height, 1, format);
 	if (w->buf == NULL) {
 		fprintf(stderr, "wstest: buffer for %s: %s\n", name,
 		    strerror(errno));
@@ -280,20 +282,21 @@ main(int argc, char **argv)
 	    ws_client_id(apps[2].conn), ws_app_id(apps[2].conn));
 
 	if (make_window(&wins[0], &apps[0], "W1", 100, 100, 500, 400,
-	    WS_LEVEL_NORMAL, 0, 0xffc03030) < 0 ||
+	    WS_LEVEL_NORMAL, 0, 0xffc03030, WS_FORMAT_ARGB8888) < 0 ||
 	    make_window(&wins[1], &apps[0], "W2", 50, 50, 300, 300,
-	    WS_LEVEL_MAIN_MENU, WS_WINDOW_NO_KEY, 0xff30a040) < 0)
+	    WS_LEVEL_MAIN_MENU, WS_WINDOW_NO_KEY, 0xff30a040,
+	    WS_FORMAT_ARGB8888) < 0)
 		return 1;
 	ws_activate(apps[0].conn);
 	ws_window_make_key(apps[0].conn, wins[0].id);
 	ws_sync(apps[0].conn);
 	if (make_window(&wins[3], &apps[2], "W4", 900, 100, 300, 200,
-	    WS_LEVEL_NORMAL, 0, 0xffc0c030) < 0)
+	    WS_LEVEL_NORMAL, 0, 0x00c0c030, WS_FORMAT_XRGB8888) < 0)
 		return 1;
 	ws_sync(apps[2].conn);
 
 	if (make_window(&wins[2], &apps[1], "W3", 300, 250, 500, 400,
-	    WS_LEVEL_NORMAL, 0, 0xff3050c0) < 0)
+	    WS_LEVEL_NORMAL, 0, 0xff3050c0, WS_FORMAT_ARGB8888) < 0)
 		return 1;
 	ws_activate(apps[1].conn);
 	ws_window_make_key(apps[1].conn, wins[2].id);

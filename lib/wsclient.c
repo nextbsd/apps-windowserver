@@ -779,14 +779,15 @@ ws_window_make_key(ws_connection_t *c, uint32_t window)
 /* ---- buffers ---- */
 
 WS_API ws_buffer_t *
-ws_buffer_create(ws_connection_t *c, uint32_t width, uint32_t height,
-    uint32_t scale)
+ws_buffer_create_format(ws_connection_t *c, uint32_t width, uint32_t height,
+    uint32_t scale, uint32_t format)
 {
 	ws_buffer_t *b;
 	ws_sock_buffer_t m;
 	int fd, saved;
 
-	if (width == 0 || height == 0 || width > 16384 || height > 16384) {
+	if (width == 0 || height == 0 || width > 16384 || height > 16384 ||
+	    (format != WS_FORMAT_ARGB8888 && format != WS_FORMAT_XRGB8888)) {
 		errno = EINVAL;
 		return NULL;
 	}
@@ -816,7 +817,7 @@ ws_buffer_create(ws_connection_t *c, uint32_t width, uint32_t height,
 	m.width = width;
 	m.height = height;
 	m.stride = b->stride;
-	m.format = WS_FORMAT_ARGB8888;
+	m.format = format;
 	m.scale = scale ? scale : 1;
 	m.offset = 0;
 	if (sock_send(c, &m, sizeof(m), fd) < 0) {
@@ -837,6 +838,14 @@ fail:
 	free(b);
 	errno = saved;
 	return NULL;
+}
+
+WS_API ws_buffer_t *
+ws_buffer_create(ws_connection_t *c, uint32_t width, uint32_t height,
+    uint32_t scale)
+{
+	return ws_buffer_create_format(c, width, height, scale,
+	    WS_FORMAT_ARGB8888);
 }
 
 WS_API void

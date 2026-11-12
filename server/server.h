@@ -31,7 +31,7 @@ void	ws_log(int level, const char *fmt, ...)
 uint64_t ws_now_usec(void);
 
 /* Optional features this server has (WS_SERVER_* in hello and welcome). */
-#define WS_SERVER_FEATURES	(WS_SERVER_JOIN | WS_SERVER_XKB)
+#define WS_SERVER_FEATURES	(WS_SERVER_JOIN | WS_SERVER_XKB | WS_SERVER_XRGB)
 
 /* ---- configuration (config.c) ---- */
 
@@ -79,6 +79,7 @@ struct ws_buffer {
 	uint32_t	height;
 	uint32_t	stride;
 	uint32_t	scale;
+	uint32_t	format;		/* WS_FORMAT_* */
 	pixman_image_t	*image;
 	struct ws_buffer *next;		/* owner's list */
 };
