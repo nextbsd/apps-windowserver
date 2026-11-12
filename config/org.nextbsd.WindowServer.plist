@@ -71,9 +71,10 @@
 	<integer>64</integer>
 	<key>MinimizeTileImage</key>
 	<string></string>
-	<!-- "Minimize into the Dock": while the Dock is connected, it shows
-	     minimized windows (live previews from WindowServer) and
-	     WindowServer draws no tiles. Off for now. -->
+	<!-- "Minimize into the Dock" for apps that don't say where a
+	     window goes: while the Dock is connected, it shows them (live
+	     previews from WindowServer) and WindowServer draws no tiles.
+	     GNUstep apps say, from the user's NBMinimizeStyle. Off. -->
 	<key>MinimizeIntoDock</key>
 	<false/>
 	<!-- The window overview (Exposé): a tap of the Start key on its

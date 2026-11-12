@@ -79,7 +79,8 @@ enum {
 	WS_MSG_LIST_WINDOWS,		/* answers on the socket */
 	WS_MSG_INJECT,			/* synthetic input (see below) */
 	/* added after protocol 1 shipped (servers with WS_SERVER_MINIMIZE) */
-	WS_MSG_WINDOW_MINIMIZE,		/* see "Minimizing" below */
+	WS_MSG_WINDOW_MINIMIZE,		/* see "Minimizing" below; header,
+					   or ws_req_int_t: WS_MINIMIZE_* */
 	WS_MSG_SET_APP_ICON,		/* ws_req_int_t: buffer id, 0 = none */
 	/* WS_CONNECT_DOCK only (servers with WS_SERVER_DOCK), see "The Dock" */
 	WS_MSG_DOCK_ACTIVATE,		/* ws_req_int_t: app id, or hdr.window */
@@ -207,6 +208,20 @@ typedef struct ws_req_cursor {
  * and sends the owner WS_EVENT_WINDOW_RESTORE; the owner then orders
  * the window in.
  *
+ * Where the window goes (servers with WS_SERVER_MINIMIZE_WHERE): the
+ * request may instead be a ws_req_int_t whose value is WS_MINIMIZE_*
+ * (WSTypes.h), so that each app's minimize follows its user's setting
+ * (NextBSD's NBMinimizeStyle). WS_MINIMIZE_INTO_DOCK hands the window to the Dock
+ * (see "The Dock" below) while a Dock that shows minimized windows is
+ * connected, and gives it a tile on the bottom row otherwise; it moves
+ * into the Dock when one connects and back to the bottom row when the
+ * Dock goes. WS_MINIMIZE_BOTTOM_ROW always gives it a tile, even with
+ * a Dock connected. WS_MINIMIZE_DEFAULT, a bare header and an unknown
+ * value all mean what the server's MinimizeIntoDock default says: into
+ * the Dock if it's on, the bottom row if not. Minimizing a window
+ * that's already minimized moves it to where the new request says.
+ * Older servers ignore the value, so check for the flag first.
+ *
  * WS_MSG_SET_APP_ICON (ws_req_int_t) gives the connection's app icon
  * for the tiles: `value` names a buffer the client sent before
  * (premultiplied ARGB8888, at most WS_MAX_APP_ICON pixels square),
@@ -274,13 +289,17 @@ typedef struct ws_req_cursor {
  *   - WS_MSG_DOCK_SHOW_MINIMIZED (ws_req_int_t, value 1): this Dock can
  *     show minimized windows (a Dock that only reads the list, such as
  *     `wsctl dock list`, doesn't send it). "Minimize into the Dock" is
- *     the WindowServer default MinimizeIntoDock (off by default). While
- *     it's on, the oldest Dock connection that sent this gets
+ *     chosen per window: WS_MINIMIZE_INTO_DOCK on the minimize request
+ *     (see "Minimizing" above), or, for a request that doesn't say,
+ *     the WindowServer default MinimizeIntoDock (off by default). The
+ *     oldest Dock connection that sent this gets
  *     WS_DOCK_MINIMIZED_WINDOWS in WS_EVENT_DOCK_STATE: WindowServer
- *     draws no tiles, takes away the ones it drew, and lists minimized
- *     windows with WS_WINDOW_INFO_IN_DOCK; the Dock shows them with
- *     previews and restores them with WS_MSG_DOCK_RESTORE. Each time
- *     such a window commits a frame, the Dock gets
+ *     draws no tiles for windows minimized into the Dock, takes away
+ *     the ones it drew for them, and lists them with
+ *     WS_WINDOW_INFO_IN_DOCK; the Dock shows them with previews and
+ *     restores them with WS_MSG_DOCK_RESTORE. Windows minimized onto
+ *     the bottom row keep their tiles and aren't the Dock's to show.
+ *     Each time a window in the Dock commits a frame, the Dock gets
  *     WS_EVENT_PREVIEW_CHANGED for it (at most one per window per pass).
  *     When that Dock goes away or sends value 0, the next such Dock
  *     connection takes over, or else the server puts tiles back for the

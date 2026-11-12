@@ -23,7 +23,10 @@
  * Dock may do.
  *
  * Beta also gives the server a magenta app icon and acts like an app
- * that minimizes: typing "m" minimizes its key window, "c" redraws W3
+ * that minimizes: typing "m" minimizes its key window (where the
+ * server's default says), "d" minimizes it into the Dock, "r" onto the
+ * bottom row (WS_SERVER_MINIMIZE_WHERE; with no key window, the window
+ * it minimized last moves there), "c" redraws W3
  * in green (minimized or not), and on WS_EVENT_WINDOW_RESTORE it
  * orders the window in again and makes it key.
  */
@@ -63,6 +66,7 @@ static struct app apps[NAPPS] = {
 static struct win wins[NWINS];
 static volatile sig_atomic_t quit;
 static uint32_t beta_key;	/* Beta's key window, for "m" */
+static uint32_t beta_min;	/* the window Beta minimized last */
 
 static const char *
 win_name(uint32_t id)
@@ -97,6 +101,7 @@ beta_act(const ws_event_t *ev)
 	ws_connection_t *c = apps[1].conn;
 	ws_rect_t r = { 0, 0, 500, 400 };
 	ws_buffer_t *b;
+	uint32_t w;
 
 	if (ev->hdr.type == WS_EVENT_WINDOW_RESTORE) {
 		ws_window_order(c, ev->hdr.window, WS_ORDER_ABOVE, 0);
@@ -109,6 +114,20 @@ beta_act(const ws_event_t *ev)
 	if (strcmp(ev->u.key.text, "m") == 0 && beta_key != 0) {
 		printf("minimizing %s\n", win_name(beta_key));
 		ws_window_minimize(c, beta_key);
+		beta_min = beta_key;
+	} else if ((strcmp(ev->u.key.text, "d") == 0 ||
+	    strcmp(ev->u.key.text, "r") == 0) &&
+	    (beta_key != 0 || beta_min != 0)) {
+		/* With no key window, the window minimized last again:
+		   it moves to where this request says. */
+		w = beta_key != 0 ? beta_key : beta_min;
+		printf("minimizing %s %s\n", win_name(w),
+		    ev->u.key.text[0] == 'd' ? "into the Dock" :
+		    "onto the bottom row");
+		ws_window_minimize_where(c, w,
+		    ev->u.key.text[0] == 'd' ? WS_MINIMIZE_INTO_DOCK :
+		    WS_MINIMIZE_BOTTOM_ROW);
+		beta_min = w;
 	} else if (strcmp(ev->u.key.text, "c") == 0) {
 		b = ws_buffer_create(c, 500, 400, 1);
 		if (b == NULL)

@@ -162,6 +162,15 @@ int		 ws_window_commit(ws_connection_t *conn, uint32_t window,
  * so check for WS_SERVER_MINIMIZE first.
  */
 int		 ws_window_minimize(ws_connection_t *conn, uint32_t window);
+/*
+ * ws_window_minimize_where() also says where the window goes:
+ * WS_MINIMIZE_INTO_DOCK (the Dock, or the bottom row while no Dock is
+ * connected), WS_MINIMIZE_BOTTOM_ROW, or WS_MINIMIZE_DEFAULT (the
+ * server's MinimizeIntoDock, as ws_window_minimize()). On servers
+ * without WS_SERVER_MINIMIZE_WHERE it's ws_window_minimize().
+ */
+int		 ws_window_minimize_where(ws_connection_t *conn, uint32_t window,
+    uint32_t where);
 int		 ws_set_app_icon(ws_connection_t *conn, uint32_t width,
     uint32_t height, const void *argb, uint32_t stride);
 
@@ -242,10 +251,10 @@ int		 ws_overview(ws_connection_t *conn, uint32_t request,
  *			pixels on its longer side, premultiplied
  *			ARGB8888; release it with ws_snapshot_free
  *   ws_dock_show_minimized
- *			say this Dock can show minimized windows; with
- *			MinimizeIntoDock on, WindowServer then hands them
- *			over (WS_DOCK_MINIMIZED_WINDOWS) instead of drawing
- *			tiles
+ *			say this Dock can show minimized windows;
+ *			WindowServer then hands it the ones minimized into
+ *			the Dock (WS_DOCK_MINIMIZED_WINDOWS) instead of
+ *			drawing tiles for them
  *   ws_dock_set_edge	say which screen edge this Dock is on
  *			(WS_DOCK_EDGE_*) and how thick it is, so tiling
  *			keeps it free; servers with WS_SERVER_DOCK_EDGE

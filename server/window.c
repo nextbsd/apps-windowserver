@@ -724,22 +724,46 @@ list_windows(struct ws_server *srv, struct ws_client *to, uint32_t options)
 /* ---- minimizing ---- */
 
 /*
- * Minimize w: order it out and, unless the Dock shows minimized windows
- * (MinimizeIntoDock, dock.c), put a tile in its place.
+ * Minimize w: order it out and, unless the Dock shows it (dock.c), put
+ * a tile in its place. `where` is WS_MINIMIZE_*: into the Dock, onto the
+ * bottom row, or (WS_MINIMIZE_DEFAULT, a bare request, anything else)
+ * what MinimizeIntoDock says. A window that's already minimized moves to
+ * where the new request says.
  */
 void
-window_minimize(struct ws_server *srv, struct ws_window *w)
+window_minimize(struct ws_server *srv, struct ws_window *w, int32_t where)
 {
-	if (w->minimized)
+	bool into_dock;
+
+	if (where == WS_MINIMIZE_INTO_DOCK)
+		into_dock = true;
+	else if (where == WS_MINIMIZE_BOTTOM_ROW)
+		into_dock = false;
+	else
+		into_dock = srv->cfg.minimize_into_dock;
+	if (w->minimized) {
+		if (w->into_dock == into_dock)
+			return;
+		w->into_dock = into_dock;
+		if (dock_shows_minimized(srv, w))
+			window_tile_remove(srv, w);
+		else
+			window_tile_add(srv, w);
+		dock_list_changed(srv);
 		return;
+	}
 	if (w->visible)
 		window_order(srv, w, WS_ORDER_OUT, NULL);
 	w->minimized = true;
+	w->into_dock = into_dock;
 	dock_list_changed(srv);
-	if (dock_shows_minimized(srv)) {
+	if (dock_shows_minimized(srv, w)) {
 		ws_debug("window %u minimized into the Dock", w->id);
 		return;
 	}
+	if (into_dock)
+		ws_debug("window %u minimized into the Dock; no Dock, so "
+		    "onto the bottom row", w->id);
 	window_tile_add(srv, w);
 }
 

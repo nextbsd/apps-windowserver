@@ -506,7 +506,7 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		window_make_key(srv, w);
 		break;
 	case WS_MSG_WINDOW_MINIMIZE:
-		window_minimize(srv, w);
+		window_minimize(srv, w, value);
 		break;
 	case WS_MSG_SET_APP_ICON: {
 		int err;

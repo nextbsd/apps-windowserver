@@ -36,7 +36,7 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_XRGB | WS_SERVER_ORDERED | \
 				 WS_SERVER_MINIMIZE | WS_SERVER_DOCK | \
 				 WS_SERVER_SCROLL_PHASES | WS_SERVER_OVERVIEW | \
-				 WS_SERVER_DOCK_EDGE)
+				 WS_SERVER_DOCK_EDGE | WS_SERVER_MINIMIZE_WHERE)
 
 /* Connections that aren't apps: wsctl and the Dock's window list. */
 #define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK)
@@ -74,8 +74,8 @@ struct ws_config {
 	char	snapshot_path[256];	/* SIGUSR1 writes a PPM here */
 	int	minimize_tile_size;	/* minimized-window tiles, pixels */
 	char	minimize_tile_image[256]; /* "" = plain dark rounded tile */
-	bool	minimize_into_dock;	/* a connected Dock shows minimized
-					   windows instead of tiles */
+	bool	minimize_into_dock;	/* minimize requests that don't say
+					   where go into the Dock */
 	bool	start_key_overview;	/* a Start tap opens the overview */
 	bool	reduce_motion;		/* no animations */
 };
@@ -123,6 +123,9 @@ struct ws_window {
 	bool		minimized;	/* WS_MSG_WINDOW_MINIMIZE, until the
 					   owner orders it in or out */
 	bool		preview_dirty;	/* minimized: tell the Dock (dock.c) */
+	bool		into_dock;	/* minimized into the Dock (shown
+					   there while one is connected),
+					   not onto the bottom row */
 	struct ws_window *tile;		/* minimized: its tile in the stack,
 					   NULL while the Dock shows it */
 	struct ws_window *tile_for;	/* a tile: the window it shows. Tiles
@@ -493,7 +496,8 @@ void	damage_rect(struct ws_server *srv, const ws_rect_t *r);
 void	damage_all(struct ws_server *srv);
 void	list_windows(struct ws_server *srv, struct ws_client *to,
 	    uint32_t options);
-void	window_minimize(struct ws_server *srv, struct ws_window *w);
+void	window_minimize(struct ws_server *srv, struct ws_window *w,
+	    int32_t where);
 void	window_tile_add(struct ws_server *srv, struct ws_window *w);
 void	window_tile_remove(struct ws_server *srv, struct ws_window *w);
 void	window_request_restore(struct ws_server *srv, struct ws_window *w);
@@ -516,7 +520,8 @@ int	tile_set_app_icon(struct ws_server *srv, struct ws_client *c,
 
 /* ---- dock.c ---- */
 bool	dock_may_list(struct ws_server *srv, uid_t uid);
-bool	dock_shows_minimized(struct ws_server *srv);
+bool	dock_shows_minimized(struct ws_server *srv,
+	    const struct ws_window *w);
 void	dock_list_changed(struct ws_server *srv);
 void	dock_preview_changed(struct ws_server *srv, struct ws_window *w);
 void	dock_client_ready(struct ws_server *srv, struct ws_client *c);

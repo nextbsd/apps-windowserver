@@ -158,6 +158,14 @@ extern "C" {
 					   WS_MSG_OVERVIEW */
 #define WS_SERVER_DOCK_EDGE	0x0400	/* the Dock's edge: WS_MSG_DOCK_SET_EDGE
 					   and the edge in WS_EVENT_DOCK_STATE */
+#define WS_SERVER_MINIMIZE_WHERE 0x0800	/* WS_MSG_WINDOW_MINIMIZE may say
+					   where the window goes
+					   (WS_MINIMIZE_*) */
+
+/* Where a minimized window goes ("Minimizing" in WSProtocol.h). */
+#define WS_MINIMIZE_DEFAULT	0	/* the server's MinimizeIntoDock */
+#define WS_MINIMIZE_BOTTOM_ROW	1	/* a tile on the bottom row */
+#define WS_MINIMIZE_INTO_DOCK	2	/* the Dock, or a tile without one */
 
 /* Synthetic input kinds (wsctl, headless testing). */
 #define WS_INJECT_MOTION	1	/* absolute: x, y */
@@ -459,9 +467,11 @@ typedef struct ws_event_window_info {
 /*
  * WS_EVENT_DOCK_STATE: sent to a WS_CONNECT_DOCK connection right after
  * the welcome, and again when it changes. With
- * WS_DOCK_MINIMIZED_WINDOWS the server draws no tiles: this connection
- * shows the minimized windows (WS_WINDOW_INFO_IN_DOCK), with previews
- * from WS_MSG_DOCK_PREVIEW. Only one Dock connection, one that sent
+ * WS_DOCK_MINIMIZED_WINDOWS this connection is the Dock that windows
+ * minimized into the Dock go to: the server draws no tiles for those,
+ * and this connection shows them (WS_WINDOW_INFO_IN_DOCK), with
+ * previews from WS_MSG_DOCK_PREVIEW. Windows minimized onto the bottom
+ * row keep their tiles. Only one Dock connection, one that sent
  * WS_MSG_DOCK_SHOW_MINIMIZED, has it at a time.
  */
 #define WS_DOCK_MINIMIZED_WINDOWS 0x0001

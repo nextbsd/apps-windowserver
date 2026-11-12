@@ -4,8 +4,9 @@
  *
  * The Dock's window list (WS_CONNECT_DOCK, "The Dock" in WSProtocol.h):
  * who may have it, change notices, activating and restoring other apps'
- * windows, previews of minimized windows, and handing minimized windows
- * over to the Dock instead of drawing tiles (MinimizeIntoDock).
+ * windows, previews of minimized windows, and handing windows minimized
+ * into the Dock over to it instead of drawing tiles (WS_MINIMIZE_INTO_DOCK
+ * or MinimizeIntoDock).
  */
 
 #include <sys/types.h>
@@ -107,11 +108,13 @@ dock_usable(const struct ws_client *c)
 	    (c->flags & WS_CONNECT_DOCK) != 0;
 }
 
-/* Minimized windows go to the Dock instead of getting tiles. */
+/* Minimized window w goes to the Dock instead of getting a tile: it was
+ * minimized into the Dock, and a Dock that shows minimized windows is
+ * connected. */
 bool
-dock_shows_minimized(struct ws_server *srv)
+dock_shows_minimized(struct ws_server *srv, const struct ws_window *w)
 {
-	return srv->cfg.minimize_into_dock && dock_usable(srv->dock);
+	return w->into_dock && dock_usable(srv->dock);
 }
 
 static void
@@ -120,7 +123,7 @@ send_state(struct ws_server *srv, struct ws_client *c)
 	ws_event_t ev;
 
 	event_init(srv, &ev, WS_EVENT_DOCK_STATE, sizeof(ev.u.dock_state), 0);
-	ev.u.dock_state.flags = (c == srv->dock && dock_shows_minimized(srv)) ?
+	ev.u.dock_state.flags = (c == srv->dock && dock_usable(c)) ?
 	    WS_DOCK_MINIMIZED_WINDOWS : 0;
 	ev.u.dock_state.edge = srv->dock_edge;
 	ev.u.dock_state.thickness = srv->dock_thickness;
@@ -199,18 +202,17 @@ dock_set_edge(struct ws_server *srv, struct ws_client *c, uint32_t edge,
 	return 0;
 }
 
-/* Tiles follow who shows minimized windows: none while the Dock does,
- * one for every minimized window otherwise. */
+/* Tiles follow who shows minimized windows: none for the windows the
+ * Dock shows, one for every other minimized window. */
 static void
-tiles_follow_dock(struct ws_server *srv)
+dock_tiles_follow(struct ws_server *srv)
 {
 	struct ws_window *w;
-	bool dock = dock_shows_minimized(srv);
 
 	for (w = srv->windows; w != NULL; w = w->next) {
 		if (!w->minimized)
 			continue;
-		if (dock)
+		if (dock_shows_minimized(srv, w))
 			window_tile_remove(srv, w);
 		else
 			window_tile_add(srv, w);
@@ -238,7 +240,7 @@ dock_hand_on(struct ws_server *srv, struct ws_client *c)
 		if (o != c && dock_usable(o) && o->dock_wants_minimized)
 			next = o;
 	srv->dock = next;
-	tiles_follow_dock(srv);
+	dock_tiles_follow(srv);
 	if (next != NULL) {
 		ws_info("client %u (pid %d) shows minimized windows now",
 		    next->id, (int)next->pid);
@@ -257,10 +259,10 @@ dock_show_minimized(struct ws_server *srv, struct ws_client *c, bool on)
 	c->dock_wants_minimized = on;
 	if (on && !dock_usable(srv->dock)) {
 		srv->dock = c;
-		tiles_follow_dock(srv);
-		ws_info("client %u (%s, pid %d) is the Dock%s", c->id,
-		    c->app_name, (int)c->pid, dock_shows_minimized(srv) ?
-		    "; minimized windows go into it" : "");
+		dock_tiles_follow(srv);
+		ws_info("client %u (%s, pid %d) is the Dock; windows "
+		    "minimized into the Dock go into it", c->id, c->app_name,
+		    (int)c->pid);
 		send_state(srv, c);
 	} else if (!on && srv->dock == c) {
 		dock_hand_on(srv, c);
