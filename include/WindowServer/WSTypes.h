@@ -125,6 +125,10 @@ extern "C" {
 #define WS_SERVER_XKB		0x0008	/* accepts WS_CONNECT_XKB */
 #define WS_SERVER_XRGB		0x0010	/* accepts WS_FORMAT_XRGB8888 buffers */
 #define WS_SERVER_ORDERED	0x0020	/* sends WS_EVENT_WINDOW_ORDERED */
+#define WS_SERVER_MINIMIZE	0x0040	/* minimizes windows itself:
+					   WS_MSG_WINDOW_MINIMIZE,
+					   WS_MSG_SET_APP_ICON and
+					   WS_EVENT_WINDOW_RESTORE */
 
 /* Synthetic input kinds (wsctl, headless testing). */
 #define WS_INJECT_MOTION	1	/* absolute: x, y */
@@ -184,6 +188,7 @@ enum {
 	WS_EVENT_MODIFIERS,		/* WS_CONNECT_XKB only */
 	WS_EVENT_KEYS_HELD,		/* WS_CONNECT_XKB only */
 	WS_EVENT_WINDOW_ORDERED,
+	WS_EVENT_WINDOW_RESTORE,	/* WS_SERVER_MINIMIZE; no payload */
 	WS_EVENT_MAX
 };
 
@@ -346,10 +351,23 @@ typedef struct ws_event_ordered {
 	int32_t		level;
 } ws_event_ordered_t;
 
-/* Window list entry (wsctl list). */
+/*
+ * WS_EVENT_WINDOW_RESTORE (about hdr.window, no payload): the user
+ * double-clicked the tile of a window the client minimized
+ * (WS_MSG_WINDOW_MINIMIZE, WSProtocol.h). The server has activated the
+ * app; the client restores the window by ordering it in, which removes
+ * the tile.
+ */
+
+/*
+ * Window list entry (wsctl list). A minimized window is listed where
+ * its tile is in the stack, with WS_WINDOW_INFO_MINIMIZED instead of
+ * WS_WINDOW_INFO_VISIBLE, and the frame of the window itself.
+ */
 #define WS_WINDOW_INFO_VISIBLE	0x0001
 #define WS_WINDOW_INFO_KEY	0x0002	/* key window of the active app */
 #define WS_WINDOW_INFO_ACTIVE	0x0004	/* owner is the active app */
+#define WS_WINDOW_INFO_MINIMIZED 0x0008	/* shown as a tile */
 
 typedef struct ws_event_window_info {
 	uint32_t	client_id;

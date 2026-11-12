@@ -43,6 +43,16 @@
 	<true/>
 	<key>BackgroundColor</key>
 	<string>000000</string>
+	<!-- Minimized windows become tiles along the bottom of the screen:
+	     a live picture of the window with the app's icon in a corner.
+	     MinimizeTileSize is in pixels (32 to 256; 64 lines tiles up
+	     with GNUstep app icons). MinimizeTileImage is drawn behind the
+	     picture instead of the plain dark rounded tile: an 8-bit binary
+	     PAM (RGB_ALPHA or RGB) or PPM file, scaled to the tile. -->
+	<key>MinimizeTileSize</key>
+	<integer>64</integer>
+	<key>MinimizeTileImage</key>
+	<string></string>
 	<!-- empty: the first /dev/dri/card* with a connected display -->
 	<key>DRMDevice</key>
 	<string></string>

@@ -78,6 +78,9 @@ enum {
 	WS_MSG_SNAPSHOT,		/* sync; image follows on the socket */
 	WS_MSG_LIST_WINDOWS,		/* answers on the socket */
 	WS_MSG_INJECT,			/* synthetic input (see below) */
+	/* added after protocol 1 shipped (servers with WS_SERVER_MINIMIZE) */
+	WS_MSG_WINDOW_MINIMIZE,		/* see "Minimizing" below */
+	WS_MSG_SET_APP_ICON,		/* ws_req_int_t: buffer id, 0 = none */
 	WS_MSG_LAST
 };
 
@@ -174,6 +177,27 @@ typedef struct ws_req_cursor {
 	int32_t		hot_x;
 	int32_t		hot_y;
 } ws_req_cursor_t;
+
+/*
+ * Minimizing (servers with WS_SERVER_MINIMIZE). WS_MSG_WINDOW_MINIMIZE
+ * (a bare ws_req_header_t naming the window) orders the window out and
+ * puts a tile for it in the bottom row of the screen instead: a live,
+ * scaled-down picture of the window's buffer, redrawn on every commit,
+ * with the app's icon in a corner. The window stays minimized until its
+ * owner orders it in again (WS_ORDER_ABOVE or _BELOW), which removes the
+ * tile and shows the window, or orders it out, which only removes the
+ * tile, or destroys it. A double-click on the tile activates the app
+ * and sends the owner WS_EVENT_WINDOW_RESTORE; the owner then orders
+ * the window in.
+ *
+ * WS_MSG_SET_APP_ICON (ws_req_int_t) gives the connection's app icon
+ * for the tiles: `value` names a buffer the client sent before
+ * (premultiplied ARGB8888, at most WS_MAX_APP_ICON pixels square),
+ * which the server copies, so the client may destroy it right away.
+ * 0 removes the icon. Tiles of a connection that has none use the icon
+ * of the app it joined, if any.
+ */
+#define WS_MAX_APP_ICON		512
 
 /*
  * Synthetic input. Accepted when the server runs headless, or from a

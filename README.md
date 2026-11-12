@@ -59,6 +59,7 @@ What works, tested headless:
 - One active app. A click in an inactive app's window deactivates the old app, activates the new one, raises the window, makes it key, and then delivers the click.
 - Keys go only to the key window of the active app, with server-side key repeat.
 - Damage-tracked compositing with pixman, buffer release and frame-done events.
+- Minimized windows as live tiles along the bottom of the screen (see [Minimized windows](#minimized-windows)).
 - Snapshots and synthetic input for testing.
 
 Written but only compiled:
@@ -105,7 +106,7 @@ build/wsctl key a              # type "a" into the active app
 build/wsctl snapshot out.ppm   # save the screen
 ```
 
-`wstest` prints every event it gets. `tests/headless-test.sh` (`gmake check`) does all of this with its own service name and socket, and checks the screen colours, the order of the activation events, that only the active app gets keys, joining an app, the XKB events, XRGB8888 buffers and restack notices.
+`wstest` prints every event it gets. `tests/headless-test.sh` (`gmake check`) does all of this with its own service name and socket, and checks the screen colours, the order of the activation events, that only the active app gets keys, joining an app, the XKB events, XRGB8888 buffers, restack notices, and minimizing: the tile's picture, icon and live update, selecting and dragging it, and restoring the window with a double-click.
 
 `kill -USR1` makes the server write a snapshot to `/tmp/WindowServer-snapshot.ppm`.
 
@@ -154,6 +155,26 @@ Clients without the flag get none of these.
 ### Restack notices
 
 When the server itself moves a window in the stack or orders it out (today that is RaiseOnClick), it sends the window's owner `WS_EVENT_WINDOW_ORDERED` (`ws_event_ordered_t`): `WS_ORDER_ABOVE` with the owner's own nearest visible windows below and above it, or `WS_ORDER_OUT`. A client's own ordering, level and destroy requests never cause one. An X server uses it to keep its stacking order right; clients that don't care ignore it. Servers that send it set `WS_SERVER_ORDERED`.
+
+### Minimized windows
+
+WindowServer minimizes windows itself, macOS-style, instead of leaving each app to draw a miniwindow. A minimized window becomes a tile in the bottom row of the screen: a scaled-down picture of the window's current buffer with the app's icon in the bottom-right corner, and no text. The tile is redrawn from every frame the app commits, so a window that keeps drawing while it's minimized (Terminal with output arriving) stays live, and one that stops shows its last frame. Servers that do this set `WS_SERVER_MINIMIZE`.
+
+![Two tiles at the bottom-left of the screen: a Terminal showing ls output and Workspace's File Viewer, each with its app's icon in the corner](docs/minimize-tiles.png)
+
+- `WS_MSG_WINDOW_MINIMIZE` (`ws_window_minimize()`): a bare request naming the window. WindowServer orders the window out and shows its tile, placed like app icons: the first free place along the bottom of the screen, left to right, then the row above.
+- `WS_MSG_SET_APP_ICON` (`ws_set_app_icon()`): the app icon for the tiles, a premultiplied ARGB8888 buffer of at most `WS_MAX_APP_ICON` (512) pixels square, which the server copies. A connection that joined an app and has no icon of its own uses the app's.
+- One click on a tile selects it, a drag moves it, and a double-click activates the app and sends it `WS_EVENT_WINDOW_RESTORE` for the window. The app restores the window by ordering it in, which removes the tile; ordering a minimized window out (the app is hiding) or destroying it removes the tile too. Tiles are the server's own: clicks on them reach no app.
+- `wsctl list` shows a minimized window where its tile is in the stack, marked `minimized` (`WS_WINDOW_INFO_MINIMIZED`).
+
+The GNUstep backend uses this when the server has it: `-appOwnsMiniwindow` is NO, so libs-gui draws no miniwindow, `-miniwindow:` sends the minimize request, the backend uploads `[NSApp applicationIconImage]`, and a restore event goes through `-[NSWindow deminiaturize:]`. With an older server, apps draw their miniwindows as before.
+
+Two defaults set the look, and nothing theme-specific is compiled in:
+
+| Key | Default | |
+|---|---|---|
+| `MinimizeTileSize` | `64` | Tile size in pixels, 32 to 256. 64 lines tiles up with GNUstep app icons. |
+| `MinimizeTileImage` | empty | A picture drawn behind the window instead of the plain dark rounded tile, scaled to the tile: an 8-bit binary PAM (`RGB_ALPHA` or `RGB`) or PPM file, so the server needs no image libraries. |
 
 ## License
 

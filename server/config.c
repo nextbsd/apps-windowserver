@@ -56,6 +56,8 @@ static const struct ckey keys[] = {
 	S("User", user),
 	S("Group", group),
 	S("SnapshotPath", snapshot_path),
+	I("MinimizeTileSize", minimize_tile_size),
+	S("MinimizeTileImage", minimize_tile_image),
 };
 
 void
@@ -82,6 +84,8 @@ config_defaults(struct ws_config *cfg)
 	strlcpy(cfg->group, "video", sizeof(cfg->group));
 	strlcpy(cfg->snapshot_path, "/tmp/WindowServer-snapshot.ppm",
 	    sizeof(cfg->snapshot_path));
+	/* The size of a GNUstep app icon, so tiles line up with icons. */
+	cfg->minimize_tile_size = 64;
 }
 
 static int

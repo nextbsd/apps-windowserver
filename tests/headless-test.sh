@@ -3,8 +3,10 @@
 # SPDX-License-Identifier: BSD-2-Clause
 #
 # Headless end-to-end test: starts WindowServer without DRM, VT or
-# libinput, runs wstest (two apps, three windows), then uses wsctl to
-# check the composited screen and drive synthetic input.
+# libinput, runs wstest (two apps and a joined connection, four
+# windows), then uses wsctl to check the composited screen and drive
+# synthetic input, including minimizing a window to a tile and
+# restoring it.
 #
 #   sh tests/headless-test.sh [BUILD_DIR]
 #
@@ -158,6 +160,62 @@ cat "$LOG/list3.txt"
 mark
 P4=$MARKS
 
+# Minimizing (WS_SERVER_MINIMIZE). Beta's W3 becomes a 64x64 tile in
+# the bottom-left corner: a dark rounded tile (face 303030) with W3
+# (500x400) shrunk to 48x38 at 8,13 inside it, and Beta's magenta icon
+# (24x24) in its bottom-right corner, at 39,39.
+TILE_Y=736
+"$B/wsctl" click 700 600 || fail "wsctl click W3 (Beta)"
+"$B/wsctl" key m || fail "wsctl key m"
+mark
+P5=$MARKS
+in_part "$P4" "$P5" '^minimizing W3' && in_part "$P4" "$P5" 'app=Beta type=key-window-lost win=W3' &&
+    pass "minimizing W3 took its key window away" || fail "minimize W3"
+# (Pixels are checked away from the pointer: the software cursor is
+# drawn at it.)
+expect_pixel 690 590 202020 "minimized W3 is off the screen"
+expect_pixel 4 $((TILE_Y + 24)) 303030 "tile face"
+expect_pixel 20 $((TILE_Y + 24)) 3050c0 "tile shows W3's picture"
+expect_pixel 56 $((TILE_Y + 56)) ff00ff "tile has Beta's icon in its corner"
+expect_pixel 70 $((TILE_Y + 24)) 202020 "tile is 64 pixels wide"
+"$B/wsctl" list >"$LOG/list5.txt"
+cat "$LOG/list5.txt"
+grep '"W3"$' "$LOG/list5.txt" | grep -q ' minimized ' &&
+    pass "wsctl list shows W3 minimized" || fail "W3 not listed as minimized"
+# Live: Beta redraws W3 while it's minimized, and the tile follows.
+"$B/wsctl" key c || fail "wsctl key c"
+mark
+expect_pixel 20 $((TILE_Y + 24)) 20a050 "tile updated on W3's commit"
+# One click selects the tile (lighter face) and goes to no client.
+"$B/wsctl" click 4 $((TILE_Y + 24)) || fail "wsctl click tile"
+got=$("$B/wsctl" pixel 3 $((TILE_Y + 19)) | awk '{print $2}')
+[ "$got" != 303030 ] && pass "clicked tile selected ($got)" || fail "tile not selected"
+# Drag it by 200,-100.
+"$B/wsctl" move 20 $((TILE_Y + 24)) && "$B/wsctl" down &&
+    "$B/wsctl" move 120 $((TILE_Y - 26)) && "$B/wsctl" move 220 $((TILE_Y - 76)) &&
+    "$B/wsctl" up || fail "wsctl drag tile"
+expect_pixel 20 $((TILE_Y + 24)) 202020 "tile dragged away"
+expect_pixel 215 $((TILE_Y - 81)) 20a050 "tile dragged to its new place"
+# Activate Alpha, then double-click the tile: Beta is activated and
+# told to restore W3, which it does by ordering it in.
+"$B/wsctl" click 150 450 || fail "wsctl click W1"
+mark
+P6=$MARKS
+"$B/wsctl" click 220 $((TILE_Y - 76)) && "$B/wsctl" click 220 $((TILE_Y - 76)) ||
+    fail "wsctl double-click tile"
+mark
+P7=$MARKS
+in_part "$P6" "$P7" 'app=Beta type=app-activated' &&
+    in_part "$P6" "$P7" 'app=Beta type=window-restore win=W3' &&
+    pass "double-click on the tile activated Beta and sent window-restore" ||
+    fail "no window-restore after a double-click"
+in_part "$P5" "$P7" 'app=Beta type=mouse-' &&
+    fail "clicks on the tile reached Beta" || pass "clicks on the tile went to no client"
+expect_pixel 690 590 20a050 "W3 restored, with what it drew while minimized"
+expect_pixel 215 $((TILE_Y - 81)) 202020 "tile gone after the restore"
+"$B/wsctl" list | grep '"W3"$' | grep -q ' active key ' &&
+    pass "W3 is key again" || fail "W3 not key after restoring"
+
 kill "$TPID"
 wait "$TPID" 2>/dev/null
 TPID=
@@ -189,7 +247,7 @@ grep -q 'app=Alpha type=mouse-down win=W1 x=50 y=350 button=0 clicks=1' "$LOG/ws
     pass "click delivered with window-local coordinates" || fail "mouse-down coordinates"
 grep -q 'app=Alpha type=key-down win=W1 keycode=38 keysym=0x61 text="a"' "$LOG/wstest.log" &&
     pass "key a reached Alpha's key window W1" || fail "key a not delivered to W1"
-if grep -q -E 'app=Beta type=key-(down|up)' "$LOG/wstest.log"; then
+if in_part 0 "$P4" 'app=Beta type=key-(down|up)'; then
 	fail "Beta (inactive) received key events"
 else
 	pass "Beta (inactive) received no key events"
