@@ -4,10 +4,11 @@
   Copyright (c) 2026, Joseph Maloney
   SPDX-License-Identifier: BSD-2-Clause
 
-  WindowServer LaunchDaemon. Proof of concept: it ships Disabled, so
-  launchd doesn't start it at boot and take the console from getty or
-  Xorg. To try it: launchctl load -F /System/Library/LaunchDaemons/org.nextbsd.WindowServer.plist
-  KeepAlive starts it as soon as it is loaded and restarts it if it
+  WindowServer LaunchDaemon. It ships Disabled, so launchd doesn't start
+  it at boot and take the console from getty or Xorg. Booting to the
+  graphical login enables it with "launchctl load -w" (pkgdemon/
+  nextbsd-gnustep enable-loginwindow.sh); "launchctl unload -w" disables
+  it again. Once loaded it starts at once and KeepAlive restarts it if it
   exits. The server starts as root, opens the display, VT and input
   devices, and then drops to _windowserver.
 -->
@@ -27,7 +28,7 @@
 	<key>KeepAlive</key>
 	<true/>
 	<key>RunAtLoad</key>
-	<false/>
+	<true/>
 	<key>Disabled</key>
 	<true/>
 	<key>StandardErrorPath</key>
