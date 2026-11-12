@@ -90,8 +90,12 @@ $(B)/wsctl: $(B)/tools/wsctl.o $(B)/$(LIB_NAME).a
 
 $(B)/WindowServerClient.pc: WindowServerClient.pc.in
 	@mkdir -p $(B)
-	sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@LIBDIR@|$(LIBDIR)|g' \
-	    -e 's|@INCDIR@|$(INCDIR)|g' -e 's|@SYSLIBDIR@|$(SYSLIBDIR)|g' \
+	# libdir and includedir are written relative to ${prefix} when they're
+	# under it, so the file still works when the tree is moved or staged.
+	sed -e 's|@PREFIX@|$(PREFIX)|g' \
+	    -e 's|@LIBDIR@|$(patsubst $(PREFIX)/%,$${prefix}/%,$(LIBDIR))|g' \
+	    -e 's|@INCDIR@|$(patsubst $(PREFIX)/%,$${prefix}/%,$(INCDIR))|g' \
+	    -e 's|@SYSLIBDIR@|$(SYSLIBDIR)|g' \
 	    $< > $@
 
 install: all
