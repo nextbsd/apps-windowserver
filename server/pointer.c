@@ -98,6 +98,9 @@ pointer_recheck(struct ws_server *srv)
 
 	if (srv->grab != NULL && !grabbed(srv))
 		return;
+	/* While a drag lasts nobody hovers (drag.c). */
+	if (drag_active(srv))
+		return;
 	/* While the overview is open, no window is under the pointer. */
 	if (overview_active(srv))
 		w = NULL;
@@ -252,6 +255,9 @@ pointer_motion(struct ws_server *srv, double x, double y)
 	srv->ptr_x = x;
 	srv->ptr_y = y;
 	cursor_moved(srv);
+	/* A drag moves its image and finds the window under it (drag.c). */
+	if (drag_motion(srv))
+		return;
 	if (overview_active(srv) && srv->grab == NULL) {
 		overview_motion(srv);
 		return;
@@ -320,6 +326,9 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 		return;
 	scroll_touch(srv);
 	srv->start_tap = 0;	/* a click: Start isn't tapped on its own */
+	/* Presses during a drag, and a cancelled drag's release (drag.c). */
+	if (drag_button(srv, button, pressed))
+		return;
 	mask = 1u << button;
 	/* The overview takes the buttons pressed while it is open, up to
 	 * their release (even if it closed meanwhile). */
@@ -428,12 +437,15 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 		send_pointer(srv, srv->grab, WS_EVENT_MOUSE_UP, button,
 		    srv->click_count);
 	if (srv->buttons == 0) {
+		w = srv->grab;
 		/* A tiled window the user dragged goes to its place. */
-		if (srv->grab != NULL)
-			tiling_grab_end(srv, srv->grab);
+		if (w != NULL)
+			tiling_grab_end(srv, w);
 		srv->grab = NULL;
 		srv->grab_suppressed = false;
 		srv->tile_dragging = false;
+		/* A drag ends with the release (drag.c). */
+		drag_note_release(srv, w);
 		pointer_recheck(srv);
 	}
 }

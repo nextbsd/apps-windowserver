@@ -43,11 +43,12 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_WINDOW_CURSOR | WS_SERVER_INPUT_REGION | \
 				 WS_SERVER_COMMIT_FRAME | WS_SERVER_WINDOW_IDS | \
 				 WS_SERVER_MENU_BAR | WS_SERVER_ACTIVATE_RAISE | \
-				 WS_SERVER_DOCK_NOT_ACTIVE | WS_SERVER_TILING)
+				 WS_SERVER_DOCK_NOT_ACTIVE | WS_SERVER_TILING | \
+				 WS_SERVER_DRAG)
 
 /* The standard cursors with a built-in image (cursor.c): kinds 0 to
-   WS_CURSOR_NOT_ALLOWED. */
-#define WS_NSTD_CURSORS		(WS_CURSOR_NOT_ALLOWED + 1)
+   WS_CURSOR_DRAG_LINK. */
+#define WS_NSTD_CURSORS		(WS_CURSOR_DRAG_LINK + 1)
 
 /* Connections that aren't apps: wsctl and the Dock's window list. */
 #define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK)
@@ -305,6 +306,7 @@ enum {
 	TIMER_HOUSEKEEPING,
 	TIMER_MOMENTUM,
 	TIMER_OVERVIEW,
+	TIMER_DRAG,
 };
 
 /* The window overview (overview.c). */
@@ -386,6 +388,49 @@ struct ws_tiling {
 	int		drag_split;	/* split being dragged, -1 = none */
 	int		hover_split;	/* split under the pointer, -1 = none */
 	struct ws_window *moving;	/* tiled window the user drags */
+};
+
+/* A drag and drop under way (drag.c). */
+struct ws_drag {
+	uint32_t	session;	/* 0 = no drag */
+	uint32_t	next_session;
+	uint32_t	sessions;	/* drags started so far */
+	struct ws_client *source;	/* the connection that began it */
+	uint32_t	source_window;
+	uint32_t	button;		/* the button that drags */
+	uint32_t	ops_local;	/* WS_DRAG_OP_* onto the source's app */
+	uint32_t	ops_external;	/* onto other apps */
+	uint32_t	flags;		/* WS_DRAG_* */
+	uint32_t	ops;		/* offered to the target now */
+	char		pasteboard[WS_MAX_DRAG_PASTEBOARD];
+	char		types[WS_MAX_DRAG_TYPES];
+	uint32_t	types_len;
+	uint32_t	ntypes;
+	pixman_image_t	*image;		/* the drag image, or NULL */
+	int32_t		hot_x;
+	int32_t		hot_y;
+	ws_rect_t	image_rect;	/* where it is on screen */
+	int32_t		slide_x;	/* where it slides back to */
+	int32_t		slide_y;
+	struct ws_window *target;	/* window under it that takes drags */
+	uint32_t	target_op;	/* its last answer, of ops */
+	bool		awaiting;	/* ENTER/UPDATE sent, no answer yet */
+	bool		released;	/* button up: drop once answered */
+	bool		sliding;	/* image sliding back, END follows */
+	uint32_t	end_flags;	/* WS_DRAG_END_* for the END after it */
+	double		slide_from_x;
+	double		slide_from_y;
+	uint64_t	slide_start;
+	uint64_t	release_usec;	/* when released */
+	bool		swallow_release; /* cancelled with the button held */
+	/* what the source last heard (WS_EVENT_DRAG_STATUS) */
+	uint32_t	told_target;
+	uint32_t	told_op;
+	uint32_t	told_ops;
+	/* the last release of a button in an app's window, for a drag
+	   begun just after it (WS_DRAG_LATE_USEC) */
+	uint32_t	late_app;	/* app id, 0 = none */
+	uint64_t	late_usec;
 };
 
 /* Touchpad scrolling in progress (scroll.c). */
@@ -560,6 +605,8 @@ struct ws_server {
 	uint32_t	usable_menu_bar;
 	/* window tiling (tiling.c) */
 	struct ws_tiling tiling;
+	/* drag and drop (drag.c) */
+	struct ws_drag	drag;
 
 	/* cursor */
 	pixman_image_t	*cursor_std[WS_NSTD_CURSORS]; /* built-in kinds */
@@ -746,6 +793,27 @@ int	tiling_cursor(struct ws_server *srv);
 void	tiling_draw_border(struct ws_server *srv, struct ws_window *w);
 void	tiling_request(struct ws_server *srv, struct ws_client *c,
 	    uint32_t op, uint32_t window, int32_t arg);
+
+/* ---- drag.c ---- */
+bool	drag_active(struct ws_server *srv);
+void	drag_begin(struct ws_server *srv, struct ws_client *c,
+	    struct ws_mach_item *item);
+void	drag_status(struct ws_server *srv, struct ws_client *c,
+	    const ws_req_drag_status_t *m);
+void	drag_cancel_request(struct ws_server *srv, struct ws_client *c,
+	    uint32_t session);
+void	drag_query(struct ws_server *srv, struct ws_client *c);
+bool	drag_motion(struct ws_server *srv);
+bool	drag_button(struct ws_server *srv, uint32_t button, bool pressed);
+void	drag_note_release(struct ws_server *srv, struct ws_window *w);
+bool	drag_key(struct ws_server *srv, xkb_keysym_t sym);
+void	drag_modifiers_changed(struct ws_server *srv);
+int	drag_cursor(struct ws_server *srv);
+void	drag_composite(struct ws_server *srv);
+void	drag_timer_fire(struct ws_server *srv);
+void	drag_window_gone(struct ws_server *srv, struct ws_window *w);
+void	drag_client_gone(struct ws_server *srv, struct ws_client *c);
+void	drag_fini(struct ws_server *srv);
 
 /* ---- tile.c ---- */
 int	tile_init(struct ws_server *srv);

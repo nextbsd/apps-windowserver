@@ -132,6 +132,8 @@ handle_kevent(struct ws_server *srv, struct kevent *kev)
 			scroll_momentum_fire(srv);
 		else if (kev->ident == TIMER_OVERVIEW)
 			overview_anim_fire(srv);
+		else if (kev->ident == TIMER_DRAG)
+			drag_timer_fire(srv);
 		return;
 	}
 	type = tag < 64 ? (int)tag : *(int *)kev->udata;
@@ -323,6 +325,7 @@ out:
 			client_destroy(srv, c);
 		clients_reap(srv);
 	}
+	drag_fini(srv);
 	cursor_fini(srv);
 	overview_fini(srv);
 	tiling_fini(srv);

@@ -1307,6 +1307,131 @@ ws_deactivate(ws_connection_t *c)
 	return send_oneway(c, &h);
 }
 
+/* ---- drag and drop (WS_SERVER_DRAG) ---- */
+
+static int
+need_drag(ws_connection_t *c)
+{
+	if ((c->server_flags & WS_SERVER_DRAG) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	return 0;
+}
+
+WS_API int
+ws_drag_begin(ws_connection_t *c, const ws_drag_params_t *p,
+    uint32_t *session)
+{
+	ws_req_drag_begin_t m;
+	ws_reply_t r;
+	size_t len = 0, n;
+	unsigned i;
+
+	if (need_drag(c) < 0)
+		return -1;
+	if (p == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	req_init(c, &m.hdr, WS_MSG_DRAG_BEGIN, sizeof(m), p->window);
+	m.buffer_id = p->image != NULL ? p->image->id : 0;
+	m.flags = p->flags;
+	m.hot_x = p->hot_x;
+	m.hot_y = p->hot_y;
+	m.ops_local = p->ops_local;
+	m.ops_external = p->ops_external;
+	m.slide_x = p->slide_x;
+	m.slide_y = p->slide_y;
+	memset(m.pasteboard, 0, sizeof(m.pasteboard));
+	if (p->pasteboard != NULL)
+		strlcpy(m.pasteboard, p->pasteboard, sizeof(m.pasteboard));
+	memset(m.types, 0, sizeof(m.types));
+	m.ntypes = 0;
+	for (i = 0; i < p->ntypes && p->types != NULL; i++) {
+		n = strlen(p->types[i]) + 1;
+		if (len + n > sizeof(m.types))
+			break;		/* the rest don't fit */
+		memcpy(m.types + len, p->types[i], n);
+		len += n;
+		m.ntypes++;
+	}
+	m.types_len = (uint32_t)len;
+	/* Only the bytes used go. */
+	m.hdr.head.msgh_size = (mach_msg_size_t)
+	    ((offsetof(ws_req_drag_begin_t, types) + len + 3) & ~(size_t)3);
+	memset(&r, 0, sizeof(r));
+	if (send_rpc(c, &m.hdr, &r) < 0)
+		return -1;
+	if (session != NULL)
+		*session = r.u.drag.session;
+	return 0;
+}
+
+WS_API int
+ws_drag_status(ws_connection_t *c, uint32_t session, uint32_t window,
+    uint32_t operation, uint32_t flags)
+{
+	ws_req_drag_status_t m;
+
+	if (need_drag(c) < 0)
+		return -1;
+	req_init(c, &m.hdr, WS_MSG_DRAG_STATUS, sizeof(m), window);
+	m.session = session;
+	m.operation = operation;
+	m.flags = flags;
+	m.reserved = 0;
+	return send_oneway(c, &m.hdr);
+}
+
+WS_API int
+ws_drag_cancel(ws_connection_t *c, uint32_t session)
+{
+	if (need_drag(c) < 0)
+		return -1;
+	return send_int(c, WS_MSG_DRAG_CANCEL, 0, (int32_t)session);
+}
+
+WS_API int
+ws_drag_query(ws_connection_t *c, ws_event_drag_state_t *state)
+{
+	ws_req_header_t h;
+	ws_event_t ev;
+	int r;
+
+	if (need_drag(c) < 0)
+		return -1;
+	req_init(c, &h, WS_MSG_DRAG_QUERY, sizeof(h), 0);
+	if (send_oneway(c, &h) < 0)
+		return -1;
+	for (;;) {
+		r = read_event(c, &ev);
+		if (r < 0)
+			return -1;
+		if (r == 0) {
+			r = wait_readable(c, RPC_TIMEOUT_MS);
+			if (r <= 0) {
+				if (r == 0)
+					errno = ETIMEDOUT;
+				return -1;
+			}
+			continue;
+		}
+		if (ev.hdr.type == WS_EVENT_DRAG_STATE) {
+			if (state != NULL)
+				*state = ev.u.drag_state;
+			return 0;
+		}
+		if (ev.hdr.type == WS_EVENT_ERROR &&
+		    ev.u.error.request == WS_MSG_DRAG_QUERY) {
+			errno = ev.u.error.code ? ev.u.error.code : EIO;
+			return -1;
+		}
+		if (queue_push(c, &ev) < 0)
+			return -1;
+	}
+}
+
 /* ---- tool requests ---- */
 
 /* Map the image a snapshot or preview event carries, and close its fd. */
@@ -1714,6 +1839,10 @@ ws_event_name(uint16_t type)
 		[WS_EVENT_POINTER_UNGRABBED] = "pointer-ungrabbed",
 		[WS_EVENT_TILING_STATE] = "tiling-state",
 		[WS_EVENT_TILING_ITEM] = "tiling-item",
+		[WS_EVENT_DRAG] = "drag",
+		[WS_EVENT_DRAG_STATUS] = "drag-status",
+		[WS_EVENT_DRAG_END] = "drag-end",
+		[WS_EVENT_DRAG_STATE] = "drag-state",
 	};
 
 	if (type < WS_EVENT_MAX && names[type] != NULL)

@@ -124,6 +124,12 @@ enum {
 	WS_MSG_WINDOW_SET_SIZE_LIMITS,	/* ws_req_size_limits_t */
 	WS_MSG_TILING,			/* tools and the Dock, ws_req_tiling_t;
 					   answers on the socket */
+	/* servers with WS_SERVER_DRAG, see "Drag and drop" */
+	WS_MSG_DRAG_BEGIN,		/* sync, ws_req_drag_begin_t;
+					   u.drag.session */
+	WS_MSG_DRAG_STATUS,		/* ws_req_drag_status_t, hdr.window */
+	WS_MSG_DRAG_CANCEL,		/* ws_req_int_t: session */
+	WS_MSG_DRAG_QUERY,		/* tools; answers on the socket */
 	WS_MSG_LAST
 };
 
@@ -725,6 +731,116 @@ typedef struct ws_req_tiling {		/* TILING */
 } ws_req_tiling_t;
 
 /*
+ * Drag and drop (servers with WS_SERVER_DRAG), the way Darwin's window
+ * server mediates drags: the source app puts the data on a named
+ * pasteboard (NSDragPboard in GNUstep's pasteboard server, gpbs) and
+ * hands WindowServer the drag; WindowServer moves the image with the
+ * pointer, above every window and the Dock, asks the window under the
+ * pointer what it would do, shows the cursor for the answer, and tells
+ * both sides how it ended. Only data that's on the pasteboard crosses
+ * between the apps.
+ *
+ * Who takes drags: windows with WS_WINDOW_ACCEPTS_DRAGS (the GNUstep
+ * backend sets it on windows that have views registered for dragged
+ * types), of app connections, where the pointer hits them (input
+ * regions count). A window above that doesn't take drags hides the
+ * ones below it, as on macOS. The source's own windows take its drags
+ * too: a drag inside one app goes through WindowServer like any other.
+ *
+ * WS_MSG_DRAG_BEGIN (sync, ws_req_drag_begin_t) starts a drag. The
+ * sender must be the app a button went down in, while that button is
+ * held, or, so a quick flick isn't lost, the app the last button went
+ * up in, within WS_DRAG_LATE_USEC of the release: that drag is then
+ * dropped where the button went up as soon as it starts. Otherwise
+ * EPERM; EBUSY while another drag is under way. The reply's
+ * u.drag.session names the drag.
+ *   buffer_id		the drag image (premultiplied ARGB8888, at most
+ *			WS_MAX_DRAG_IMAGE pixels on a side), copied by the
+ *			server, so the client may destroy it right away; 0
+ *			for none
+ *   hot_x, hot_y	the pointer's position in the image
+ *   ops_local		WS_DRAG_OP_* allowed onto the source app's own windows
+ *   ops_external	and onto other apps' windows
+ *   flags		WS_DRAG_SLIDE_BACK, WS_DRAG_IGNORE_MODIFIERS
+ *   slide_x, slide_y	where the image's top-left corner slides back to
+ *   pasteboard		the pasteboard holding the data, NUL-terminated
+ *   types		the types on it (NSPasteboard type names), each
+ *			NUL-terminated, ntypes of them in types_len bytes;
+ *			kept for the drag state and for bridges to other
+ *			protocols (XDND)
+ * While the drag lasts no app gets pointer motion; the button's release
+ * still goes to the source's window, before WS_EVENT_DRAG_END. The
+ * operations offered to a window are ops_local or ops_external, as
+ * GNUstep's -draggingSourceOperationMaskForLocal: says, narrowed by
+ * the modifiers held unless WS_DRAG_IGNORE_MODIFIERS: Control to
+ * WS_DRAG_OP_LINK, Option to _COPY, Command to _GENERIC (libs-gui's
+ * GSDragView rules).
+ *
+ * The window under the pointer gets WS_EVENT_DRAG: WS_DRAG_ENTER when
+ * the drag comes over it, WS_DRAG_UPDATE when it moves or the
+ * operations change, WS_DRAG_EXIT when it leaves or ends without a drop
+ * on it. Its owner answers ENTER and UPDATE with WS_MSG_DRAG_STATUS
+ * (one-way, ws_req_drag_status_t, hdr.window the window), the operation
+ * it would take, WS_DRAG_OP_NONE if none; statuses for an old session
+ * or a window the drag has left are ignored. The cursor follows the
+ * answer: WS_CURSOR_DRAG_COPY for _COPY and _GENERIC, _DRAG_LINK for
+ * _LINK, the arrow otherwise; the source hears WS_EVENT_DRAG_STATUS.
+ *
+ * When the button goes up over a window whose last answer, of the
+ * operations offered, isn't WS_DRAG_OP_NONE, that window gets
+ * WS_DRAG_DROP and reads the pasteboard; the image goes away, and the
+ * source gets WS_EVENT_DRAG_END with WS_DRAG_END_DROPPED and the
+ * operation. If the window hasn't answered the last ENTER or UPDATE
+ * yet, the server waits for it up to WS_DRAG_STATUS_WAIT_MS first.
+ * Otherwise the window gets WS_DRAG_EXIT, the image slides back if the
+ * drag asked for that, and the source gets WS_EVENT_DRAG_END with
+ * WS_DRAG_OP_NONE. The source isn't kept waiting for the drop to be
+ * handled, so it can answer the target's requests for data it promised
+ * on the pasteboard. A target may send WS_MSG_DRAG_STATUS with
+ * WS_DRAG_STATUS_FINISHED after a drop; the server takes it as done.
+ *
+ * Escape (the key goes to nobody) and WS_MSG_DRAG_CANCEL from the source
+ * cancel the drag: WS_DRAG_EXIT, slide back, WS_EVENT_DRAG_END with
+ * WS_DRAG_END_CANCELLED. If the source goes away the target gets
+ * WS_DRAG_EXIT. While a drag lasts the overview doesn't open.
+ *
+ * WS_MSG_DRAG_QUERY (tool connections, the console user): answered on
+ * the socket with WS_EVENT_DRAG_STATE.
+ *
+ * X11 windows (an X server joined with WS_CONNECT_JOIN) take drags only
+ * if the X server sets WS_WINDOW_ACCEPTS_DRAGS and speaks this protocol
+ * for its clients: a bridge to XDND, not done yet.
+ */
+#define WS_DRAG_LATE_USEC	500000	/* a begin after the release */
+#define WS_DRAG_STATUS_WAIT_MS	250	/* a drop waits this long for the
+					   target's answer */
+
+typedef struct ws_req_drag_begin {	/* DRAG_BEGIN */
+	ws_req_header_t	hdr;		/* hdr.window: the source's window the
+					   drag starts in, or 0 */
+	uint32_t	buffer_id;	/* drag image, 0 = none */
+	uint32_t	flags;		/* WS_DRAG_* */
+	int32_t		hot_x;		/* pointer position in the image */
+	int32_t		hot_y;
+	uint32_t	ops_local;	/* WS_DRAG_OP_* onto the source app */
+	uint32_t	ops_external;	/* onto other apps */
+	int32_t		slide_x;	/* screen position the image's top-left */
+	int32_t		slide_y;	/* corner slides back to */
+	uint32_t	ntypes;
+	uint32_t	types_len;	/* bytes used in types */
+	char		pasteboard[WS_MAX_DRAG_PASTEBOARD];
+	char		types[WS_MAX_DRAG_TYPES];
+} ws_req_drag_begin_t;
+
+typedef struct ws_req_drag_status {	/* DRAG_STATUS */
+	ws_req_header_t	hdr;		/* hdr.window: the window answering */
+	uint32_t	session;
+	uint32_t	operation;	/* WS_DRAG_OP_* it takes */
+	uint32_t	flags;		/* WS_DRAG_STATUS_* */
+	uint32_t	reserved;
+} ws_req_drag_status_t;
+
+/*
  * Settings (servers with WS_SERVER_SETTINGS). WindowServer's settings
  * (README, "Settings") change while it runs, in layers:
  *
@@ -873,6 +989,10 @@ typedef struct ws_reply {
 			uint32_t base;		/* RESERVE_WINDOW_IDS */
 			uint32_t count;
 		} window_ids;
+		struct {
+			uint32_t session;	/* DRAG_BEGIN */
+			uint32_t reserved;
+		} drag;
 		uint8_t	raw[128];
 	} u;
 } ws_reply_t;

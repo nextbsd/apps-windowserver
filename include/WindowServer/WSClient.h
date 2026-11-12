@@ -285,6 +285,47 @@ int		 ws_deactivate(ws_connection_t *conn);
 int		 ws_set_menu_bar(ws_connection_t *conn, uint32_t height);
 
 /*
+ * Drag and drop (servers with WS_SERVER_DRAG, else ENOTSUP; see "Drag
+ * and drop" in WSProtocol.h). Put the data on the pasteboard first,
+ * then hand the drag to WindowServer with ws_drag_begin while the
+ * button that went down in one of this app's windows is held. It
+ * answers with the session id, or fails with EPERM (not this app's
+ * button), EBUSY (another drag), EINVAL (image too large, types too
+ * long). WindowServer then moves the image, sends WS_EVENT_DRAG to the
+ * windows it passes over and WS_EVENT_DRAG_STATUS here, and ends with
+ * WS_EVENT_DRAG_END.
+ *
+ *   ws_drag_status	a window that got WS_EVENT_DRAG ENTER or UPDATE
+ *			says which operation it would take (WS_DRAG_OP_*,
+ *			WS_DRAG_OP_NONE for none); flags WS_DRAG_STATUS_*
+ *   ws_drag_cancel	the source gives the drag up
+ *   ws_drag_query	tools: the drag under way, if any
+ */
+typedef struct ws_drag_params {
+	uint32_t	window;		/* the window the drag starts in, or 0 */
+	ws_buffer_t	*image;		/* drag image, NULL for none; may be
+					   destroyed once ws_drag_begin returns */
+	int32_t		hot_x;		/* the pointer's position in the image */
+	int32_t		hot_y;
+	uint32_t	ops_local;	/* WS_DRAG_OP_* onto this app's windows */
+	uint32_t	ops_external;	/* onto other apps' */
+	uint32_t	flags;		/* WS_DRAG_SLIDE_BACK,
+					   WS_DRAG_IGNORE_MODIFIERS */
+	int32_t		slide_x;	/* where the image's top-left corner */
+	int32_t		slide_y;	/* slides back to (screen) */
+	const char	*pasteboard;	/* the pasteboard with the data */
+	const char *const *types;	/* the types on it */
+	unsigned	ntypes;
+} ws_drag_params_t;
+
+int		 ws_drag_begin(ws_connection_t *conn,
+    const ws_drag_params_t *params, uint32_t *session);
+int		 ws_drag_status(ws_connection_t *conn, uint32_t session,
+    uint32_t window, uint32_t operation, uint32_t flags);
+int		 ws_drag_cancel(ws_connection_t *conn, uint32_t session);
+int		 ws_drag_query(ws_connection_t *conn, ws_event_drag_state_t *state);
+
+/*
  * Tool requests (wsctl). ws_snapshot returns the composited screen
  * as a mapped image; release it with ws_snapshot_free.
  */

@@ -69,6 +69,10 @@ extern "C" {
 #define WS_WINDOW_NO_TILE	0x0020	/* the app never wants it tiled */
 #define WS_WINDOW_FIXED_SIZE	0x0040	/* the user can't resize it */
 #define WS_WINDOW_PANEL		0x0080	/* a panel, alert or sheet */
+/* Drag and drop (servers with WS_SERVER_DRAG; "Drag and drop" in
+   WSProtocol.h): the window takes drags, so WindowServer sends it
+   WS_EVENT_DRAG while a drag is over it. */
+#define WS_WINDOW_ACCEPTS_DRAGS	0x0100
 
 /*
  * Pixel formats. Window buffers can be either (XRGB8888 only on servers
@@ -128,6 +132,9 @@ extern "C" {
 #define WS_CURSOR_RESIZE_LR	6
 #define WS_CURSOR_RESIZE_UD	7
 #define WS_CURSOR_NOT_ALLOWED	8
+/* Servers with WS_SERVER_DRAG, which shows them during a drag. */
+#define WS_CURSOR_DRAG_COPY	9	/* arrow with a green plus */
+#define WS_CURSOR_DRAG_LINK	10	/* arrow with a link arrow */
 #define WS_CURSOR_CUSTOM	100	/* image from a client buffer */
 /* A window's cursor only (WS_MSG_WINDOW_SET_CURSOR, servers with
    WS_SERVER_WINDOW_CURSOR): the window shows its connection's cursor
@@ -240,6 +247,10 @@ extern "C" {
 						   WS_MSG_WINDOW_SET_SIZE_LIMITS and
 						   WS_MSG_TILING ("Window tiling" in
 						   WSProtocol.h) */
+#define WS_SERVER_DRAG		0x04000000 /* drag and drop between apps:
+						   WS_MSG_DRAG_*, WS_EVENT_DRAG*,
+						   WS_WINDOW_ACCEPTS_DRAGS ("Drag
+						   and drop" in WSProtocol.h) */
 
 /* WS_MSG_ACTIVATE flags (ws_activate_flags). */
 #define WS_ACTIVATE_RAISE	0x0001	/* also bring the app's windows,
@@ -359,6 +370,15 @@ enum {
 	   WSProtocol.h) */
 	WS_EVENT_TILING_STATE,		/* ws_event_tiling_t */
 	WS_EVENT_TILING_ITEM,		/* ws_event_tiling_item_t */
+	/* WS_SERVER_DRAG ("Drag and drop" in WSProtocol.h) */
+	WS_EVENT_DRAG,			/* ws_event_drag_t: to the window a
+					   drag is over */
+	WS_EVENT_DRAG_STATUS,		/* ws_event_drag_status_t: to the
+					   drag's source */
+	WS_EVENT_DRAG_END,		/* ws_event_drag_end_t: to the drag's
+					   source */
+	WS_EVENT_DRAG_STATE,		/* ws_event_drag_state_t, answers
+					   WS_MSG_DRAG_QUERY */
 	WS_EVENT_MAX
 };
 
@@ -855,6 +875,117 @@ typedef struct ws_event_tiling_item {
 	ws_rect_t	frame;		/* its frame */
 } ws_event_tiling_item_t;
 
+/*
+ * Drag and drop (servers with WS_SERVER_DRAG; see "Drag and drop" in
+ * WSProtocol.h). Operations are the NSDragOperation values, so the
+ * GNUstep backend passes them through unchanged.
+ */
+#define WS_DRAG_OP_NONE		0
+#define WS_DRAG_OP_COPY		0x0001
+#define WS_DRAG_OP_LINK		0x0002
+#define WS_DRAG_OP_GENERIC	0x0004
+#define WS_DRAG_OP_PRIVATE	0x0008
+#define WS_DRAG_OP_MOVE		0x0010
+#define WS_DRAG_OP_DELETE	0x0020
+#define WS_DRAG_OP_EVERY	0xffffffffu
+
+/* WS_MSG_DRAG_BEGIN flags (ws_drag_params_t.flags) */
+#define WS_DRAG_SLIDE_BACK	0x0001	/* a drag nobody takes slides its
+					   image back to where it started */
+#define WS_DRAG_IGNORE_MODIFIERS 0x0002	/* Control, Option and Command don't
+					   narrow the operations */
+
+/* ws_event_drag_t.phase */
+#define WS_DRAG_ENTER		1	/* the drag came over the window */
+#define WS_DRAG_UPDATE		2	/* it moved, or its operations changed */
+#define WS_DRAG_EXIT		3	/* it left, or ended without a drop */
+#define WS_DRAG_DROP		4	/* it was dropped: read the pasteboard */
+
+/* WS_MSG_DRAG_STATUS flags */
+#define WS_DRAG_STATUS_FINISHED	0x0001	/* the drop is handled (informational) */
+
+/* ws_event_drag_end_t.flags */
+#define WS_DRAG_END_DROPPED	0x0001	/* dropped on a window that took it */
+#define WS_DRAG_END_CANCELLED	0x0002	/* Escape, WS_MSG_DRAG_CANCEL, or the
+					   window under it went away */
+#define WS_DRAG_END_SLID_BACK	0x0004	/* the image slid back first */
+
+#define WS_MAX_DRAG_IMAGE	512	/* pixels on a side */
+#define WS_MAX_DRAG_PASTEBOARD	64	/* bytes, NUL included */
+#define WS_MAX_DRAG_TYPES	512	/* bytes of NUL-separated type names */
+
+/*
+ * WS_EVENT_DRAG (about hdr.window, a window of this connection with
+ * WS_WINDOW_ACCEPTS_DRAGS): a drag came over it, moved over it, left
+ * it or was dropped on it. Answer ENTER and UPDATE with WS_MSG_DRAG_STATUS
+ * naming the operation the window would take, WS_DRAG_OP_NONE if none.
+ */
+typedef struct ws_event_drag {
+	uint32_t	session;	/* the drag, for WS_MSG_DRAG_STATUS */
+	uint32_t	phase;		/* WS_DRAG_* */
+	double		x;		/* window-local pointer position */
+	double		y;
+	double		screen_x;
+	double		screen_y;
+	uint32_t	operations;	/* WS_DRAG_OP_* the source allows here,
+					   narrowed by the modifiers held */
+	uint32_t	modifiers;	/* WS_MOD_* */
+	uint32_t	source_client;	/* the source's connection */
+	uint32_t	source_app;	/* and its app */
+	char		pasteboard[WS_MAX_DRAG_PASTEBOARD]; /* where the data
+					   is, "NSDragPboard" for GNUstep */
+} ws_event_drag_t;
+
+/*
+ * WS_EVENT_DRAG_STATUS: to the source, whenever the window under the
+ * drag or the operation it takes changes. The server shows the cursor
+ * for it itself.
+ */
+typedef struct ws_event_drag_status {
+	uint32_t	session;
+	uint32_t	target;		/* window under the drag that takes
+					   drags, 0 = none */
+	uint32_t	target_app;	/* its app's id */
+	uint32_t	operation;	/* WS_DRAG_OP_* it takes, of operations */
+	uint32_t	operations;	/* what the source offers it now */
+	uint32_t	reserved;
+	double		screen_x;
+	double		screen_y;
+} ws_event_drag_status_t;
+
+/*
+ * WS_EVENT_DRAG_END: to the source, once: the drag is over. A drop
+ * comes with the operation the window took (then the window has been
+ * sent WS_DRAG_DROP), anything else with WS_DRAG_OP_NONE, after the
+ * image slid back if the drag asked for that.
+ */
+typedef struct ws_event_drag_end {
+	uint32_t	session;
+	uint32_t	operation;	/* WS_DRAG_OP_* taken, 0 = none */
+	uint32_t	flags;		/* WS_DRAG_END_* */
+	uint32_t	target;		/* the window it was dropped on, or 0 */
+	double		screen_x;	/* pointer at the end */
+	double		screen_y;
+} ws_event_drag_end_t;
+
+/* WS_EVENT_DRAG_STATE (WS_MSG_DRAG_QUERY): the drag under way, if any. */
+#define WS_DRAG_STATE_RELEASED	0x0001	/* button up, waiting for the target */
+#define WS_DRAG_STATE_SLIDING	0x0002	/* the image is sliding back */
+
+typedef struct ws_event_drag_state {
+	uint32_t	session;	/* 0 = no drag */
+	uint32_t	source_client;
+	uint32_t	target;		/* window under it that takes drags */
+	uint32_t	operation;	/* what that window takes */
+	uint32_t	operations;	/* what the source offers it */
+	uint32_t	flags;		/* WS_DRAG_STATE_* */
+	ws_rect_t	image;		/* where the drag image is, 0x0 = none */
+	uint32_t	sessions;	/* drags since the server started */
+	uint32_t	reserved;
+	char		types[152];	/* the types offered, comma-separated
+					   (cut short if long) */
+} ws_event_drag_state_t;
+
 typedef struct ws_event {
 	ws_event_header_t hdr;
 	union {
@@ -884,6 +1015,10 @@ typedef struct ws_event {
 		ws_event_input_device_t	input_device;
 		ws_event_tiling_t	tiling;
 		ws_event_tiling_item_t	tiling_item;
+		ws_event_drag_t		drag;
+		ws_event_drag_status_t	drag_status;
+		ws_event_drag_end_t	drag_end;
+		ws_event_drag_state_t	drag_state;
 		uint8_t			raw[232];
 	} u;
 } ws_event_t;

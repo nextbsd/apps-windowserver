@@ -16,10 +16,10 @@
 #include "server.h"
 
 /*
- * The standard cursors, drawn for NextBSD: '#' black, '.' white, ' '
- * transparent. Solid shapes are white with a black outline; thin ones
- * (I-beam, crosshair, not-allowed) are black with a white halo, so each
- * shows on dark and light backgrounds alike.
+ * The standard cursors, drawn for NextBSD: '#' black, '.' white, 'g'
+ * green, ' ' transparent. Solid shapes are white with a black outline;
+ * thin ones (I-beam, crosshair, not-allowed) are black with a white
+ * halo, so each shows on dark and light backgrounds alike.
  */
 
 /* 12x19 arrow. Hot spot 0,0. */
@@ -220,6 +220,61 @@ static const char *const not_allowed[] = {
 	"        ....        ",
 };
 
+/*
+ * Drag and drop (drag.c): the arrow with a badge for the operation the
+ * window under the drag takes, as on macOS. 'g' is the plus's green.
+ */
+
+/* 21x21 copy: a green plus. Hot spot 0,0, as the arrow. */
+static const char *const drag_copy[] = {
+	"#                    ",
+	"##                   ",
+	"#.#                  ",
+	"#..#                 ",
+	"#...#                ",
+	"#....#               ",
+	"#.....#              ",
+	"#......#             ",
+	"#.......#            ",
+	"#........#           ",
+	"#.........#          ",
+	"#......#####         ",
+	"#...#..#      #####  ",
+	"#..##..#     #ggggg# ",
+	"#.#  #..#   #ggg.ggg#",
+	"##   #..#   #ggg.ggg#",
+	"#     #..#  #g.....g#",
+	"      #..#  #ggg.ggg#",
+	"       ##   #ggg.ggg#",
+	"             #ggggg# ",
+	"              #####  ",
+};
+
+/* 21x21 link: a small arrow in a box. Hot spot 0,0. */
+static const char *const drag_link[] = {
+	"#                    ",
+	"##                   ",
+	"#.#                  ",
+	"#..#                 ",
+	"#...#                ",
+	"#....#               ",
+	"#.....#              ",
+	"#......#             ",
+	"#.......#            ",
+	"#........#           ",
+	"#.........#          ",
+	"#......#####         ",
+	"#...#..#    #########",
+	"#..##..#    #.......#",
+	"#.#  #..#   #..####.#",
+	"##   #..#   #....##.#",
+	"#     #..#  #...#.#.#",
+	"      #..#  #..#..#.#",
+	"       ##   #.#.....#",
+	"            #.......#",
+	"            #########",
+};
+
 #define STD(rows, hx, hy) \
 	{ rows, (int)(sizeof(rows) / sizeof(rows[0])), hx, hy }
 
@@ -238,6 +293,8 @@ static const struct std_cursor {
 	[WS_CURSOR_RESIZE_LR] =		STD(resize_lr, 12, 5),
 	[WS_CURSOR_RESIZE_UD] =		STD(resize_ud, 5, 12),
 	[WS_CURSOR_NOT_ALLOWED] =	STD(not_allowed, 10, 10),
+	[WS_CURSOR_DRAG_COPY] =		STD(drag_copy, 0, 0),
+	[WS_CURSOR_DRAG_LINK] =		STD(drag_link, 0, 0),
 };
 
 static pixman_image_t *
@@ -258,7 +315,8 @@ make_image(const char *const *rows, int h)
 			char ch = rows[y][x];
 
 			px[y * stride + x] = ch == '#' ? 0xff000000 :
-			    ch == '.' ? 0xffffffff : 0x00000000;
+			    ch == '.' ? 0xffffffff :
+			    ch == 'g' ? 0xff28b440 : 0x00000000;
 		}
 	return img;
 }
@@ -352,6 +410,12 @@ cursor_update(struct ws_server *srv)
 	/* Over a split between tiles, or dragging one: the server's. */
 	if (tiling_cursor(srv) >= 0) {
 		kind = (uint32_t)tiling_cursor(srv);
+		buf = NULL;
+		visible = true;
+	}
+	/* A drag shows what the window under it would do (drag.c). */
+	if (drag_cursor(srv) >= 0) {
+		kind = (uint32_t)drag_cursor(srv);
 		buf = NULL;
 		visible = true;
 	}
