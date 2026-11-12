@@ -118,7 +118,12 @@ vt_open(struct ws_server *srv)
 
 	/* vt(4) numbers VTs from 1; ttyv0 is VT 1. */
 	snprintf(path, sizeof(path), "/dev/ttyv%x", vtno - 1);
-	srv->tty_fd = open(path, O_RDWR | O_CLOEXEC | O_NOCTTY);
+	/*
+	 * Non-blocking: in K_RAW mode keystrokes also reach this terminal, and
+	 * vt_drain() reads until it's empty. A blocking read would then wait
+	 * for the next key and stall the whole event loop.
+	 */
+	srv->tty_fd = open(path, O_RDWR | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
 	if (srv->tty_fd < 0) {
 		ws_err("open %s: %s", path, strerror(errno));
 		return -1;
