@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Copyright (c) 2026, Joseph Maloney
+  SPDX-License-Identifier: BSD-2-Clause
+
+  WindowServer defaults. Every key can also be set from the environment
+  as WS_<Key>, e.g. WS_KeyboardLayout=de. These are the built-in values.
+-->
+<plist version="1.0">
+<dict>
+	<key>KeyboardRules</key>
+	<string>evdev</string>
+	<key>KeyboardModel</key>
+	<string>pc105</string>
+	<key>KeyboardLayout</key>
+	<string>us</string>
+	<key>KeyboardVariant</key>
+	<string></string>
+	<key>KeyboardOptions</key>
+	<string></string>
+	<!-- milliseconds before the first repeat, and between repeats -->
+	<key>KeyRepeatDelay</key>
+	<integer>500</integer>
+	<key>KeyRepeatInterval</key>
+	<integer>33</integer>
+	<!-- a click that activates an app is also delivered to it -->
+	<key>ClickThrough</key>
+	<true/>
+	<key>RaiseOnClick</key>
+	<true/>
+	<!-- skip kbdmux0 and sysmouse; only useful with per-device keyboards -->
+	<key>IgnoreMuxDevices</key>
+	<false/>
+	<key>TapToClick</key>
+	<true/>
+	<key>NaturalScrolling</key>
+	<false/>
+	<!-- Ctrl+Alt+Backspace stops the server (development) -->
+	<key>AllowTerminate</key>
+	<true/>
+	<key>HardwareCursor</key>
+	<true/>
+	<key>BackgroundColor</key>
+	<string>4a5a6a</string>
+	<!-- empty: the first /dev/dri/card* with a connected display -->
+	<key>DRMDevice</key>
+	<string></string>
+	<key>User</key>
+	<string>_windowserver</string>
+	<key>Group</key>
+	<string>video</string>
+</dict>
+</plist>

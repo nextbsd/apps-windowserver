@@ -1,0 +1,106 @@
+#!/bin/sh
+# Copyright (c) 2026, Joseph Maloney
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# ws-session: development helper for WindowServer (phase P1 stub).
+#
+#   ws-session [start|stop|run] [--headless WxH] [--server PATH]
+#
+# start  loads a temporary launchd job for the server, so its Mach
+#        service lands in the system bootstrap where every user's apps
+#        can find it, and waits until it answers.
+# stop   unloads the job, which stops the server.
+# run    start, wait for Ctrl-C (or the server to exit), stop. Default.
+#
+# Run it as root from a text console (not from inside X: Xorg holds the
+# display). With --headless it needs no display and works over SSH.
+#
+# Later (phase P2) "run" will also start gpbs and gdnc, set GSBackend
+# to the nextbsd backend and open the Dock, FileViewer and Terminal,
+# the way startx does for X today. Until the backend exists it only
+# starts the server; try wstest from another login.
+
+SERVER=/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+TOOLS=$(cd "$(dirname "$0")" && pwd)
+LABEL=org.nextbsd.WindowServer.dev
+SERVICE=${WS_SERVICE_NAME:-org.nextbsd.windowserver}
+DIR=/var/run/ws-session
+PLIST=$DIR/$LABEL.plist
+CMD=run
+ARGS=
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	start|stop|run) CMD=$1 ;;
+	--headless) ARGS="--headless $2"; shift ;;
+	--server) SERVER=$2; shift ;;
+	*) echo "usage: ws-session [start|stop|run] [--headless WxH] [--server PATH]" >&2
+	   exit 2 ;;
+	esac
+	shift
+done
+
+if [ "$(id -u)" != 0 ]; then
+	echo "ws-session: run me as root" >&2
+	exit 1
+fi
+
+stop() {
+	if [ -f "$PLIST" ]; then
+		launchctl unload "$PLIST"
+		rm -f "$PLIST"
+		echo "WindowServer stopped"
+	fi
+}
+
+start() {
+	if [ -z "$ARGS" ] && pgrep -q Xorg; then
+		echo "ws-session: Xorg is running and owns the display; quit X first" >&2
+		exit 1
+	fi
+	[ -x "$SERVER" ] || { echo "ws-session: no server at $SERVER" >&2; exit 1; }
+	mkdir -p "$DIR"
+	{
+		echo '<?xml version="1.0" encoding="UTF-8"?>'
+		echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+		echo '<plist version="1.0"><dict>'
+		echo "<key>Label</key><string>$LABEL</string>"
+		echo '<key>ProgramArguments</key><array>'
+		echo "<string>$SERVER</string>"
+		for a in $ARGS --service "$SERVICE"; do
+			echo "<string>$a</string>"
+		done
+		echo '</array>'
+		echo "<key>MachServices</key><dict><key>$SERVICE</key><true/></dict>"
+		echo '<key>RunAtLoad</key><true/>'
+		echo '<key>StandardErrorPath</key><string>/var/log/WindowServer.log</string>'
+		echo '</dict></plist>'
+	} >"$PLIST"
+	launchctl load "$PLIST" || exit 1
+	i=0
+	while [ $i -lt 50 ]; do
+		WS_SERVICE_NAME=$SERVICE "$TOOLS/wsctl" sync 2>/dev/null && {
+			echo "WindowServer is up (service $SERVICE, log /var/log/WindowServer.log)"
+			return 0
+		}
+		sleep 0.2
+		i=$((i + 1))
+	done
+	echo "ws-session: WindowServer didn't come up; see /var/log/WindowServer.log" >&2
+	stop
+	exit 1
+}
+
+case $CMD in
+start) start ;;
+stop) stop ;;
+run)
+	start
+	trap 'stop; exit 0' INT TERM
+	echo "Ctrl-C stops the session"
+	while launchctl list "$LABEL" 2>/dev/null | grep -q '"PID"'; do
+		sleep 1
+	done
+	stop
+	;;
+esac

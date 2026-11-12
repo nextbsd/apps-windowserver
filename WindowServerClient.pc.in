@@ -1,0 +1,13 @@
+# Copyright (c) 2026, Joseph Maloney
+# SPDX-License-Identifier: BSD-2-Clause
+
+prefix=@PREFIX@
+libdir=@LIBDIR@
+includedir=@INCDIR@
+
+Name: WindowServerClient
+Description: Client library for the NextBSD WindowServer
+Version: 0.1
+Libs: -L${libdir} -lWindowServerClient
+Libs.private: -L@SYSLIBDIR@ -llaunch -lsystem_kernel
+Cflags: -I${includedir}
