@@ -6,6 +6,10 @@ It owns the screen, input, window ordering and application activation. GNUstep a
 
 This is a proof of concept. It isn't usable yet.
 
+![Terminal running on WindowServer: its NeXT-style main menu at the top left, a zsh window, and its app icon at the bottom left, on a black screen](docs/terminal-headless.png)
+
+Terminal running on WindowServer through the GNUstep `nextbsd` backend, captured in headless mode with `wsctl snapshot`.
+
 ## NextBSD only
 
 WindowServer is built on what NextBSD provides, and isn't meant to run anywhere else:
