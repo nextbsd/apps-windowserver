@@ -1230,6 +1230,67 @@ ws_inject_hold(ws_connection_t *c, int down)
 	return inject(c, WS_INJECT_HOLD, down ? 1 : 0, 0, 0, 0, NULL);
 }
 
+WS_API int
+ws_inject_swipe(ws_connection_t *c, uint32_t fingers, int phase, double dx,
+    double dy)
+{
+	return inject(c, WS_INJECT_SWIPE, (uint32_t)phase, dx, dy, fingers,
+	    NULL);
+}
+
+WS_API int
+ws_overview(ws_connection_t *c, uint32_t request, ws_event_overview_t *state,
+    void (*fn)(const ws_event_overview_item_t *, void *), void *ctx)
+{
+	ws_req_int_t m;
+	ws_event_t ev;
+	int r, err = 0;
+
+	req_init(c, &m.hdr, WS_MSG_OVERVIEW, sizeof(m), 0);
+	m.value = (int32_t)request;
+	m.reserved = 0;
+	if (send_oneway(c, &m.hdr) < 0)
+		return -1;
+	for (;;) {
+		r = read_event(c, &ev);
+		if (r < 0)
+			return -1;
+		if (r == 0) {
+			r = wait_readable(c, RPC_TIMEOUT_MS);
+			if (r <= 0) {
+				if (r == 0)
+					errno = ETIMEDOUT;
+				return -1;
+			}
+			continue;
+		}
+		if (ev.hdr.type == WS_EVENT_LIST_END) {
+			if (err != 0) {
+				errno = err;
+				return -1;
+			}
+			return 0;
+		}
+		if (ev.hdr.type == WS_EVENT_OVERVIEW_STATE) {
+			if (state != NULL)
+				*state = ev.u.overview;
+			continue;
+		}
+		if (ev.hdr.type == WS_EVENT_OVERVIEW_ITEM) {
+			if (fn != NULL)
+				fn(&ev.u.overview_item, ctx);
+			continue;
+		}
+		if (ev.hdr.type == WS_EVENT_ERROR &&
+		    ev.u.error.request == WS_MSG_OVERVIEW) {
+			err = ev.u.error.code ? ev.u.error.code : EIO;
+			continue;
+		}
+		if (queue_push(c, &ev) < 0)
+			return -1;
+	}
+}
+
 WS_API const char *
 ws_event_name(uint16_t type)
 {
@@ -1266,6 +1327,8 @@ ws_event_name(uint16_t type)
 		[WS_EVENT_WINDOW_LIST_CHANGED] = "window-list-changed",
 		[WS_EVENT_PREVIEW_CHANGED] = "preview-changed",
 		[WS_EVENT_PREVIEW] = "preview",
+		[WS_EVENT_OVERVIEW_STATE] = "overview-state",
+		[WS_EVENT_OVERVIEW_ITEM] = "overview-item",
 	};
 
 	if (type < WS_EVENT_MAX && names[type] != NULL)

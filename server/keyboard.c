@@ -411,6 +411,21 @@ server_key(struct ws_server *srv, uint32_t code, bool pressed, xkb_keysym_t sym)
 	}
 	if (!pressed)
 		return false;
+	/* The window overview: the Mission Control key, Control+Up (every
+	 * window) and Control+Down (App Exposé), as on macOS. */
+	if (code == KEY_SCALE || sym == XKB_KEY_XF86LaunchA) {
+		overview_toggle(srv, WS_OVERVIEW_ALL);
+		return true;
+	}
+	if ((sym == XKB_KEY_Up || sym == XKB_KEY_Down) &&
+	    (srv->modifiers & (WS_MOD_SHIFT | WS_MOD_CONTROL | WS_MOD_ALT |
+	    WS_MOD_COMMAND)) == WS_MOD_CONTROL) {
+		overview_toggle(srv, sym == XKB_KEY_Up ? WS_OVERVIEW_ALL :
+		    WS_OVERVIEW_APP);
+		return true;
+	}
+	if (overview_active(srv))
+		return overview_key(srv, code, sym);
 	if (sym == XKB_KEY_BackSpace && srv->cfg.allow_terminate &&
 	    (srv->modifiers & (WS_MOD_CONTROL | WS_MOD_ALT)) ==
 	    (WS_MOD_CONTROL | WS_MOD_ALT)) {
@@ -419,6 +434,51 @@ server_key(struct ws_server *srv, uint32_t code, bool pressed, xkb_keysym_t sym)
 		return true;
 	}
 	return false;
+}
+
+/* Remember (pressed) or forget a key whose press the server took;
+ * returns whether it was one. */
+static bool
+server_key_held(struct ws_server *srv, uint32_t code, bool pressed)
+{
+	unsigned i;
+
+	for (i = 0; i < srv->nserver_keys; i++)
+		if (srv->server_keys[i] == code)
+			break;
+	if (pressed) {
+		if (i == srv->nserver_keys && i < WS_MAX_KEYS_HELD)
+			srv->server_keys[srv->nserver_keys++] = code;
+		return true;
+	}
+	if (i == srv->nserver_keys)
+		return false;
+	srv->nserver_keys--;
+	memmove(&srv->server_keys[i], &srv->server_keys[i + 1],
+	    (srv->nserver_keys - i) * sizeof(srv->server_keys[0]));
+	return true;
+}
+
+/*
+ * The Start key (Super, which is also Command) tapped on its own opens
+ * or closes the overview: pressed with no other key or button down,
+ * and released before any other key, click or gesture. Command
+ * shortcuts are untouched, and the key itself still reaches the app.
+ */
+static bool
+start_tap(struct ws_server *srv, uint32_t code, bool pressed)
+{
+	bool start = code == KEY_LEFTMETA || code == KEY_RIGHTMETA;
+
+	if (pressed) {
+		srv->start_tap = start && srv->nkeys_held == 0 &&
+		    srv->buttons == 0 ? code : 0;
+		return false;
+	}
+	if (code != srv->start_tap || code == 0)
+		return false;
+	srv->start_tap = 0;
+	return srv->cfg.start_key_overview;
 }
 
 void
@@ -430,12 +490,20 @@ keyboard_key(struct ws_server *srv, uint32_t code, bool pressed)
 	struct ws_window *w;
 	xkb_keysym_t sym;
 	uint32_t old_mods;
-	bool consumed;
+	bool consumed, tapped;
 
 	if (srv->xkb_state == NULL)
 		return;
 	sym = xkb_state_key_get_one_sym(srv->xkb_state, kc);
-	consumed = server_key(srv, code, pressed, sym);
+	tapped = start_tap(srv, code, pressed);
+	/* A key the server took on its way down is its own on the way up. */
+	if (!pressed && server_key_held(srv, code, false))
+		consumed = true;
+	else {
+		consumed = server_key(srv, code, pressed, sym);
+		if (consumed && pressed)
+			(void)server_key_held(srv, code, true);
+	}
 	if (!consumed)
 		deliver_key(srv, code, pressed, false, sym);
 
@@ -463,6 +531,8 @@ keyboard_key(struct ws_server *srv, uint32_t code, bool pressed)
 	} else if (code == srv->repeat_key) {
 		repeat_stop(srv);
 	}
+	if (tapped)
+		overview_toggle(srv, WS_OVERVIEW_ALL);
 }
 
 void

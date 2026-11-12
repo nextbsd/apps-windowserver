@@ -33,6 +33,8 @@ usage(void)
 	    "       wsctl scroll DX DY [finger]\n"
 	    "       wsctl flick DX DY [STEPS]  (two-finger scroll, then lift)\n"
 	    "       wsctl hold              (fingers rest on the touchpad)\n"
+	    "       wsctl swipe FINGERS DX DY [STEPS]  (touchpad swipe)\n"
+	    "       wsctl overview [all|app|close|status]\n"
 	    "       wsctl sync\n"
 	    "       wsctl dock list [-a]     (every window, with ids; -a: hidden too)\n"
 	    "       wsctl dock activate APP_ID [WINDOW]\n"
@@ -110,6 +112,68 @@ write_ppm(const ws_snapshot_t *s, const char *path)
 	}
 	free(row);
 	return fclose(f);
+}
+
+static const char *const ov_states[] = { "closed", "opening", "open",
+    "closing" };
+
+static void
+print_overview_item(const ws_event_overview_item_t *it, void *ctx)
+{
+	(void)ctx;
+	printf("item window=%u app=%u group=%u frame=%d,%d,%dx%d "
+	    "icon=%d,%d,%dx%d%s%s\n", it->window, it->app_id, it->group,
+	    it->frame.x, it->frame.y, it->frame.width, it->frame.height,
+	    it->icon.x, it->icon.y, it->icon.width, it->icon.height,
+	    (it->flags & WS_OVERVIEW_ITEM_SELECTED) ? " selected" : "",
+	    (it->flags & WS_OVERVIEW_ITEM_MINIMIZED) ? " minimized" : "");
+}
+
+/*
+ * wsctl overview [all|app|close|status]: open, close or just look, then
+ * print the state and the windows shown. Opening and closing wait for
+ * the animation to end (status doesn't).
+ */
+static int
+overview_cmd(ws_connection_t *c, const char *what)
+{
+	ws_event_overview_t st;
+	struct timespec ts = { 0, 20 * 1000 * 1000 };
+	uint32_t req = WS_OVERVIEW_QUERY;
+	int r, i;
+
+	if ((ws_server_flags(c) & WS_SERVER_OVERVIEW) == 0) {
+		fprintf(stderr, "wsctl: this server has no overview\n");
+		errno = ENOTSUP;
+		return -1;
+	}
+	if (what == NULL || strcmp(what, "all") == 0)
+		req = WS_OVERVIEW_ALL;
+	else if (strcmp(what, "app") == 0)
+		req = WS_OVERVIEW_APP;
+	else if (strcmp(what, "close") == 0)
+		req = WS_OVERVIEW_CLOSE;
+	else if (strcmp(what, "status") == 0)
+		req = WS_OVERVIEW_QUERY;
+	else
+		usage();
+	memset(&st, 0, sizeof(st));
+	r = ws_overview(c, req, &st, NULL, NULL);
+	for (i = 0; r == 0 && req != WS_OVERVIEW_QUERY && i < 100 &&
+	    (st.state == WS_OVERVIEW_STATE_OPENING ||
+	    st.state == WS_OVERVIEW_STATE_CLOSING); i++) {
+		nanosleep(&ts, NULL);
+		r = ws_overview(c, WS_OVERVIEW_QUERY, &st, NULL, NULL);
+	}
+	if (r != 0)
+		return r;
+	r = ws_overview(c, WS_OVERVIEW_QUERY, &st, print_overview_item, NULL);
+	if (r == 0)
+		printf("state=%s mode=%s count=%u selected=%u app=%u\n",
+		    st.state < 4 ? ov_states[st.state] : "?",
+		    st.mode == WS_OVERVIEW_APP ? "app" : "all", st.count,
+		    st.selected, st.app_id);
+	return r;
 }
 
 static volatile sig_atomic_t stop;
@@ -333,6 +397,24 @@ main(int argc, char **argv)
 		}
 		if (r == 0)
 			r = ws_inject_scroll_finger(c, 0, 0);
+	} else if (strcmp(cmd, "swipe") == 0 && (argc == 5 || argc == 6)) {
+		/* begin, STEPS updates 10 ms apart, end */
+		int steps = argc == 6 ? atoi(argv[5]) : 8;
+		uint32_t fingers = (uint32_t)atoi(argv[2]);
+		struct timespec ts = { 0, 10 * 1000 * 1000 };
+
+		if (steps < 1)
+			steps = 1;
+		r = ws_inject_swipe(c, fingers, WS_GESTURE_BEGIN, 0, 0);
+		for (i = 0; r == 0 && i < steps; i++) {
+			r = ws_inject_swipe(c, fingers, WS_GESTURE_UPDATE,
+			    atof(argv[3]) / steps, atof(argv[4]) / steps);
+			nanosleep(&ts, NULL);
+		}
+		if (r == 0)
+			r = ws_inject_swipe(c, fingers, WS_GESTURE_END, 0, 0);
+	} else if (strcmp(cmd, "overview") == 0 && argc <= 3) {
+		r = overview_cmd(c, argc == 3 ? argv[2] : NULL);
 	} else if (strcmp(cmd, "hold") == 0 && argc == 2) {
 		r = ws_inject_hold(c, 1);
 		if (r == 0)

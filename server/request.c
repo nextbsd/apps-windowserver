@@ -190,6 +190,9 @@ handle_inject(struct ws_server *srv, struct ws_client *c,
 		if (m->pressed)
 			scroll_touch(srv);
 		break;
+	case WS_INJECT_SWIPE:
+		overview_swipe(srv, (int)m->pressed, m->button, m->dx, m->dy);
+		break;
 	default:
 		client_error(srv, c, WS_MSG_INJECT, 0, EINVAL,
 		    "unknown inject kind");
@@ -300,6 +303,7 @@ min_size(mach_msg_id_t id)
 	case WS_MSG_DOCK_ACTIVATE:
 	case WS_MSG_DOCK_PREVIEW:
 	case WS_MSG_DOCK_SHOW_MINIMIZED:
+	case WS_MSG_OVERVIEW:
 		return sizeof(ws_req_int_t);
 	case WS_MSG_WINDOW_ORDER:
 		return sizeof(ws_req_order_t);
@@ -586,6 +590,35 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 	case WS_MSG_DOCK_PREVIEW:
 		handle_preview(srv, c, item, h->seq, h->window, value);
 		return;
+	case WS_MSG_OVERVIEW:
+		/* tools and the Dock, for the console user */
+		if ((c->flags & WS_CONNECT_TOOL) == 0 ||
+		    !dock_may_list(srv, item->sender_euid)) {
+			ws_event_t ev;
+
+			client_error(srv, c, (uint32_t)id, 0, EPERM,
+			    "overview not allowed");
+			event_init(srv, &ev, WS_EVENT_LIST_END, 0, 0);
+			client_send(srv, c, &ev, -1);
+			break;
+		}
+		switch (value) {
+		case WS_OVERVIEW_CLOSE:
+			overview_close(srv);
+			break;
+		case WS_OVERVIEW_ALL:
+		case WS_OVERVIEW_APP:
+			overview_open(srv, value);
+			break;
+		case WS_OVERVIEW_QUERY:
+			break;
+		default:
+			client_error(srv, c, (uint32_t)id, 0, EINVAL,
+			    "unknown overview request");
+			break;
+		}
+		overview_report(srv, c);
+		break;
 	case WS_MSG_INJECT:
 		if (!may_inject(srv, item)) {
 			client_error(srv, c, (uint32_t)id, 0, EPERM,

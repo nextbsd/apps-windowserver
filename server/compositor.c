@@ -67,6 +67,58 @@ compositor_present_done(struct ws_server *srv)
 	}
 }
 
+/*
+ * Draw window w (or a minimized window's tile) at its place, where it
+ * meets ext, with the given opacity (the overview fades windows).
+ */
+void
+composite_window(struct ws_server *srv, struct ws_window *w,
+    const pixman_box32_t *ext, double opacity)
+{
+	struct ws_buffer *b = w->buffer;
+	pixman_image_t *src, *mask = NULL;
+	pixman_color_t a;
+	int bw, bh;
+
+	if (opacity <= 0.0)
+		return;
+	if (opacity < 1.0) {
+		a.red = a.green = a.blue = 0;
+		a.alpha = (uint16_t)(opacity * 0xffff);
+		mask = pixman_image_create_solid_fill(&a);
+	}
+	if (w->tile_for != NULL) {
+		/* a minimized window's tile (tile.c) */
+		if (w->tile_image != NULL)
+			pixman_image_composite32(PIXMAN_OP_OVER,
+			    w->tile_image, mask, srv->shadow, 0, 0, 0,
+			    0, w->frame.x, w->frame.y, w->frame.width,
+			    w->frame.height);
+		goto out;
+	}
+	if (b == NULL || w->frame.width <= 0 || w->frame.height <= 0)
+		goto out;
+	bw = (int)(b->width / b->scale);
+	bh = (int)(b->height / b->scale);
+	if (bw > w->frame.width)
+		bw = w->frame.width;
+	if (bh > w->frame.height)
+		bh = w->frame.height;
+	if (w->frame.x >= ext->x2 || w->frame.y >= ext->y2 ||
+	    w->frame.x + bw <= ext->x1 || w->frame.y + bh <= ext->y1)
+		goto out;
+	src = b->image;
+	pixman_image_composite32(
+	    mask == NULL && ((w->flags & WS_WINDOW_OPAQUE) ||
+	    b->format == WS_FORMAT_XRGB8888) ? PIXMAN_OP_SRC :
+	    PIXMAN_OP_OVER,
+	    src, mask, srv->shadow, 0, 0, 0, 0,
+	    w->frame.x, w->frame.y, bw, bh);
+out:
+	if (mask != NULL)
+		pixman_image_unref(mask);
+}
+
 static void
 composite_region(struct ws_server *srv, pixman_region32_t *region)
 {
@@ -88,37 +140,14 @@ composite_region(struct ws_server *srv, pixman_region32_t *region)
 	    0, 0, 0, 0, ext->x1, ext->y1, ext->x2 - ext->x1, ext->y2 - ext->y1);
 	pixman_image_unref(fill);
 
-	/* TODO: skip windows hidden behind opaque windows above them. */
-	for (w = srv->stack_bottom; w != NULL; w = w->above) {
-		struct ws_buffer *b = w->buffer;
-		int bw, bh;
-
-		if (w->tile_for != NULL) {
-			/* a minimized window's tile (tile.c) */
-			if (w->tile_image != NULL)
-				pixman_image_composite32(PIXMAN_OP_OVER,
-				    w->tile_image, NULL, srv->shadow, 0, 0, 0,
-				    0, w->frame.x, w->frame.y, w->frame.width,
-				    w->frame.height);
-			continue;
-		}
-		if (b == NULL || w->frame.width <= 0 || w->frame.height <= 0)
-			continue;
-		bw = (int)(b->width / b->scale);
-		bh = (int)(b->height / b->scale);
-		if (bw > w->frame.width)
-			bw = w->frame.width;
-		if (bh > w->frame.height)
-			bh = w->frame.height;
-		if (w->frame.x >= ext->x2 || w->frame.y >= ext->y2 ||
-		    w->frame.x + bw <= ext->x1 || w->frame.y + bh <= ext->y1)
-			continue;
-		pixman_image_composite32(
-		    ((w->flags & WS_WINDOW_OPAQUE) ||
-		    b->format == WS_FORMAT_XRGB8888) ? PIXMAN_OP_SRC :
-		    PIXMAN_OP_OVER,
-		    b->image, NULL, srv->shadow, 0, 0, 0, 0,
-		    w->frame.x, w->frame.y, bw, bh);
+	if (srv->ov.state != WS_OVERVIEW_STATE_CLOSED) {
+		/* the window overview (overview.c) */
+		overview_composite(srv, region);
+	} else {
+		/* TODO: skip windows hidden behind opaque windows above
+		 * them. */
+		for (w = srv->stack_bottom; w != NULL; w = w->above)
+			composite_window(srv, w, ext, 1.0);
 	}
 
 	if (!srv->cursor_hw && srv->cursor_visible && srv->cursor_image != NULL)

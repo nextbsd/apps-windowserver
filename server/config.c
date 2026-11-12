@@ -66,6 +66,8 @@ static const struct ckey keys[] = {
 	I("MinimizeTileSize", minimize_tile_size),
 	S("MinimizeTileImage", minimize_tile_image),
 	B("MinimizeIntoDock", minimize_into_dock),
+	B("StartKeyShowsOverview", start_key_overview),
+	B("ReduceMotion", reduce_motion),
 };
 
 void
@@ -101,6 +103,8 @@ config_defaults(struct ws_config *cfg)
 	    sizeof(cfg->snapshot_path));
 	/* The size of a GNUstep app icon, so tiles line up with icons. */
 	cfg->minimize_tile_size = 64;
+	cfg->start_key_overview = true;
+	cfg->reduce_motion = false;
 }
 
 static int

@@ -88,6 +88,8 @@ enum {
 					   image follows on the socket */
 	WS_MSG_DOCK_SHOW_MINIMIZED,	/* ws_req_int_t: 1 = this Dock shows
 					   minimized windows, 0 = no longer */
+	/* tools and the Dock (servers with WS_SERVER_OVERVIEW) */
+	WS_MSG_OVERVIEW,		/* ws_req_int_t: WS_OVERVIEW_* */
 	WS_MSG_LAST
 };
 
@@ -279,6 +281,28 @@ typedef struct ws_req_cursor {
  *     its flags change.
  */
 #define WS_MAX_PREVIEW		512
+
+/*
+ * The overview (servers with WS_SERVER_OVERVIEW). WindowServer opens it
+ * itself: a tap of the Start (Command) key on its own, Control+Up, the
+ * Mission Control key (KEY_SCALE) or a three-finger swipe up show every
+ * window; Control+Down or a three-finger swipe down show the active
+ * app's (App Exposé). (With ThreeFingerDrag on, the swipes take four
+ * fingers.) While it's open no app gets pointer or key events:
+ * clicking a window or pressing Return on the selected one activates
+ * its app with that window key and in front (a minimized one is
+ * restored as from its tile), and Escape, a click on empty space or
+ * another Start tap closes it. Apps don't change.
+ *
+ * WS_MSG_OVERVIEW (ws_req_int_t), from WS_CONNECT_CONTROL and
+ * WS_CONNECT_DOCK connections only, with the same user check as the
+ * window list: `value` WS_OVERVIEW_ALL or _APP opens it (or switches
+ * mode), WS_OVERVIEW_CLOSE closes it, and every value, WS_OVERVIEW_QUERY
+ * included, is answered on the socket with WS_EVENT_OVERVIEW_STATE, a
+ * WS_EVENT_OVERVIEW_ITEM for each window shown, and WS_EVENT_LIST_END.
+ * Dock connections also get WS_EVENT_OVERVIEW_STATE whenever it starts
+ * opening and when it has closed.
+ */
 
 /*
  * Synthetic input. Accepted when the server runs headless, or from a

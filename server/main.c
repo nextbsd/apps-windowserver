@@ -123,6 +123,8 @@ handle_kevent(struct ws_server *srv, struct kevent *kev)
 			clients_housekeeping(srv);
 		else if (kev->ident == TIMER_MOMENTUM)
 			scroll_momentum_fire(srv);
+		else if (kev->ident == TIMER_OVERVIEW)
+			overview_anim_fire(srv);
 		return;
 	}
 	type = tag < 64 ? (int)tag : *(int *)kev->udata;
@@ -305,6 +307,7 @@ main(int argc, char **argv)
 			handle_kevent(srv, &events[i]);
 		clients_reap(srv);
 		dock_flush(srv);
+		overview_flush(srv);
 	}
 	status = 0;
 
@@ -317,6 +320,7 @@ out:
 		clients_reap(srv);
 	}
 	cursor_fini(srv);
+	overview_fini(srv);
 	tile_fini(srv);
 	if (srv->output != NULL && srv->output->shutdown != NULL)
 		srv->output->shutdown(srv);

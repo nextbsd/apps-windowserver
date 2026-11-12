@@ -76,6 +76,14 @@
 	     WindowServer draws no tiles. Off for now. -->
 	<key>MinimizeIntoDock</key>
 	<false/>
+	<!-- The window overview (Exposé): a tap of the Start key on its
+	     own opens and closes it. Control+Up, Control+Down, the Mission
+	     Control key and three-finger swipes always work. -->
+	<key>StartKeyShowsOverview</key>
+	<true/>
+	<!-- No animations (the overview's). -->
+	<key>ReduceMotion</key>
+	<false/>
 	<!-- empty: the first /dev/dri/card* with a connected display -->
 	<key>DRMDevice</key>
 	<string></string>

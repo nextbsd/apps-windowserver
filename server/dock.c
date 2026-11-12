@@ -209,6 +209,7 @@ void
 dock_list_changed(struct ws_server *srv)
 {
 	srv->dock_list_dirty = true;
+	srv->ov.dirty = true;	/* the overview lays out again */
 }
 
 void
@@ -317,12 +318,26 @@ dock_activate(struct ws_server *srv, struct ws_client *c, uint32_t window,
 	}
 	ws_debug("the Dock activates app %u (%s), window %u", a->id,
 	    a->app_name, window);
-	raise_app(srv, a);
 	if (w != NULL && w->visible) {
-		window_order_by_server(srv, w, WS_ORDER_ABOVE, NULL);
-		app_activate(srv, a, (w->flags & WS_WINDOW_NO_KEY) ? NULL : w);
-	} else
-		app_activate(srv, a, NULL);
+		app_bring_forward(srv, w);
+		return;
+	}
+	raise_app(srv, a);
+	app_activate(srv, a, NULL);
+}
+
+/*
+ * Bring visible window w and the rest of its app's windows forward, w
+ * in front, and activate the app with w key (the Dock, the overview).
+ */
+void
+app_bring_forward(struct ws_server *srv, struct ws_window *w)
+{
+	struct ws_client *a = w->owner->app;
+
+	raise_app(srv, a);
+	window_order_by_server(srv, w, WS_ORDER_ABOVE, NULL);
+	app_activate(srv, a, (w->flags & WS_WINDOW_NO_KEY) ? NULL : w);
 }
 
 /* WS_MSG_DOCK_RESTORE: ask the owner of a minimized window to restore it. */
