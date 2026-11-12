@@ -38,7 +38,7 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_SCROLL_PHASES | WS_SERVER_OVERVIEW | \
 				 WS_SERVER_DOCK_EDGE | WS_SERVER_MINIMIZE_WHERE | \
 				 WS_SERVER_USABLE_AREA | WS_SERVER_SCREEN_CHANGES | \
-				 WS_SERVER_SETTINGS)
+				 WS_SERVER_SETTINGS | WS_SERVER_LATIN_SHORTCUTS)
 
 /* Connections that aren't apps: wsctl and the Dock's window list. */
 #define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK)
@@ -469,6 +469,16 @@ struct ws_server {
 	uint32_t	nlayouts;
 	char		layouts[WS_MAX_KEYBOARD_LAYOUTS][32];	/* "us", "gr" */
 	char		variants[WS_MAX_KEYBOARD_LAYOUTS][32];
+	/*
+	 * Command shortcuts: while a layout that isn't Latin is active, a
+	 * key pressed with Command held takes its keysym and text from
+	 * the first Latin layout in the list, or a "us" keymap compiled
+	 * for this when there is none (latin_keymap).
+	 */
+	uint32_t	layouts_latin;	/* bit i: layout i is Latin */
+	uint32_t	latin_layout;	/* its index in latin_keymap */
+	struct xkb_keymap *latin_keymap;	/* xkb_keymap, or "us" */
+	struct xkb_state *latin_state;
 
 	/* input (input.c) */
 	struct libinput	*libinput;

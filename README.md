@@ -148,6 +148,12 @@ Each connection is normally an app of its own. A helper process can join another
 - All connections of an app are activated and deactivated together (`WS_EVENT_APP_ACTIVATED`/`DEACTIVATED` go to each). They share one key window, which can be any connection's window; clicking a joined connection's window only moves the key window. Key events go to the connection that owns the key window, except Command shortcuts: when that is a joined connection, a key pressed with Command held goes to the app's own connection (with window 0), so its menus get it, and so do that key's repeats and release.
 - If the app's first connection goes away, the oldest remaining connection carries the app on.
 
+### Command shortcuts with any layout
+
+While a layout that isn't Latin (Greek, Russian...) is active, a key pressed with Command held carries the keysym and text of the first Latin layout in `KeyboardLayout`, or of `us` when the list has none, so Command+C still copies and Command+Q still quits, as on macOS. A layout counts as Latin when its letter keys type a to z (QWERTY, QWERTZ, AZERTY and Dvorak all do). Typing, Option and Control keep the active layout, and so do `WS_CONNECT_XKB` connections, which read raw keycodes with their own keymap. GNUstep apps get this through the `nextbsd` backend without a change to it. Servers that do this set `WS_SERVER_LATIN_SHORTCUTS`.
+
+![Terminal with Greek active: typing gives αβψ, Command+C and Command+V paste "hell", and Command+Q opens the Quit panel](docs/latin-shortcuts.png)
+
 ### XKB state for X servers
 
 Key events carry the keycode, the keysym, text and six coarse `WS_MOD_*` bits, which is all a GNUstep app needs. A client that runs its own XKB, such as an X server, connects with `WS_CONNECT_XKB` (servers that support it set `WS_SERVER_XKB`) and also gets:

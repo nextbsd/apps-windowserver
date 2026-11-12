@@ -133,6 +133,18 @@ typedef struct ws_req_header {
  * older servers ignore them and leave the reply's app_id 0, which the
  * client library reports as ENOTSUP.
  */
+/*
+ * Command shortcuts (WS_SERVER_LATIN_SHORTCUTS). Key events carry the
+ * keysym and text of the active layout, except that while the active
+ * layout isn't Latin (gr, ru...), a key pressed with Command held
+ * carries the keysym, text and text_unmodified of the first Latin
+ * layout in the KeyboardLayout list, or of us when there is none, as
+ * on macOS: Command+C copies while Greek is active. The modifiers in
+ * effect still apply (Command+Shift+Z gives "Z"). Keys without Command,
+ * with Option or Control alone, and every key of a WS_CONNECT_XKB
+ * connection (which reads keycodes with its own keymap) keep the active
+ * layout. Older servers send the active layout's in every case.
+ */
 typedef struct ws_req_hello {
 	ws_req_header_t	hdr;
 	uint32_t	flags;		/* WS_CONNECT_* */

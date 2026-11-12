@@ -175,6 +175,118 @@ layouts_note(struct ws_server *srv)
 	    XKB_STATE_LAYOUT_EFFECTIVE);
 }
 
+/*
+ * Command shortcuts, as on macOS: while the active layout isn't Latin
+ * (Greek, Russian...), a key pressed with Command held is resolved
+ * against the first Latin layout in the list, so Command+C still
+ * copies. A layout is Latin when most of its 26 letter keys type a to
+ * z at level 1, which takes in QWERTZ, AZERTY and Dvorak.
+ */
+static const uint32_t letter_keys[] = {
+	KEY_Q, KEY_W, KEY_E, KEY_R, KEY_T, KEY_Y, KEY_U, KEY_I, KEY_O, KEY_P,
+	KEY_A, KEY_S, KEY_D, KEY_F, KEY_G, KEY_H, KEY_J, KEY_K, KEY_L,
+	KEY_Z, KEY_X, KEY_C, KEY_V, KEY_B, KEY_N, KEY_M,
+};
+
+static bool
+layout_is_latin(struct xkb_keymap *km, xkb_layout_index_t layout)
+{
+	const xkb_keysym_t *syms;
+	uint32_t u;
+	size_t i;
+	int latin = 0;
+
+	for (i = 0; i < sizeof(letter_keys) / sizeof(letter_keys[0]); i++) {
+		if (xkb_keymap_key_get_syms_by_level(km,
+		    letter_keys[i] + XKB_OFFSET, layout, 0, &syms) < 1)
+			continue;
+		u = xkb_keysym_to_utf32(syms[0]);
+		if (u >= 'a' && u <= 'z')
+			latin++;
+	}
+	return latin >= 20;
+}
+
+static void
+latin_fini(struct ws_server *srv)
+{
+	if (srv->latin_state != NULL)
+		xkb_state_unref(srv->latin_state);
+	if (srv->latin_keymap != NULL)
+		xkb_keymap_unref(srv->latin_keymap);
+	srv->latin_state = NULL;
+	srv->latin_keymap = NULL;
+	srv->layouts_latin = 0;
+	srv->latin_layout = 0;
+}
+
+/* Find the layout Command shortcuts use for the keymap just compiled. */
+static void
+latin_setup(struct ws_server *srv)
+{
+	struct xkb_rule_names names;
+	struct xkb_keymap *km = NULL;
+	xkb_layout_index_t i, n = xkb_keymap_num_layouts(srv->xkb_keymap);
+	uint32_t first = (uint32_t)-1;
+
+	latin_fini(srv);
+	for (i = 0; i < n && i < 32; i++)
+		if (layout_is_latin(srv->xkb_keymap, i)) {
+			srv->layouts_latin |= 1U << i;
+			if (first == (uint32_t)-1)
+				first = i;
+		}
+	if (srv->layouts_latin == (n >= 32 ? 0xffffffffU : (1U << n) - 1))
+		return;		/* every layout is Latin: nothing to do */
+	if (first != (uint32_t)-1) {
+		km = xkb_keymap_ref(srv->xkb_keymap);
+		srv->latin_layout = first;
+	} else {
+		memset(&names, 0, sizeof(names));
+		names.rules = srv->cfg.keyboard_rules;
+		names.model = srv->cfg.keyboard_model;
+		names.layout = "us";
+		km = xkb_keymap_new_from_names(srv->xkb_ctx, &names,
+		    XKB_KEYMAP_COMPILE_NO_FLAGS);
+		if (km == NULL) {
+			ws_warn("can't compile a us keymap for Command "
+			    "shortcuts");
+			return;
+		}
+		srv->latin_layout = 0;
+	}
+	srv->latin_state = xkb_state_new(km);
+	if (srv->latin_state == NULL) {
+		xkb_keymap_unref(km);
+		return;
+	}
+	srv->latin_keymap = km;
+	ws_info("Command shortcuts: layout %s",
+	    km == srv->xkb_keymap && first < WS_MAX_KEYBOARD_LAYOUTS ?
+	    srv->layouts[first] : "us");
+}
+
+/* A modifier mask of xkb_keymap in latin_keymap's mod indices. */
+static xkb_mod_mask_t
+latin_mods(struct ws_server *srv, xkb_mod_mask_t mask)
+{
+	xkb_mod_index_t i, j, n;
+	xkb_mod_mask_t out = 0;
+
+	if (srv->latin_keymap == srv->xkb_keymap)
+		return mask;
+	n = xkb_keymap_num_mods(srv->xkb_keymap);
+	for (i = 0; i < n && i < 32; i++) {
+		if ((mask & (1U << i)) == 0)
+			continue;
+		j = xkb_keymap_mod_get_index(srv->latin_keymap,
+		    xkb_keymap_mod_get_name(srv->xkb_keymap, i));
+		if (j != XKB_MOD_INVALID && j < 32)
+			out |= 1U << j;
+	}
+	return out;
+}
+
 int
 keyboard_init(struct ws_server *srv)
 {
@@ -193,6 +305,7 @@ keyboard_init(struct ws_server *srv)
 		ws_warn("can't export the keymap; WS_CONNECT_XKB clients "
 		    "won't get WS_EVENT_KEYMAP");
 	layouts_note(srv);
+	latin_setup(srv);
 	return 0;
 }
 
@@ -214,6 +327,7 @@ keyboard_check(struct ws_server *srv, const struct ws_config *cfg)
 void
 keyboard_fini(struct ws_server *srv)
 {
+	latin_fini(srv);
 	if (srv->xkb_state != NULL)
 		xkb_state_unref(srv->xkb_state);
 	if (srv->xkb_keymap != NULL)
@@ -577,6 +691,7 @@ keyboard_reload(struct ws_server *srv)
 	srv->layout_active = (uint32_t)-1;	/* announce it below */
 	layouts_note(srv);
 	srv->layout_active = (uint32_t)-1;
+	latin_setup(srv);
 	for (c = srv->clients; c != NULL; c = c->next) {
 		if ((c->flags & WS_CONNECT_XKB) == 0 || c->sock < 0)
 			continue;
@@ -639,6 +754,48 @@ equiv_target(struct ws_server *srv, struct ws_client *c, xkb_keycode_t kc,
 	return a;
 }
 
+/*
+ * Fill k's keysym and text from the Latin layout, with the modifiers
+ * in effect, when Command is held and the active layout isn't Latin.
+ * Returns false (k untouched) otherwise. X servers (WS_CONNECT_XKB)
+ * read keycodes with their own keymap, so they keep the plain event.
+ */
+static bool
+latin_key(struct ws_server *srv, struct ws_client *c, xkb_keycode_t kc,
+    xkb_keysym_t sym, ws_event_key_t *k)
+{
+	const xkb_keysym_t *syms;
+	xkb_layout_index_t layout;
+	xkb_keysym_t lsym;
+
+	if ((srv->modifiers & WS_MOD_COMMAND) == 0 ||
+	    srv->latin_state == NULL || (c->flags & WS_CONNECT_XKB) != 0 ||
+	    is_modifier_keysym(sym))
+		return false;
+	layout = xkb_state_key_get_layout(srv->xkb_state, kc);
+	if (layout == XKB_LAYOUT_INVALID || (layout < 32 &&
+	    (srv->layouts_latin & (1U << layout)) != 0))
+		return false;
+	xkb_state_update_mask(srv->latin_state,
+	    latin_mods(srv, xkb_state_serialize_mods(srv->xkb_state,
+	    XKB_STATE_MODS_DEPRESSED)),
+	    latin_mods(srv, xkb_state_serialize_mods(srv->xkb_state,
+	    XKB_STATE_MODS_LATCHED)),
+	    latin_mods(srv, xkb_state_serialize_mods(srv->xkb_state,
+	    XKB_STATE_MODS_LOCKED)), 0, 0, srv->latin_layout);
+	lsym = xkb_state_key_get_one_sym(srv->latin_state, kc);
+	if (lsym == XKB_KEY_NoSymbol)
+		return false;
+	k->keysym = lsym;
+	xkb_state_key_get_utf8(srv->latin_state, kc, k->text, sizeof(k->text));
+	k->text_unmodified[0] = '\0';
+	if (xkb_keymap_key_get_syms_by_level(srv->latin_keymap, kc,
+	    srv->latin_layout, 0, &syms) > 0)
+		xkb_keysym_to_utf8(syms[0], k->text_unmodified,
+		    sizeof(k->text_unmodified));
+	return true;
+}
+
 static void
 deliver_key(struct ws_server *srv, uint32_t code, bool pressed, bool repeat,
     xkb_keysym_t sym)
@@ -664,6 +821,10 @@ deliver_key(struct ws_server *srv, uint32_t code, bool pressed, bool repeat,
 	ev.u.key.keysym = sym;
 	ev.u.key.modifiers = srv->modifiers;
 	ev.u.key.flags = repeat ? WS_KEY_REPEAT : 0;
+	if (latin_key(srv, c, kc, sym, &ev.u.key)) {
+		client_send(srv, c, &ev, -1);
+		return;
+	}
 	xkb_state_key_get_utf8(srv->xkb_state, kc, ev.u.key.text,
 	    sizeof(ev.u.key.text));
 	layout = xkb_state_key_get_layout(srv->xkb_state, kc);

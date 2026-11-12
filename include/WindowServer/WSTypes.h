@@ -171,6 +171,13 @@ extern "C" {
 					   keyboard layouts and input
 					   devices ("Settings" in
 					   WSProtocol.h) */
+#define WS_SERVER_LATIN_SHORTCUTS 0x8000 /* while a layout that isn't
+					   Latin (gr, ru) is active, keys
+					   pressed with Command held carry
+					   the keysym and text of the first
+					   Latin layout in the list, or us
+					   ("Command shortcuts" in
+					   WSProtocol.h) */
 
 /* Where a minimized window goes ("Minimizing" in WSProtocol.h). */
 #define WS_MINIMIZE_DEFAULT	0	/* the server's MinimizeIntoDock */
