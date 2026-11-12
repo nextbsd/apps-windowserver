@@ -114,13 +114,22 @@ struct ws_client {
 	pid_t		pid;
 	uid_t		uid;
 	uint32_t	flags;		/* WS_CONNECT_* */
+	/*
+	 * The app this connection belongs to: itself, or the connection
+	 * whose app it joined (WS_CONNECT_JOIN). srv->active and the key
+	 * window are kept on that one.
+	 */
+	struct ws_client *app;
 	char		app_name[WS_MAX_APP_NAME];
 	int		sock;		/* -1 until WS_SOCK_AUTH */
 	uint64_t	hello_usec;
 	bool		dead;
 	bool		doomed;		/* destroy at the end of this loop pass */
 	struct ws_buffer *buffers;
-	struct ws_window *key_window;	/* app's key window (kept while inactive) */
+	struct ws_window *key_window;	/* app's key window (kept while
+					   inactive); set on c->app only, and
+					   may belong to another connection
+					   of the app */
 	/* cursor this app wants while the pointer is over its windows */
 	uint32_t	cursor_kind;
 	struct ws_buffer *cursor_buffer;
@@ -234,7 +243,7 @@ struct ws_server {
 	uint32_t	next_client_id;
 	uint32_t	next_window_id;
 	uint32_t	event_serial;
-	struct ws_client *active;
+	struct ws_client *active;	/* an app (client->app), or NULL */
 
 	/* pointer */
 	double		ptr_x;
@@ -340,6 +349,7 @@ struct ws_window *window_at(struct ws_server *srv, double x, double y);
 void	app_activate(struct ws_server *srv, struct ws_client *c,
 	    struct ws_window *key);
 void	app_deactivate(struct ws_server *srv, struct ws_client *c);
+void	app_member_gone(struct ws_server *srv, struct ws_client *c);
 void	damage_rect(struct ws_server *srv, const ws_rect_t *r);
 void	damage_all(struct ws_server *srv);
 void	list_windows(struct ws_server *srv, struct ws_client *to);

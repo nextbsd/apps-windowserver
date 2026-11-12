@@ -135,7 +135,7 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 			srv->grab = w;
 			srv->grab_suppressed = false;
 			if (w != NULL) {
-				c = w->owner;
+				c = w->owner->app;
 				if (c != srv->active &&
 				    (w->flags & WS_WINDOW_NO_ACTIVATE) == 0 &&
 				    (c->flags & WS_CONNECT_CONTROL) == 0) {

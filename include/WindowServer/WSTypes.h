@@ -107,10 +107,13 @@ extern "C" {
 
 /* Connection flags (ws_connect). */
 #define WS_CONNECT_CONTROL	0x0001	/* tool connection (wsctl): not an app */
+#define WS_CONNECT_JOIN		0x0002	/* join another connection's app
+					   (ws_connect_join, WSProtocol.h) */
 
 /* Server flags in WS_EVENT_WELCOME. */
 #define WS_SERVER_HEADLESS	0x0001
 #define WS_SERVER_HW_CURSOR	0x0002
+#define WS_SERVER_JOIN		0x0004	/* accepts WS_CONNECT_JOIN */
 
 /* Synthetic input kinds (wsctl, headless testing). */
 #define WS_INJECT_MOTION	1	/* absolute: x, y */

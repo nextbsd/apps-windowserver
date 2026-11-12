@@ -3,12 +3,15 @@
  * SPDX-License-Identifier: BSD-2-Clause
  *
  * wstest: a WindowServer test client. It connects as two apps,
- * "Alpha" and "Beta", creates three windows and prints every event it
+ * "Alpha" and "Beta", plus a third connection, "Gamma", that joins
+ * Alpha's app with Alpha's client id and token (as an X server joins
+ * XLibre.app's). It creates four windows and prints every event it
  * receives, one per line:
  *
  *   Alpha  W1  normal level      (100,100) 500x400  red
  *   Alpha  W2  main-menu level   ( 50, 50) 300x300  green  (never key)
  *   Beta   W3  normal level      (300,250) 500x400  blue
+ *   Gamma  W4  normal level      (900,100) 300x200  yellow
  *
  * Alpha activates first, then Beta, so Beta ends up active with W3 as
  * its key window. tests/headless-test.sh drives it with wsctl.
@@ -37,8 +40,13 @@ struct win {
 	ws_buffer_t	*buf;
 };
 
-static struct app apps[2] = { { "Alpha", NULL }, { "Beta", NULL } };
-static struct win wins[3];
+#define NAPPS	3
+#define NWINS	4
+
+static struct app apps[NAPPS] = {
+	{ "Alpha", NULL }, { "Beta", NULL }, { "Gamma", NULL },
+};
+static struct win wins[NWINS];
 static volatile sig_atomic_t quit;
 
 static const char *
@@ -48,7 +56,7 @@ win_name(uint32_t id)
 
 	if (id == 0)
 		return "-";
-	for (i = 0; i < 3; i++)
+	for (i = 0; i < NWINS; i++)
 		if (wins[i].id == id)
 			return wins[i].name;
 	return "?";
@@ -166,7 +174,8 @@ on_signal(int sig)
 int
 main(int argc, char **argv)
 {
-	struct pollfd pfd[2];
+	struct pollfd pfd[NAPPS];
+	ws_connection_t *bad;
 	int ch, i, timeout = 0, n;
 	time_t end;
 
@@ -197,6 +206,25 @@ main(int argc, char **argv)
 		    ws_main_screen(apps[i].conn)->height);
 	}
 
+	/* Joining needs the right token. */
+	bad = ws_connect_join("Mallory", 0, ws_client_id(apps[0].conn),
+	    ws_client_token(apps[0].conn) ^ 1);
+	if (bad != NULL) {
+		printf("join with a wrong token accepted\n");
+		ws_disconnect(bad);
+	} else
+		printf("join refused app=Mallory %s\n",
+		    errno == EPERM ? "EPERM" : strerror(errno));
+	apps[2].conn = ws_connect_join(apps[2].name, 0,
+	    ws_client_id(apps[0].conn), ws_client_token(apps[0].conn));
+	if (apps[2].conn == NULL) {
+		fprintf(stderr, "wstest: join %s: %s\n", apps[2].name,
+		    strerror(errno));
+		return 1;
+	}
+	printf("connected app=%s client=%u app=%u\n", apps[2].name,
+	    ws_client_id(apps[2].conn), ws_app_id(apps[2].conn));
+
 	if (make_window(&wins[0], &apps[0], "W1", 100, 100, 500, 400,
 	    WS_LEVEL_NORMAL, 0, 0xffc03030) < 0 ||
 	    make_window(&wins[1], &apps[0], "W2", 50, 50, 300, 300,
@@ -205,6 +233,10 @@ main(int argc, char **argv)
 	ws_activate(apps[0].conn);
 	ws_window_make_key(apps[0].conn, wins[0].id);
 	ws_sync(apps[0].conn);
+	if (make_window(&wins[3], &apps[2], "W4", 900, 100, 300, 200,
+	    WS_LEVEL_NORMAL, 0, 0xffc0c030) < 0)
+		return 1;
+	ws_sync(apps[2].conn);
 
 	if (make_window(&wins[2], &apps[1], "W3", 300, 250, 500, 400,
 	    WS_LEVEL_NORMAL, 0, 0xff3050c0) < 0)
@@ -227,21 +259,21 @@ main(int argc, char **argv)
 		ws_window_damage(apps[1].conn, wins[2].id, &r, 1);
 		ws_window_commit(apps[1].conn, wins[2].id, WS_COMMIT_FRAME_DONE);
 	}
-	ws_sync(apps[1].conn);
-	ws_sync(apps[0].conn);
+	for (i = 0; i < NAPPS; i++)
+		ws_sync(apps[i].conn);
 	printf("ready\n");
 
 	end = timeout > 0 ? time(NULL) + timeout : 0;
 	while (!quit && (end == 0 || time(NULL) < end)) {
-		for (i = 0; i < 2; i++) {
+		for (i = 0; i < NAPPS; i++) {
 			pfd[i].fd = ws_connection_fd(apps[i].conn);
 			pfd[i].events = POLLIN;
 			pfd[i].revents = 0;
 		}
-		n = poll(pfd, 2, 200);
+		n = poll(pfd, NAPPS, 200);
 		if (n < 0 && errno != EINTR)
 			break;
-		for (i = 0; i < 2; i++) {
+		for (i = 0; i < NAPPS; i++) {
 			if (ws_pending(apps[i].conn) ||
 			    (pfd[i].revents & (POLLIN | POLLHUP))) {
 				if (ws_dispatch(apps[i].conn, print_event,
@@ -252,8 +284,8 @@ main(int argc, char **argv)
 			}
 		}
 	}
-	for (i = 0; i < 2; i++)
-		ws_disconnect(apps[i].conn);
+	for (i = NAPPS; i > 0; i--)
+		ws_disconnect(apps[i - 1].conn);
 	printf("done\n");
 	return 0;
 }

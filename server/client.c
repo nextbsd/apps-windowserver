@@ -264,7 +264,7 @@ conn_readable(struct ws_server *srv, struct ws_conn *conn)
 	ev.u.welcome.client_id = c->id;
 	ev.u.welcome.protocol_version = WS_PROTOCOL_VERSION;
 	ev.u.welcome.server_flags = (srv->headless ? WS_SERVER_HEADLESS : 0) |
-	    (srv->cursor_hw ? WS_SERVER_HW_CURSOR : 0);
+	    (srv->cursor_hw ? WS_SERVER_HW_CURSOR : 0) | WS_SERVER_JOIN;
 	ev.u.welcome.screen_count = 1;
 	screen_info(srv, &ev.u.welcome.screen);
 	client_send(srv, c, &ev, -1);
@@ -670,6 +670,7 @@ client_destroy(struct ws_server *srv, struct ws_client *c)
 		if (w->owner == c)
 			window_destroy(srv, w);
 	}
+	app_member_gone(srv, c);
 	c->key_window = NULL;
 	if (srv->active == c)
 		app_deactivate(srv, c);

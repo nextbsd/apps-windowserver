@@ -57,12 +57,30 @@ static void
 handle_hello(struct ws_server *srv, struct ws_mach_item *item)
 {
 	ws_req_hello_t *m = (ws_req_hello_t *)(void *)item->msg.buf;
-	struct ws_client *c;
+	struct ws_client *c, *app = NULL, *target;
 	ws_reply_t r;
 
-	if (item->size < sizeof(*m)) {
+	if (item->size < WS_HELLO_MIN_SIZE) {
 		reply_status(item, m->hdr.seq, EINVAL);
 		return;
+	}
+	if (m->flags & WS_CONNECT_JOIN) {
+		/* The optional tail must be there, and a tool can't join. */
+		if (item->size < sizeof(*m) || (m->flags & WS_CONNECT_CONTROL)) {
+			reply_status(item, m->hdr.seq, EINVAL);
+			return;
+		}
+		target = client_lookup(srv, m->join_client);
+		if (target == NULL || target->doomed ||
+		    (target->flags & WS_CONNECT_CONTROL) ||
+		    timingsafe_bcmp(&target->token, &m->join_token,
+		    sizeof(target->token)) != 0) {
+			ws_warn("pid %d: join of client %u refused",
+			    (int)item->sender_pid, m->join_client);
+			reply_status(item, m->hdr.seq, EPERM);
+			return;
+		}
+		app = target->app;
 	}
 	c = calloc(1, sizeof(*c));
 	if (c == NULL) {
@@ -75,6 +93,7 @@ handle_hello(struct ws_server *srv, struct ws_mach_item *item)
 	c->pid = item->sender_pid;
 	c->uid = item->sender_euid;
 	c->flags = m->flags & WS_CONNECT_CONTROL;
+	c->app = app != NULL ? app : c;
 	c->sock = -1;
 	c->hello_usec = ws_now_usec();
 	c->outq_tail = &c->outq;
@@ -89,13 +108,20 @@ handle_hello(struct ws_server *srv, struct ws_mach_item *item)
 	r.seq = m->hdr.seq;
 	r.status = 0;
 	r.u.hello.client_id = c->id;
-	r.u.hello.server_flags = srv->headless ? WS_SERVER_HEADLESS : 0;
+	r.u.hello.server_flags = (srv->headless ? WS_SERVER_HEADLESS : 0) |
+	    WS_SERVER_JOIN;
 	r.u.hello.token = c->token;
 	strlcpy(r.u.hello.socket_path, srv->socket_path,
 	    sizeof(r.u.hello.socket_path));
+	r.u.hello.app_id = c->app->id;
 	reply_send(item, &r, sizeof(r));
-	ws_debug("hello from %s (pid %d) -> client %u", c->app_name,
-	    (int)c->pid, c->id);
+	if (c->app != c)
+		ws_info("hello from %s (pid %d) -> client %u, joining "
+		    "app %u (%s)", c->app_name, (int)c->pid, c->id,
+		    c->app->id, c->app->app_name);
+	else
+		ws_debug("hello from %s (pid %d) -> client %u", c->app_name,
+		    (int)c->pid, c->id);
 }
 
 static bool
@@ -420,10 +446,10 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		break;
 	case WS_MSG_ACTIVATE:
 		/* TODO: focus-stealing policy (only on user action). */
-		app_activate(srv, c, NULL);
+		app_activate(srv, c->app, NULL);
 		break;
 	case WS_MSG_DEACTIVATE:
-		app_deactivate(srv, c);
+		app_deactivate(srv, c->app);
 		break;
 	case WS_MSG_SNAPSHOT:
 		handle_snapshot(srv, c, item, h->seq);

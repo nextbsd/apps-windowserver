@@ -97,7 +97,7 @@ Headless mode needs no GPU, VT or input devices and no privileges, so it runs an
 
 ```sh
 build/WindowServer --headless 1280x800 &
-build/wstest &                 # two apps, Alpha and Beta, three windows
+build/wstest &                 # apps Alpha and Beta (+ Gamma, joined to Alpha), four windows
 build/wsctl list               # the window stack, bottom to top
 build/wsctl pixel 350 300      # the colour on screen at 350,300
 build/wsctl click 150 450      # click into Alpha's window
@@ -131,6 +131,15 @@ Apps use `libWindowServerClient` (`<WindowServer/WSClient.h>`). The wire format 
 - **A Unix socket** carries what Mach can't yet. NextBSD's Mach can't pass file descriptors or shared memory, so window buffers are memfds sent over the socket, and the server sends its events there too: input, key window and app activation changes, buffer release, frame done and screen info. Apps get one file descriptor to poll. The hello reply over Mach tells the app where the socket is and gives it a one-time token to connect with.
 
 Window buffers are premultiplied ARGB8888, drawn by the app (with cairo, in the GNUstep backend). After a buffer is sent once, each frame only sends damage rectangles and a commit.
+
+### One app, several connections
+
+Each connection is normally an app of its own. A helper process can join another connection's app instead, so that, for example, the X server XLibre.app starts and XLibre.app itself are one app:
+
+- The app passes its client id and token (`ws_client_id()`, `ws_client_token()`; in GNUstep, `-[NextBSDServer windowServerAppCredentials]`) to the helper, which connects with `ws_connect_join()`. On the wire this is `WS_CONNECT_JOIN` in `ws_req_hello_t.flags` plus `join_client` and `join_token`, an optional tail older clients don't send. The hello reply's `app_id` names the app the connection belongs to.
+- Only a process given the token can join; a wrong id or token fails the hello with `EPERM`. Servers that can do this set `WS_SERVER_JOIN`; older ones leave `app_id` 0, and `ws_connect_join()` fails with `ENOTSUP`.
+- All connections of an app are activated and deactivated together (`WS_EVENT_APP_ACTIVATED`/`DEACTIVATED` go to each). They share one key window, which can be any connection's window; clicking a joined connection's window only moves the key window. Key events, Command shortcuts included, go to the connection that owns the key window.
+- If the app's first connection goes away, the oldest remaining connection carries the app on.
 
 ## License
 

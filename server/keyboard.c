@@ -100,11 +100,31 @@ repeat_stop(struct ws_server *srv)
 	}
 }
 
+/*
+ * Where key events go: the owner of the active app's key window (which
+ * may be a connection that joined the app), else the app itself.
+ */
+static struct ws_client *
+key_target(struct ws_server *srv, struct ws_window **wp)
+{
+	struct ws_client *a = srv->active;
+	struct ws_window *w;
+
+	*wp = NULL;
+	if (a == NULL)
+		return NULL;
+	w = a->key_window;
+	if (w != NULL && !w->visible)
+		w = NULL;
+	*wp = w;
+	return w != NULL ? w->owner : a;
+}
+
 static void
 deliver_key(struct ws_server *srv, uint32_t code, bool pressed, bool repeat,
     xkb_keysym_t sym)
 {
-	struct ws_client *c = srv->active;
+	struct ws_client *c;
 	struct ws_window *w;
 	const xkb_keysym_t *syms;
 	xkb_keycode_t kc = code + XKB_OFFSET;
@@ -112,11 +132,9 @@ deliver_key(struct ws_server *srv, uint32_t code, bool pressed, bool repeat,
 	ws_event_t ev;
 	int n;
 
+	c = key_target(srv, &w);
 	if (c == NULL)
 		return;
-	w = c->key_window;
-	if (w != NULL && !w->visible)
-		w = NULL;
 	event_init(srv, &ev, pressed ? WS_EVENT_KEY_DOWN : WS_EVENT_KEY_UP,
 	    sizeof(ev.u.key), w != NULL ? w->id : 0);
 	ev.u.key.keycode = kc;
@@ -140,12 +158,13 @@ static void
 send_flags(struct ws_server *srv)
 {
 	ws_event_t ev;
-	struct ws_client *c = srv->active;
+	struct ws_window *w;
+	struct ws_client *c = key_target(srv, &w);
 
 	if (c == NULL)
 		return;
 	event_init(srv, &ev, WS_EVENT_FLAGS_CHANGED, sizeof(ev.u.flags),
-	    c->key_window != NULL ? c->key_window->id : 0);
+	    w != NULL ? w->id : 0);
 	ev.u.flags.modifiers = srv->modifiers;
 	client_send(srv, c, &ev, -1);
 }
