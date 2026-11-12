@@ -387,6 +387,14 @@ key_target(struct ws_server *srv, struct ws_window **wp)
 	struct ws_window *w;
 
 	*wp = NULL;
+	/* While the user works in the Dock, a Dock popup that took the key
+	   window (a text field) gets the keys; the rest go on to the
+	   active app. */
+	if (srv->dock_front != NULL && !srv->dock_front->dead &&
+	    (w = srv->dock_front->key_window) != NULL && w->visible) {
+		*wp = w;
+		return w->owner;
+	}
 	if (a == NULL)
 		return NULL;
 	w = a->key_window;

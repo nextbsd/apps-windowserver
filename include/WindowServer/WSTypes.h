@@ -225,6 +225,10 @@ extern "C" {
 					   WS_ACTIVATE_RAISE brings the app's
 					   windows forward ("Activation" in
 					   WSProtocol.h) */
+#define WS_SERVER_DOCK_NOT_ACTIVE 0x01000000 /* the Dock's app never becomes
+					   the active app; the one before
+					   stays active, menus included
+					   ("Activation" in WSProtocol.h) */
 
 /* WS_MSG_ACTIVATE flags (ws_activate_flags). */
 #define WS_ACTIVATE_RAISE	0x0001	/* also bring the app's windows,
