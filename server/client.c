@@ -52,6 +52,24 @@ make_socket_dir(struct ws_server *srv, const char *dir)
 	return 0;
 }
 
+/* Something is accepting connections on path: another server's socket. */
+static bool
+socket_in_use(const char *path)
+{
+	struct sockaddr_un sun;
+	int fd, in_use;
+
+	fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (fd < 0)
+		return false;
+	memset(&sun, 0, sizeof(sun));
+	sun.sun_family = AF_UNIX;
+	strlcpy(sun.sun_path, path, sizeof(sun.sun_path));
+	in_use = connect(fd, (struct sockaddr *)&sun, sizeof(sun)) == 0;
+	close(fd);
+	return in_use;
+}
+
 int
 socket_listen(struct ws_server *srv)
 {
@@ -71,12 +89,27 @@ socket_listen(struct ws_server *srv)
 			    (int)geteuid());
 		if (make_socket_dir(srv, dir) < 0)
 			return -1;
-		snprintf(srv->socket_path, sizeof(srv->socket_path),
-		    "%s/ws.sock", dir);
+		/*
+		 * A server under another service name (a headless test server
+		 * beside the real one) gets its own socket, so neither replaces
+		 * or removes the other's. Clients are told the path over Mach.
+		 */
+		if (strcmp(srv->cfg.service_name, WS_SERVICE_NAME) == 0)
+			snprintf(srv->socket_path, sizeof(srv->socket_path),
+			    "%s/ws.sock", dir);
+		else
+			snprintf(srv->socket_path, sizeof(srv->socket_path),
+			    "%s/%s.sock", dir, srv->cfg.service_name);
 	}
 	if (lstat(srv->socket_path, &st) == 0) {
 		if (!S_ISSOCK(st.st_mode)) {
 			ws_err("%s exists and isn't a socket", srv->socket_path);
+			return -1;
+		}
+		/* Only a stale socket is replaced, never a live server's. */
+		if (socket_in_use(srv->socket_path)) {
+			ws_err("another WindowServer is listening on %s",
+			    srv->socket_path);
 			return -1;
 		}
 		unlink(srv->socket_path);
