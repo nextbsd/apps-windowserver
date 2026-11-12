@@ -265,7 +265,8 @@ if grep -q 'type=error' "$LOG/wstest.log"; then
 fi
 
 # Joined app (P1..P2): the key window moved within the app, no
-# activation change, and keys (Command too) went to W4's connection.
+# activation change, keys went to W4's connection, and Command shortcuts
+# (press and release) to the app's own connection, for its menus.
 in_part "$P1" "$P2" 'app=Alpha type=key-window-lost win=W1' &&
     in_part "$P1" "$P2" 'app=Gamma type=key-window-gained win=W4' &&
     pass "click in the joined connection's window moved the key window" ||
@@ -275,10 +276,14 @@ in_part "$P1" "$P2" 'type=app-(de)?activated' &&
     pass "click in W4 didn't make Gamma a separate app"
 in_part "$P1" "$P2" 'app=Gamma type=key-down win=W4 keycode=38 ' &&
     pass "key a went to W4's connection (Gamma)" || fail "key a not delivered to W4"
-in_part "$P1" "$P2" 'app=Gamma type=key-down win=W4 keycode=24 .*mods=0x8' &&
-    pass "Command+q went to the key window's connection" || fail "Command+q not delivered to W4"
-in_part "$P1" "$P2" 'app=Alpha type=key-(down|up)' &&
-    fail "Alpha got keys while W4 was key" || pass "Alpha got no keys while W4 was key"
+in_part "$P1" "$P2" 'app=Alpha type=key-down win=- keycode=24 .*mods=0x8' &&
+    in_part "$P1" "$P2" 'app=Alpha type=key-up win=- keycode=24 ' &&
+    pass "Command+q went to the app's own connection (Alpha)" ||
+    fail "Command+q not delivered to Alpha"
+in_part "$P1" "$P2" 'app=Gamma type=key-(down|up) win=W4 keycode=24 ' &&
+    fail "Gamma got Command+q" || pass "Gamma didn't get Command+q"
+in_part "$P1" "$P2" 'app=Alpha type=key-(down|up) win=- keycode=38 ' &&
+    fail "Alpha got key a while W4 was key" || pass "Alpha got only the Command shortcut"
 # P2..P3: Beta's click deactivated both connections of the app.
 in_part "$P2" "$P3" 'app=Alpha type=app-deactivated' &&
     in_part "$P2" "$P3" 'app=Gamma type=app-deactivated' &&

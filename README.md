@@ -139,7 +139,7 @@ Each connection is normally an app of its own. A helper process can join another
 
 - The app passes its client id and token (`ws_client_id()`, `ws_client_token()`; in GNUstep, `-[NextBSDServer windowServerAppCredentials]`) to the helper, which connects with `ws_connect_join()`. On the wire this is `WS_CONNECT_JOIN` in `ws_req_hello_t.flags` plus `join_client` and `join_token`, an optional tail older clients don't send. The hello reply's `app_id` names the app the connection belongs to.
 - Only a process given the token can join; a wrong id or token fails the hello with `EPERM`. Servers that can do this set `WS_SERVER_JOIN`; older ones leave `app_id` 0, and `ws_connect_join()` fails with `ENOTSUP`.
-- All connections of an app are activated and deactivated together (`WS_EVENT_APP_ACTIVATED`/`DEACTIVATED` go to each). They share one key window, which can be any connection's window; clicking a joined connection's window only moves the key window. Key events, Command shortcuts included, go to the connection that owns the key window.
+- All connections of an app are activated and deactivated together (`WS_EVENT_APP_ACTIVATED`/`DEACTIVATED` go to each). They share one key window, which can be any connection's window; clicking a joined connection's window only moves the key window. Key events go to the connection that owns the key window, except Command shortcuts: when that is a joined connection, a key pressed with Command held goes to the app's own connection (with window 0), so its menus get it, and so do that key's repeats and release.
 - If the app's first connection goes away, the oldest remaining connection carries the app on.
 
 ### XKB state for X servers
