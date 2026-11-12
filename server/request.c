@@ -299,7 +299,7 @@ min_size(mach_msg_id_t id)
 {
 	switch (id) {
 	case WS_MSG_WINDOW_CREATE:
-		return sizeof(ws_req_window_create_t);
+		return WS_WINDOW_CREATE_MIN_SIZE;
 	case WS_MSG_WINDOW_SET_FRAME:
 		return sizeof(ws_req_frame_t);
 	case WS_MSG_WINDOW_SET_LEVEL:
@@ -316,7 +316,16 @@ min_size(mach_msg_id_t id)
 	case WS_MSG_DOCK_SHOW_MINIMIZED:
 	case WS_MSG_OVERVIEW:
 	case WS_MSG_SET_KEYBOARD_LAYOUT:
+	case WS_MSG_POINTER_GRAB:
+	case WS_MSG_POINTER_TRACK:
+	case WS_MSG_RESERVE_WINDOW_IDS:
 		return sizeof(ws_req_int_t);
+	case WS_MSG_WARP_POINTER:
+		return sizeof(ws_req_point_t);
+	case WS_MSG_WINDOW_SET_CURSOR:
+		return sizeof(ws_req_cursor_t);
+	case WS_MSG_WINDOW_SET_INPUT_REGION:
+		return offsetof(ws_req_region_t, rects);
 	case WS_MSG_SET_SETTINGS:
 		return offsetof(ws_req_settings_t, data);
 	case WS_MSG_WINDOW_ORDER:
@@ -352,6 +361,8 @@ needs_window(mach_msg_id_t id)
 	case WS_MSG_WINDOW_COMMIT:
 	case WS_MSG_WINDOW_MAKE_KEY:
 	case WS_MSG_WINDOW_MINIMIZE:
+	case WS_MSG_WINDOW_SET_CURSOR:
+	case WS_MSG_WINDOW_SET_INPUT_REGION:
 		return true;
 	default:
 		return false;
@@ -435,19 +446,36 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		break;
 	case WS_MSG_WINDOW_CREATE: {
 		ws_req_window_create_t *m = (void *)h;
+		uint32_t wid = item->size >= sizeof(*m) ? m->window_id : 0;
 		ws_reply_t r;
+		int err = 0;
 
-		if (c->flags & WS_CONNECT_TOOL) {
-			reply_status(item, h->seq, EPERM);
+		/* One-way creates name their id (WS_SERVER_WINDOW_IDS) and
+		 * hear about failures as WS_EVENT_ERROR. */
+		if (c->flags & WS_CONNECT_TOOL)
+			err = EPERM;
+		else if (wid != 0)
+			err = window_create_check_id(srv, c, wid);
+		else if (!want_reply)
+			err = EINVAL;
+		if (err == 0) {
+			m->title[sizeof(m->title) - 1] = '\0';
+			w = window_create(srv, c, &m->frame, m->level, m->flags,
+			    m->title, wid);
+			if (w == NULL)
+				err = ENOMEM;
+		}
+		if (err != 0) {
+			if (want_reply)
+				reply_status(item, h->seq, err);
+			else
+				client_error(srv, c, (uint32_t)id, wid, err,
+				    err == EINVAL ? "bad window id" :
+				    "window not created");
 			return;
 		}
-		m->title[sizeof(m->title) - 1] = '\0';
-		w = window_create(srv, c, &m->frame, m->level, m->flags,
-		    m->title);
-		if (w == NULL) {
-			reply_status(item, h->seq, ENOMEM);
+		if (!want_reply)
 			return;
-		}
 		memset(&r, 0, sizeof(r));
 		r.seq = h->seq;
 		r.u.create.window = w->id;
@@ -512,9 +540,18 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		window_damage(srv, w, m->rects, n);
 		break;
 	}
-	case WS_MSG_WINDOW_COMMIT:
-		window_commit(srv, w, (uint32_t)value);
+	case WS_MSG_WINDOW_COMMIT: {
+		ws_req_commit_t *m = (void *)h;
+
+		if ((value & WS_COMMIT_SET_FRAME) && item->size < sizeof(*m)) {
+			client_error(srv, c, (uint32_t)id, w->id, EINVAL,
+			    "commit without its frame");
+			value &= ~WS_COMMIT_SET_FRAME;
+		}
+		window_commit(srv, w, (uint32_t)value,
+		    (value & WS_COMMIT_SET_FRAME) ? &m->frame : NULL);
 		break;
+	}
 	case WS_MSG_WINDOW_MAKE_KEY:
 		window_make_key(srv, w);
 		break;
@@ -581,6 +618,114 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		c->cursor_hidden = value == 0;
 		cursor_update(srv);
 		break;
+	case WS_MSG_WINDOW_SET_CURSOR: {
+		ws_req_cursor_t *m = (void *)h;
+		int err;
+
+		b = NULL;
+		if (m->kind == WS_CURSOR_CUSTOM &&
+		    (b = client_buffer(c, m->buffer_id)) == NULL) {
+			client_error(srv, c, (uint32_t)id, w->id, ENOENT,
+			    "no such cursor buffer");
+			break;
+		}
+		err = cursor_window_set(srv, w, m->kind, b, m->hot_x, m->hot_y);
+		if (err != 0)
+			client_error(srv, c, (uint32_t)id, w->id, err,
+			    "bad cursor");
+		break;
+	}
+	case WS_MSG_WINDOW_SET_INPUT_REGION: {
+		ws_req_region_t *m = (void *)h;
+		unsigned n = (m->flags & WS_REGION_RESET) ? 0 : m->count;
+
+		if (n > WS_MAX_REGION_RECTS ||
+		    item->size < offsetof(ws_req_region_t, rects) +
+		    n * sizeof(ws_rect_t)) {
+			client_error(srv, c, (uint32_t)id, w->id, EINVAL,
+			    "bad input region count");
+			break;
+		}
+		window_set_input_region(srv, w, m->rects, n, m->flags);
+		break;
+	}
+	case WS_MSG_POINTER_GRAB: {
+		int err = pointer_grab(srv, c, (uint32_t)value);
+
+		if (want_reply)
+			reply_status(item, h->seq, err);
+		else if (err != 0)
+			client_error(srv, c, (uint32_t)id, 0, err,
+			    err == EINVAL ? "unknown grab mode" :
+			    err == EBUSY ? "another connection holds the grab" :
+			    "only the active app may grab");
+		return;
+	}
+	case WS_MSG_POINTER_UNGRAB:
+		pointer_ungrab(srv, c, false);
+		break;
+	case WS_MSG_WARP_POINTER: {
+		ws_req_point_t *m = (void *)h;
+		int err;
+
+		w = NULL;
+		if (h->window != 0) {
+			w = window_lookup(srv, h->window);
+			if (w == NULL || w->owner != c) {
+				client_error(srv, c, (uint32_t)id, h->window,
+				    ENOENT, "no such window");
+				break;
+			}
+		}
+		err = pointer_warp(srv, c, w, m->x, m->y);
+		if (err != 0)
+			client_error(srv, c, (uint32_t)id, h->window, err,
+			    "warp not allowed");
+		break;
+	}
+	case WS_MSG_QUERY_POINTER: {
+		ws_reply_t r;
+		int err;
+
+		memset(&r, 0, sizeof(r));
+		err = pointer_query(srv, c, &r.u.pointer);
+		if (!want_reply)
+			return;
+		if (err != 0) {
+			reply_status(item, h->seq, err);
+			return;
+		}
+		r.seq = h->seq;
+		reply_send(item, &r, sizeof(r));
+		return;
+	}
+	case WS_MSG_POINTER_TRACK:
+		c->pointer_track = value != 0;
+		break;
+	case WS_MSG_RESERVE_WINDOW_IDS: {
+		ws_reply_t r;
+		uint32_t base = 0;
+		int err;
+
+		err = (c->flags & WS_CONNECT_TOOL) ? EPERM :
+		    window_reserve_ids(srv, c, (uint32_t)value, &base);
+		if (!want_reply) {
+			if (err != 0)
+				client_error(srv, c, (uint32_t)id, 0, err,
+				    "no window ids reserved");
+			return;
+		}
+		if (err != 0) {
+			reply_status(item, h->seq, err);
+			return;
+		}
+		memset(&r, 0, sizeof(r));
+		r.seq = h->seq;
+		r.u.window_ids.base = base;
+		r.u.window_ids.count = (uint32_t)value;
+		reply_send(item, &r, sizeof(r));
+		return;
+	}
 	case WS_MSG_ACTIVATE:
 		/* TODO: focus-stealing policy (only on user action). */
 		app_activate(srv, c->app, NULL);

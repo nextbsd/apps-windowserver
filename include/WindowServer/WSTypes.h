@@ -124,9 +124,30 @@ extern "C" {
 #define WS_CURSOR_RESIZE_UD	7
 #define WS_CURSOR_NOT_ALLOWED	8
 #define WS_CURSOR_CUSTOM	100	/* image from a client buffer */
+/* A window's cursor only (WS_MSG_WINDOW_SET_CURSOR, servers with
+   WS_SERVER_WINDOW_CURSOR): the window shows its connection's cursor
+   again. */
+#define WS_CURSOR_INHERIT	101
 
 /* Commit flags. */
 #define WS_COMMIT_FRAME_DONE	0x0001	/* send WS_EVENT_FRAME_DONE */
+#define WS_COMMIT_SET_FRAME	0x0002	/* the commit carries the window's
+					   new frame (ws_req_commit_t,
+					   servers with WS_SERVER_COMMIT_FRAME) */
+
+/* Pointer grabs (WS_MSG_POINTER_GRAB, servers with WS_SERVER_POINTER_GRAB;
+   see "Pointer grabs" in WSProtocol.h). */
+#define WS_GRAB_POINTER		1	/* every pointer event comes to the
+					   grabbing connection */
+#define WS_GRAB_OUTSIDE		2	/* events go where they would; a press
+					   outside the connection's windows
+					   sends WS_EVENT_POINTER_OUTSIDE and
+					   ends the grab (popup menus) */
+
+/* Input regions (WS_MSG_WINDOW_SET_INPUT_REGION). */
+#define WS_REGION_APPEND	0x0001	/* add to the region sent so far */
+#define WS_REGION_RESET		0x0002	/* the whole window again (rects
+					   are ignored) */
 
 /* Connection flags (ws_connect). */
 #define WS_CONNECT_CONTROL	0x0001	/* tool connection (wsctl): not an app */
@@ -178,6 +199,24 @@ extern "C" {
 					   Latin layout in the list, or us
 					   ("Command shortcuts" in
 					   WSProtocol.h) */
+#define WS_SERVER_POINTER_GRAB	0x00010000 /* WS_MSG_POINTER_GRAB and
+					   _UNGRAB, WS_EVENT_POINTER_OUTSIDE
+					   and _UNGRABBED ("Pointer grabs" in
+					   WSProtocol.h) */
+#define WS_SERVER_POINTER_WARP	0x00020000 /* WS_MSG_WARP_POINTER,
+					   WS_MSG_QUERY_POINTER and
+					   WS_MSG_POINTER_TRACK ("Pointer
+					   warp and query") */
+#define WS_SERVER_WINDOW_CURSOR	0x00040000 /* WS_MSG_WINDOW_SET_CURSOR: a
+					   cursor per window */
+#define WS_SERVER_INPUT_REGION	0x00080000 /* WS_MSG_WINDOW_SET_INPUT_REGION
+					   (shaped windows) */
+#define WS_SERVER_COMMIT_FRAME	0x00100000 /* WS_COMMIT_SET_FRAME: a frame
+					   carried in the commit */
+#define WS_SERVER_WINDOW_IDS	0x00200000 /* WS_MSG_RESERVE_WINDOW_IDS and
+					   a one-way WS_MSG_WINDOW_CREATE
+					   naming its own id ("Window ids
+					   chosen by the client") */
 
 /* Where a minimized window goes ("Minimizing" in WSProtocol.h). */
 #define WS_MINIMIZE_DEFAULT	0	/* the server's MinimizeIntoDock */
@@ -283,6 +322,11 @@ enum {
 					   WS_MSG_LIST_KEYBOARD_LAYOUTS */
 	WS_EVENT_INPUT_DEVICE,		/* ws_event_input_device_t, answers
 					   WS_MSG_LIST_INPUT_DEVICES */
+	/* WS_SERVER_POINTER_GRAB ("Pointer grabs" in WSProtocol.h) */
+	WS_EVENT_POINTER_OUTSIDE,	/* ws_event_pointer_t (screen position
+					   and button); hdr.window 0 */
+	WS_EVENT_POINTER_UNGRABBED,	/* no payload: the server ended this
+					   connection's grab */
 	WS_EVENT_MAX
 };
 
@@ -343,8 +387,17 @@ typedef struct ws_event_buffer {
 	uint32_t	reserved;
 } ws_event_buffer_t;
 
+/*
+ * Pointer events. hdr.window is the window the pointer is over (or the
+ * one a held button was pressed in), and x, y are local to it. With a
+ * pointer grab or pointer tracking ("Pointer grabs" and "Pointer warp
+ * and query" in WSProtocol.h) a connection also gets pointer events
+ * while the pointer is over none of its windows: hdr.window is then 0
+ * and x, y are the screen position, like screen_x, screen_y.
+ */
 typedef struct ws_event_pointer {
-	double		x;		/* window-local */
+	double		x;		/* window-local (screen if hdr.window
+					   is 0) */
 	double		y;
 	double		screen_x;
 	double		screen_y;
@@ -353,6 +406,20 @@ typedef struct ws_event_pointer {
 	uint32_t	buttons;	/* mask of buttons held */
 	uint32_t	modifiers;
 } ws_event_pointer_t;
+
+/*
+ * Where the pointer is (WS_MSG_QUERY_POINTER, servers with
+ * WS_SERVER_POINTER_WARP), in the reply's u.pointer.
+ */
+typedef struct ws_pointer_info {
+	double		x;		/* screen position */
+	double		y;
+	uint32_t	buttons;	/* mask of buttons held */
+	uint32_t	modifiers;	/* WS_MOD_* */
+	uint32_t	window;		/* the asking connection's window under
+					   the pointer, 0 = none of its own */
+	uint32_t	reserved;
+} ws_pointer_info_t;
 
 typedef struct ws_event_scroll {
 	double		x;		/* window-local pointer position */

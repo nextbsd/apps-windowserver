@@ -38,7 +38,10 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_SCROLL_PHASES | WS_SERVER_OVERVIEW | \
 				 WS_SERVER_DOCK_EDGE | WS_SERVER_MINIMIZE_WHERE | \
 				 WS_SERVER_USABLE_AREA | WS_SERVER_SCREEN_CHANGES | \
-				 WS_SERVER_SETTINGS | WS_SERVER_LATIN_SHORTCUTS)
+				 WS_SERVER_SETTINGS | WS_SERVER_LATIN_SHORTCUTS | \
+				 WS_SERVER_POINTER_GRAB | WS_SERVER_POINTER_WARP | \
+				 WS_SERVER_WINDOW_CURSOR | WS_SERVER_INPUT_REGION | \
+				 WS_SERVER_COMMIT_FRAME | WS_SERVER_WINDOW_IDS)
 
 /* Connections that aren't apps: wsctl and the Dock's window list. */
 #define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK)
@@ -146,6 +149,15 @@ struct ws_window {
 	struct ws_buffer *pending;	/* attached, not yet committed */
 	bool		pending_attach;
 	pixman_region32_t pending_damage; /* window-local */
+	/* WS_MSG_WINDOW_SET_CURSOR: wins over the owner's cursor */
+	bool		cursor_set;
+	uint32_t	cursor_kind;
+	struct ws_buffer *cursor_buffer;	/* ref'd, WS_CURSOR_CUSTOM */
+	int32_t		cursor_hot_x;
+	int32_t		cursor_hot_y;
+	/* WS_MSG_WINDOW_SET_INPUT_REGION: where it takes pointer events */
+	bool		has_input_region;	/* else the whole frame */
+	pixman_region32_t input_region;		/* window-local */
 	bool		frame_requested;	/* commit asked for FRAME_DONE */
 	bool		frame_inflight;		/* composited, waiting for present */
 	/* minimizing (tile.c) */
@@ -211,6 +223,10 @@ struct ws_client {
 	int32_t		cursor_hot_x;
 	int32_t		cursor_hot_y;
 	bool		cursor_hidden;
+	bool		pointer_track;	/* WS_MSG_POINTER_TRACK */
+	/* WS_MSG_RESERVE_WINDOW_IDS: ids it may name, from wid_next on */
+	uint32_t	wid_next;
+	uint32_t	wid_end;	/* first id past the block */
 	/* stream input not yet a whole message, and received fds */
 	uint8_t		rbuf[512];
 	size_t		rlen;
@@ -397,6 +413,9 @@ struct ws_server {
 	uint32_t	buttons;	/* mask */
 	struct ws_window *grab;		/* implicit grab while buttons held */
 	bool		grab_suppressed;	/* activating click swallowed */
+	/* WS_MSG_POINTER_GRAB: the connection holding it, or NULL */
+	struct ws_client *pgrab;
+	uint32_t	pgrab_mode;	/* WS_GRAB_* */
 	struct ws_window *hover;
 	uint64_t	last_click_usec;
 	uint32_t	last_click_button;
@@ -539,7 +558,7 @@ void	request_handle(struct ws_server *srv, struct ws_mach_item *item);
 /* ---- window.c ---- */
 struct ws_window *window_create(struct ws_server *srv, struct ws_client *c,
 	    const ws_rect_t *frame, int32_t level, uint32_t flags,
-	    const char *title);
+	    const char *title, uint32_t id);
 void	window_destroy(struct ws_server *srv, struct ws_window *w);
 struct ws_window *window_lookup(struct ws_server *srv, uint32_t id);
 void	window_order(struct ws_server *srv, struct ws_window *w, int op,
@@ -555,9 +574,17 @@ void	window_attach(struct ws_server *srv, struct ws_window *w,
 void	window_damage(struct ws_server *srv, struct ws_window *w,
 	    const ws_rect_t *rects, unsigned n);
 void	window_commit(struct ws_server *srv, struct ws_window *w,
-	    uint32_t flags);
+	    uint32_t flags, const ws_rect_t *frame);
 void	window_make_key(struct ws_server *srv, struct ws_window *w);
 struct ws_window *window_at(struct ws_server *srv, double x, double y);
+struct ws_window *window_at_owned(struct ws_server *srv, struct ws_client *c,
+	    double x, double y);
+void	window_set_input_region(struct ws_server *srv, struct ws_window *w,
+	    const ws_rect_t *rects, unsigned n, uint32_t flags);
+int	window_reserve_ids(struct ws_server *srv, struct ws_client *c,
+	    uint32_t count, uint32_t *base);
+int	window_create_check_id(struct ws_server *srv, struct ws_client *c,
+	    uint32_t id);
 void	app_activate(struct ws_server *srv, struct ws_client *c,
 	    struct ws_window *key);
 void	app_deactivate(struct ws_server *srv, struct ws_client *c);
@@ -637,6 +664,14 @@ void	app_bring_forward(struct ws_server *srv, struct ws_window *w);
 /* ---- pointer.c ---- */
 void	pointer_motion(struct ws_server *srv, double x, double y);
 void	pointer_button(struct ws_server *srv, uint32_t button, bool pressed);
+int	pointer_grab(struct ws_server *srv, struct ws_client *c,
+	    uint32_t mode);
+void	pointer_ungrab(struct ws_server *srv, struct ws_client *c,
+	    bool notify);
+int	pointer_warp(struct ws_server *srv, struct ws_client *c,
+	    struct ws_window *w, double x, double y);
+int	pointer_query(struct ws_server *srv, struct ws_client *c,
+	    ws_pointer_info_t *info);
 void	pointer_scroll(struct ws_server *srv, double dx, double dy,
 	    int32_t v120_x, int32_t v120_y, uint32_t source);
 struct ws_window *pointer_scroll_target(struct ws_server *srv);
@@ -684,6 +719,8 @@ void	cursor_fini(struct ws_server *srv);
 void	cursor_update(struct ws_server *srv);
 void	cursor_moved(struct ws_server *srv);
 void	cursor_buffer_gone(struct ws_server *srv, struct ws_buffer *b);
+int	cursor_window_set(struct ws_server *srv, struct ws_window *w,
+	    uint32_t kind, struct ws_buffer *b, int32_t hot_x, int32_t hot_y);
 
 /* ---- compositor.c ---- */
 int	compositor_init(struct ws_server *srv);
