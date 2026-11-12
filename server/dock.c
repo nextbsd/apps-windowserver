@@ -32,24 +32,28 @@
 /* ---- trust ---- */
 
 /*
- * Does `uid` have a loginwindow session? *any tells whether any user
- * has one. Only root-owned records in a root-owned directory nobody
- * else can write count; if the directory can't be trusted, nobody is
- * the console user, but *any is set so that nobody gets in through the
- * no-session rule either.
+ * Looks through the loginwindow session records. Returns whether `uid`
+ * has one; *any tells whether any user has one, and *newest (if not
+ * NULL) is the user of the newest record, or -1. Only root-owned
+ * records in a root-owned directory nobody else can write count; if
+ * the directory can't be trusted, nobody is the console user, but *any
+ * is set so that nobody gets in through the no-session rule either.
  */
 static bool
-console_user(uid_t uid, bool *any)
+console_scan(uid_t uid, bool *any, uid_t *newest)
 {
 	struct dirent *de;
 	struct stat st;
 	unsigned long v;
 	bool found = false;
+	time_t when = 0;
 	size_t n;
 	char *end;
 	DIR *d;
 
 	*any = false;
+	if (newest != NULL)
+		*newest = (uid_t)-1;
 	d = opendir(LW_RUN_DIR);
 	if (d == NULL)
 		return false;
@@ -74,9 +78,33 @@ console_user(uid_t uid, bool *any)
 		*any = true;
 		if ((uid_t)v == uid)
 			found = true;
+		/* loginwindow runs one session at a time; should there be
+		   more records, the newest one's user is at the console */
+		if (newest != NULL && (*newest == (uid_t)-1 ||
+		    st.st_birthtime > when)) {
+			*newest = (uid_t)v;
+			when = st.st_birthtime;
+		}
 	}
 	closedir(d);
 	return found;
+}
+
+static bool
+console_user(uid_t uid, bool *any)
+{
+	return console_scan(uid, any, NULL);
+}
+
+/* The console user: the user of a loginwindow session, or -1. */
+uid_t
+console_uid(void)
+{
+	uid_t u;
+	bool any;
+
+	(void)console_scan((uid_t)-1, &any, &u);
+	return u;
 }
 
 /*

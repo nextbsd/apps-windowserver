@@ -6,6 +6,8 @@
  * Snapshots and synthetic input are allowed when the server runs
  * headless, or for root and the server's own user. `wsctl dock ...`
  * connects as a Dock (WS_CONNECT_DOCK) to try the Dock's requests.
+ * `wsctl settings` and `wsctl layout` change settings while the server
+ * runs, which only the console user may do.
  */
 
 #include <errno.h>
@@ -46,7 +48,17 @@ usage(void)
 	    "       wsctl dock preview WINDOW SIZE FILE.ppm\n"
 	    "       wsctl dock watch [SECONDS] (stay the Dock, print notices)\n"
 	    "       wsctl dock edge left|right|top|bottom|none THICKNESS [SECONDS]\n"
-	    "                                (report a Dock edge, stay SECONDS)\n");
+	    "                                (report a Dock edge, stay SECONDS)\n"
+	    "       wsctl settings get [KEY]   (values in effect, and where from)\n"
+	    "       wsctl settings set KEY VALUE [KEY VALUE ...]\n"
+	    "       wsctl settings unset KEY [KEY ...] (back to the system's)\n"
+	    "       wsctl settings reload [FILE] (the user's org.nextbsd.WindowServer\n"
+	    "                                defaults replace the session's)\n"
+	    "       wsctl settings reset     (drop the session's values)\n"
+	    "       wsctl layout list\n"
+	    "       wsctl layout set N|NAME  (make a layout of the list active)\n"
+	    "       wsctl layout watch [SECONDS] (print layout and settings changes)\n"
+	    "       wsctl devices           (input devices)\n");
 	exit(2);
 }
 
@@ -523,6 +535,196 @@ dock_main(int argc, char **argv)
 	return r == 0 ? 0 : 1;
 }
 
+/* ---- settings ---- */
+
+static const char *const sources[] = { "built-in", "system", "session" };
+
+static void
+print_setting(const ws_event_setting_t *st, void *ctx)
+{
+	const char *only = ctx;
+
+	if (only != NULL && strcmp(only, st->key) != 0)
+		return;
+	if (only != NULL) {
+		printf("%s\n", st->value);
+		return;
+	}
+	printf("%-22s = %s%s (%s%s)\n", st->key, st->value,
+	    (st->flags & WS_SETTING_TRUNCATED) ? "..." : "",
+	    st->source <= WS_SETTING_SOURCE_SESSION ? sources[st->source] : "?",
+	    (st->flags & WS_SETTING_SETTABLE) ? "" : ", server only");
+}
+
+static int
+settings_fail(const char *what, const char *key)
+{
+	int e = errno;
+
+	if (key[0] != '\0')
+		fprintf(stderr, "wsctl settings %s: %s: %s\n", what, key,
+		    strerror(e));
+	else
+		fprintf(stderr, "wsctl settings %s: %s\n", what, strerror(e));
+	return 2;
+}
+
+static int
+settings_cmd(ws_connection_t *c, int argc, char **argv)
+{
+	ws_setting_t list[32];
+	char path[1024], key[64] = "";
+	struct timespec ts = { 0, 200 * 1000 * 1000 };
+	int i, n, tries;
+
+	if (argc < 3)
+		usage();
+	if (strcmp(argv[2], "get") == 0 && argc <= 4)
+		return ws_get_settings(c, print_setting,
+		    argc == 4 ? argv[3] : NULL);
+	if (strcmp(argv[2], "set") == 0 && argc >= 5 && argc % 2 == 1) {
+		for (i = 3, n = 0; i + 1 < argc && n < 32; i += 2, n++) {
+			list[n].key = argv[i];
+			list[n].type = WS_SETTING_STRING;
+			list[n].value = argv[i + 1];
+		}
+		if (ws_set_settings(c, 0, list, (unsigned)n, key,
+		    sizeof(key)) < 0)
+			return settings_fail("set", key);
+		return 0;
+	}
+	if (strcmp(argv[2], "unset") == 0 && argc >= 4) {
+		for (i = 3, n = 0; i < argc && n < 32; i++, n++) {
+			list[n].key = argv[i];
+			list[n].type = WS_SETTING_DEFAULT;
+			list[n].value = "";
+		}
+		if (ws_set_settings(c, 0, list, (unsigned)n, key,
+		    sizeof(key)) < 0)
+			return settings_fail("unset", key);
+		return 0;
+	}
+	if (strcmp(argv[2], "reset") == 0 && argc == 3) {
+		if (ws_set_settings(c, WS_SETTINGS_REPLACE, NULL, 0, key,
+		    sizeof(key)) < 0)
+			return settings_fail("reset", key);
+		return 0;
+	}
+	if (strcmp(argv[2], "reload") == 0 && argc <= 4) {
+		if (argc == 4)
+			strlcpy(path, argv[3], sizeof(path));
+		else if (ws_user_settings_path(path, sizeof(path)) < 0)
+			return settings_fail("reload", "");
+		/*
+		 * At login, loginwindow writes its session record just as
+		 * the session starts: until WindowServer sees it, this user
+		 * isn't the console user yet. Try for a few seconds.
+		 */
+		for (tries = 0;; tries++) {
+			key[0] = '\0';
+			if (ws_settings_load_file(c, path, WS_SETTINGS_REPLACE |
+			    WS_SETTINGS_SKIP_INVALID, key, sizeof(key)) == 0)
+				break;
+			if (errno != EPERM || tries >= 15)
+				return settings_fail("reload", "");
+			nanosleep(&ts, NULL);
+		}
+		if (key[0] != '\0')
+			fprintf(stderr, "wsctl settings reload: %s: left out "
+			    "%s (and maybe more; see the server's log)\n",
+			    path, key);
+		return 0;
+	}
+	usage();
+	return -1;
+}
+
+static void
+print_layout(const ws_event_keyboard_layout_t *l, void *ctx)
+{
+	(void)ctx;
+	printf("%u %s%s%s \"%s\"%s\n", l->index, l->layout,
+	    l->variant[0] ? "(" : "", l->variant[0] ? l->variant : "",
+	    l->name, (l->flags & WS_KEYBOARD_LAYOUT_ACTIVE) ? " active" : "");
+}
+
+struct layout_find {
+	const char	*name;
+	int		index;
+};
+
+static void
+find_layout(const ws_event_keyboard_layout_t *l, void *ctx)
+{
+	struct layout_find *f = ctx;
+
+	if (f->index < 0 && strcmp(l->layout, f->name) == 0)
+		f->index = (int)l->index;
+}
+
+static int
+layout_cmd(ws_connection_t *c, int argc, char **argv)
+{
+	struct layout_find f;
+	ws_event_t ev;
+	time_t end;
+	char *e;
+	int r;
+
+	if (argc < 3)
+		usage();
+	if (strcmp(argv[2], "list") == 0 && argc == 3)
+		return ws_list_keyboard_layouts(c, print_layout, NULL);
+	if (strcmp(argv[2], "set") == 0 && argc == 4) {
+		f.name = argv[3];
+		f.index = (int)strtol(argv[3], &e, 10);
+		if (*e != '\0' || e == argv[3]) {
+			f.index = -1;
+			if (ws_list_keyboard_layouts(c, find_layout, &f) < 0)
+				return -1;
+			if (f.index < 0) {
+				errno = ENOENT;
+				return -1;
+			}
+		}
+		return ws_set_keyboard_layout(c, (uint32_t)f.index);
+	}
+	if (strcmp(argv[2], "watch") == 0 && argc <= 4) {
+		end = argc == 4 ? time(NULL) + atoi(argv[3]) : 0;
+		signal(SIGTERM, on_signal);
+		signal(SIGINT, on_signal);
+		setvbuf(stdout, NULL, _IOLBF, 0);
+		printf("watching\n");
+		while (!stop && (end == 0 || time(NULL) < end)) {
+			r = ws_next_event(c, &ev, 200);
+			if (r < 0)
+				return -1;
+			if (r == 0)
+				continue;
+			if (ev.hdr.type == WS_EVENT_KEYBOARD_LAYOUT) {
+				printf("layout ");
+				print_layout(&ev.u.keyboard_layout, NULL);
+			} else if (ev.hdr.type == WS_EVENT_SETTINGS_CHANGED)
+				printf("settings-changed\n");
+		}
+		return 0;
+	}
+	usage();
+	return -1;
+}
+
+static void
+print_device(const ws_event_input_device_t *d, void *ctx)
+{
+	(void)ctx;
+	printf("%-8s %s%s%s%s%s \"%s\"\n", d->sysname,
+	    (d->flags & WS_INPUT_KEYBOARD) ? " keyboard" : "",
+	    (d->flags & WS_INPUT_POINTER) ? " pointer" : "",
+	    (d->flags & WS_INPUT_TOUCHPAD) ? " touchpad" : "",
+	    (d->flags & WS_INPUT_MOUSE) ? " mouse" : "",
+	    (d->flags & WS_INPUT_TOUCH) ? " touch" : "", d->name);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -634,6 +836,16 @@ main(int argc, char **argv)
 			r = ws_inject_hold(c, 0);
 	} else if (strcmp(cmd, "sync") == 0) {
 		r = ws_sync(c);
+	} else if (strcmp(cmd, "settings") == 0) {
+		r = settings_cmd(c, argc, argv);
+		if (r == 2) {		/* it said what failed */
+			ws_disconnect(c);
+			return 1;
+		}
+	} else if (strcmp(cmd, "layout") == 0) {
+		r = layout_cmd(c, argc, argv);
+	} else if (strcmp(cmd, "devices") == 0 && argc == 2) {
+		r = ws_list_input_devices(c, print_device, NULL);
 	} else {
 		ws_disconnect(c);
 		usage();

@@ -17,7 +17,9 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -112,27 +114,51 @@ is_mux_device(const char *name)
 	    strstr(name, "System mouse") != NULL;
 }
 
+static double
+clamp_speed(double speed)
+{
+	return speed < -1.0 ? -1.0 : speed > 1.0 ? 1.0 : speed;
+}
+
 /*
- * Touchpad and pointer settings (README, "Touchpad"): tapping, tap and
- * drag, secondary click, three-finger drag and pointer speed.
+ * Touchpad and pointer settings (README, "Touchpad" and "Mouse"):
+ * speed (TrackpadSpeed or MouseSpeed, else PointerSpeed), the mouse's
+ * acceleration profile, left-handed buttons, tapping, tap and drag,
+ * secondary click and three-finger drag. Run when a device arrives and
+ * again for every device when a setting changes (settings.c).
  */
 static void
 configure_device(struct ws_server *srv, struct libinput_device *dev)
 {
 	const char *name = libinput_device_get_name(dev);
 	const char *sc = srv->cfg.secondary_click;
+	bool touchpad = libinput_device_config_tap_get_finger_count(dev) > 0;
 	uint32_t methods;
 	double speed;
 
 	if (libinput_device_config_accel_is_available(dev)) {
-		speed = srv->cfg.pointer_speed;
-		if (speed < -1.0)
-			speed = -1.0;
-		if (speed > 1.0)
-			speed = 1.0;
-		libinput_device_config_accel_set_speed(dev, speed);
+		speed = touchpad ? srv->cfg.trackpad_speed :
+		    srv->cfg.mouse_speed;
+		if (isnan(speed))
+			speed = srv->cfg.pointer_speed;
+		libinput_device_config_accel_set_speed(dev, clamp_speed(speed));
+		/* Mouse acceleration on (adaptive) or off (flat); touchpads
+		   keep libinput's own profile. */
+		if (!touchpad) {
+			enum libinput_config_accel_profile prof =
+			    strcasecmp(srv->cfg.mouse_accel_profile, "flat") == 0 ?
+			    LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT :
+			    LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE;
+
+			if (libinput_device_config_accel_get_profiles(dev) & prof)
+				libinput_device_config_accel_set_profile(dev,
+				    prof);
+		}
 	}
-	if (libinput_device_config_tap_get_finger_count(dev) == 0)
+	if (libinput_device_config_left_handed_is_available(dev))
+		libinput_device_config_left_handed_set(dev,
+		    srv->cfg.left_handed ? 1 : 0);
+	if (!touchpad)
 		return;
 	libinput_device_set_user_data(dev, DEV_TOUCHPAD);
 	libinput_device_config_tap_set_enabled(dev, srv->cfg.tap_to_click ?
@@ -180,6 +206,73 @@ configure_device(struct ws_server *srv, struct libinput_device *dev)
 	    srv->cfg.three_finger_drag ? "on" : "off");
 }
 
+/* A pointer or touchpad setting changed: apply it to every device. */
+void
+input_reconfigure(struct ws_server *srv)
+{
+	struct ws_input_device *d;
+
+	for (d = srv->input_devices; d != NULL; d = d->next)
+		configure_device(srv, d->dev);
+}
+
+/* WS_MSG_LIST_INPUT_DEVICES */
+void
+input_list(struct ws_server *srv, struct ws_client *c)
+{
+	struct ws_input_device *d;
+	ws_event_t ev;
+
+	for (d = srv->input_devices; d != NULL; d = d->next) {
+		event_init(srv, &ev, WS_EVENT_INPUT_DEVICE,
+		    sizeof(ev.u.input_device), 0);
+		ev.u.input_device.flags = d->flags;
+		strlcpy(ev.u.input_device.name, libinput_device_get_name(d->dev),
+		    sizeof(ev.u.input_device.name));
+		strlcpy(ev.u.input_device.sysname,
+		    libinput_device_get_sysname(d->dev),
+		    sizeof(ev.u.input_device.sysname));
+		client_send(srv, c, &ev, -1);
+	}
+	event_init(srv, &ev, WS_EVENT_LIST_END, 0, 0);
+	client_send(srv, c, &ev, -1);
+}
+
+static void
+device_track(struct ws_server *srv, struct libinput_device *dev)
+{
+	struct ws_input_device *d = calloc(1, sizeof(*d));
+
+	if (d == NULL)
+		return;
+	d->dev = libinput_device_ref(dev);
+	if (libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_KEYBOARD))
+		d->flags |= WS_INPUT_KEYBOARD;
+	if (libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_POINTER)) {
+		d->flags |= WS_INPUT_POINTER;
+		d->flags |= libinput_device_config_tap_get_finger_count(dev) > 0 ?
+		    WS_INPUT_TOUCHPAD : WS_INPUT_MOUSE;
+	}
+	if (libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_TOUCH))
+		d->flags |= WS_INPUT_TOUCH;
+	d->next = srv->input_devices;
+	srv->input_devices = d;
+}
+
+static void
+device_untrack(struct ws_server *srv, struct libinput_device *dev)
+{
+	struct ws_input_device **dp, *d;
+
+	for (dp = &srv->input_devices; (d = *dp) != NULL; dp = &d->next)
+		if (d->dev == dev) {
+			*dp = d->next;
+			libinput_device_unref(d->dev);
+			free(d);
+			return;
+		}
+}
+
 static void
 device_added(struct ws_server *srv, struct libinput_device *dev)
 {
@@ -198,6 +291,7 @@ device_added(struct ws_server *srv, struct libinput_device *dev)
 	    LIBINPUT_DEVICE_CAP_POINTER) ? " pointer" : "",
 	    libinput_device_has_capability(dev,
 	    LIBINPUT_DEVICE_CAP_TOUCH) ? " touch" : "");
+	device_track(srv, dev);
 	configure_device(srv, dev);
 }
 
@@ -267,6 +361,7 @@ handle_event(struct ws_server *srv, struct libinput_event *ev)
 	switch (libinput_event_get_type(ev)) {
 	case LIBINPUT_EVENT_DEVICE_REMOVED:
 		ws_info("input: %s removed", libinput_device_get_name(dev));
+		device_untrack(srv, dev);
 		break;
 	case LIBINPUT_EVENT_KEYBOARD_KEY:
 		k = libinput_event_get_keyboard_event(ev);
@@ -369,6 +464,13 @@ input_readable(struct ws_server *srv)
 void
 input_close(struct ws_server *srv)
 {
+	struct ws_input_device *d;
+
+	while ((d = srv->input_devices) != NULL) {
+		srv->input_devices = d->next;
+		libinput_device_unref(d->dev);
+		free(d);
+	}
 	if (srv->libinput != NULL)
 		libinput_unref(srv->libinput);
 	if (srv->udev != NULL)

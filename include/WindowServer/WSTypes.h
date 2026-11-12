@@ -166,6 +166,11 @@ extern "C" {
 #define WS_SERVER_SCREEN_CHANGES 0x2000	/* sends WS_EVENT_SCREEN_CHANGED
 					   when the screen's size or mode
 					   changes */
+#define WS_SERVER_SETTINGS	0x4000	/* settings change while it runs:
+					   WS_MSG_SET_SETTINGS and _GET_,
+					   keyboard layouts and input
+					   devices ("Settings" in
+					   WSProtocol.h) */
 
 /* Where a minimized window goes ("Minimizing" in WSProtocol.h). */
 #define WS_MINIMIZE_DEFAULT	0	/* the server's MinimizeIntoDock */
@@ -260,6 +265,17 @@ enum {
 	WS_EVENT_OVERVIEW_ITEM,		/* ws_event_overview_item_t */
 	/* WS_SERVER_USABLE_AREA: to every connection */
 	WS_EVENT_USABLE_AREA,		/* ws_event_usable_area_t */
+	/* WS_SERVER_SETTINGS ("Settings" in WSProtocol.h) */
+	WS_EVENT_SETTING,		/* ws_event_setting_t, answers
+					   WS_MSG_GET_SETTINGS */
+	WS_EVENT_SETTINGS_CHANGED,	/* tools and the Dock; no payload:
+					   get them again */
+	WS_EVENT_KEYBOARD_LAYOUT,	/* ws_event_keyboard_layout_t: to tools
+					   and the Dock when the active layout
+					   changes, and answering
+					   WS_MSG_LIST_KEYBOARD_LAYOUTS */
+	WS_EVENT_INPUT_DEVICE,		/* ws_event_input_device_t, answers
+					   WS_MSG_LIST_INPUT_DEVICES */
 	WS_EVENT_MAX
 };
 
@@ -405,7 +421,8 @@ typedef struct ws_event_keymap {
  * like Wayland's wl_keyboard.modifiers. Sent to the connection that
  * gets key events when it starts getting them (after WS_EVENT_KEYS_HELD)
  * and whenever the state changes while it does, after the key event
- * that changed it.
+ * that changed it (or a layout switch, WS_MSG_SET_KEYBOARD_LAYOUT), and
+ * to every WS_CONNECT_XKB connection after a new WS_EVENT_KEYMAP.
  */
 typedef struct ws_event_modifiers {
 	uint32_t	depressed;	/* XKB_STATE_MODS_DEPRESSED */
@@ -569,6 +586,84 @@ typedef struct ws_event_overview_item {
 	uint32_t	group;		/* 0 = the first app group */
 } ws_event_overview_item_t;
 
+/*
+ * Settings (servers with WS_SERVER_SETTINGS; see "Settings" in
+ * WSProtocol.h). Every setting has a type, and its value travels as
+ * text: "true"/"false" for booleans, decimal numbers in the C locale.
+ */
+#define WS_SETTING_STRING	's'
+#define WS_SETTING_INTEGER	'i'
+#define WS_SETTING_BOOLEAN	'b'
+#define WS_SETTING_REAL		'r'	/* integers are accepted too */
+#define WS_SETTING_DEFAULT	'd'	/* WS_MSG_SET_SETTINGS only: drop the
+					   session's value, back to the
+					   system's (value is "") */
+
+/* WS_MSG_SET_SETTINGS flags ("Settings" in WSProtocol.h). */
+#define WS_SETTINGS_REPLACE	0x0001	/* drop the session's values first */
+#define WS_SETTINGS_RELOAD_SYSTEM 0x0002 /* read the system's layer again */
+#define WS_SETTINGS_SKIP_INVALID 0x0004	/* leave out refused entries */
+
+/* Where the value in effect comes from (ws_event_setting_t.source). */
+#define WS_SETTING_SOURCE_BUILTIN 0	/* compiled-in default */
+#define WS_SETTING_SOURCE_SYSTEM  1	/* the system plist, WS_<Key> or the
+					   command line */
+#define WS_SETTING_SOURCE_SESSION 2	/* the console user's session */
+
+/* ws_event_setting_t.flags */
+#define WS_SETTING_SETTABLE	0x0001	/* WS_MSG_SET_SETTINGS may change it;
+					   others are the server's own */
+#define WS_SETTING_TRUNCATED	0x0002	/* value didn't fit */
+
+#define WS_MAX_SETTING_KEY	32
+#define WS_MAX_SETTING_VALUE	176
+
+typedef struct ws_event_setting {
+	char		key[WS_MAX_SETTING_KEY];
+	uint32_t	type;		/* WS_SETTING_* */
+	uint32_t	source;		/* WS_SETTING_SOURCE_* */
+	uint32_t	flags;		/* WS_SETTING_SETTABLE, _TRUNCATED */
+	uint32_t	reserved;
+	char		value[WS_MAX_SETTING_VALUE];
+} ws_event_setting_t;
+
+/*
+ * Keyboard layouts (WS_SERVER_SETTINGS): the KeyboardLayout setting is
+ * a list ("us,gr"), at most WS_MAX_KEYBOARD_LAYOUTS (XKB's group limit).
+ * WS_EVENT_KEYBOARD_LAYOUT names one of them: the active one when it
+ * says the layout changed, each in turn when it answers
+ * WS_MSG_LIST_KEYBOARD_LAYOUTS.
+ */
+#define WS_MAX_KEYBOARD_LAYOUTS	4
+
+#define WS_KEYBOARD_LAYOUT_ACTIVE 0x0001	/* this is the active layout */
+#define WS_KEYBOARD_LAYOUT_CHANGED 0x0002	/* says the active layout changed
+						   (not part of a list) */
+
+typedef struct ws_event_keyboard_layout {
+	uint32_t	index;		/* 0-based, into the layout list */
+	uint32_t	count;		/* layouts in the list */
+	uint32_t	active;		/* index of the active layout */
+	uint32_t	flags;		/* WS_KEYBOARD_LAYOUT_ACTIVE */
+	char		layout[32];	/* the XKB layout, e.g. "gr" */
+	char		variant[32];	/* its variant, "" = the default */
+	char		name[64];	/* XKB's description, e.g. "Greek" */
+} ws_event_keyboard_layout_t;
+
+/* Input devices (WS_MSG_LIST_INPUT_DEVICES), ws_event_input_device_t.flags. */
+#define WS_INPUT_KEYBOARD	0x0001
+#define WS_INPUT_POINTER	0x0002	/* any pointing device */
+#define WS_INPUT_TOUCHPAD	0x0004	/* a pointer that taps: a touchpad */
+#define WS_INPUT_MOUSE		0x0008	/* a pointer that isn't a touchpad */
+#define WS_INPUT_TOUCH		0x0010	/* a touchscreen */
+
+typedef struct ws_event_input_device {
+	uint32_t	flags;		/* WS_INPUT_* */
+	uint32_t	reserved;
+	char		name[64];
+	char		sysname[32];	/* e.g. "event3" */
+} ws_event_input_device_t;
+
 typedef struct ws_event {
 	ws_event_header_t hdr;
 	union {
@@ -593,6 +688,9 @@ typedef struct ws_event {
 		ws_event_overview_t	overview;
 		ws_event_overview_item_t overview_item;
 		ws_event_usable_area_t	usable_area;
+		ws_event_setting_t	setting;
+		ws_event_keyboard_layout_t keyboard_layout;
+		ws_event_input_device_t	input_device;
 		uint8_t			raw[232];
 	} u;
 } ws_event_t;

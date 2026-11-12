@@ -315,7 +315,10 @@ min_size(mach_msg_id_t id)
 	case WS_MSG_DOCK_PREVIEW:
 	case WS_MSG_DOCK_SHOW_MINIMIZED:
 	case WS_MSG_OVERVIEW:
+	case WS_MSG_SET_KEYBOARD_LAYOUT:
 		return sizeof(ws_req_int_t);
+	case WS_MSG_SET_SETTINGS:
+		return offsetof(ws_req_settings_t, data);
 	case WS_MSG_WINDOW_ORDER:
 		return sizeof(ws_req_order_t);
 	case WS_MSG_WINDOW_SET_TITLE:
@@ -639,6 +642,34 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 			break;
 		}
 		overview_report(srv, c);
+		break;
+	case WS_MSG_SET_SETTINGS:
+		settings_set(srv, c, item);
+		return;
+	case WS_MSG_GET_SETTINGS:
+		settings_get(srv, c);
+		break;
+	case WS_MSG_SET_KEYBOARD_LAYOUT: {
+		int err;
+
+		/* the console user's, as for the settings */
+		if (!dock_may_list(srv, item->sender_euid))
+			err = EPERM;
+		else
+			err = keyboard_set_layout(srv, (uint32_t)value);
+		if (want_reply)
+			reply_status(item, h->seq, err);
+		else if (err != 0)
+			client_error(srv, c, (uint32_t)id, 0, err,
+			    err == EPERM ? "layout change not allowed" :
+			    "no such keyboard layout");
+		return;
+	}
+	case WS_MSG_LIST_KEYBOARD_LAYOUTS:
+		keyboard_list_layouts(srv, c);
+		break;
+	case WS_MSG_LIST_INPUT_DEVICES:
+		input_list(srv, c);
 		break;
 	case WS_MSG_INJECT:
 		if (!may_inject(srv, item)) {
