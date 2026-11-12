@@ -940,6 +940,16 @@ ws_window_minimize(ws_connection_t *c, uint32_t window)
 }
 
 WS_API int
+ws_window_minimize_where(ws_connection_t *c, uint32_t window, uint32_t where)
+{
+	/* A bare header for older servers and the server's default. */
+	if (where == WS_MINIMIZE_DEFAULT ||
+	    (c->server_flags & WS_SERVER_MINIMIZE_WHERE) == 0)
+		return ws_window_minimize(c, window);
+	return send_int(c, WS_MSG_WINDOW_MINIMIZE, window, (int32_t)where);
+}
+
+WS_API int
 ws_set_app_icon(ws_connection_t *c, uint32_t width, uint32_t height,
     const void *argb, uint32_t stride)
 {

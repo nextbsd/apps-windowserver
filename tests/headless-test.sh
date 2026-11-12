@@ -7,7 +7,8 @@
 # windows), then uses wsctl to check the composited screen and drive
 # synthetic input, including minimizing a window to a tile and
 # restoring it, and the Dock's window list (wsctl dock), with minimized
-# windows handed to the Dock instead of tiles (MinimizeIntoDock), and
+# windows handed to the Dock instead of tiles (MinimizeIntoDock, and
+# per request with WS_MINIMIZE_INTO_DOCK or WS_MINIMIZE_BOTTOM_ROW), and
 # the screen edge the Dock reports (WS_MSG_DOCK_SET_EDGE), touchpad
 # scroll phases and momentum scrolling, and the window overview (Exposé).
 #
@@ -293,6 +294,59 @@ DPID=
 expect_pixel 4 $((TILE_Y + 24)) 303030 "tile back once the Dock is gone"
 expect_pixel 20 $((TILE_Y + 24)) 20a050 "the tile shows W3"
 grep -q '^error' "$LOG/dock-watch.log" && fail "the Dock got errors"
+
+# Where a window goes (WS_SERVER_MINIMIZE_WHERE): each minimize request
+# may say, whatever MinimizeIntoDock (on here) says. Typing "r" in Beta
+# minimizes onto the bottom row, "d" into the Dock; with W3 already
+# minimized, it moves there.
+"$B/wsctl" key r || fail "wsctl key r (W3 minimized, no Dock)"
+mark
+expect_pixel 4 $((TILE_Y + 24)) 303030 "W3 onto the bottom row: still its tile"
+"$B/wsctl" dock watch 60 >"$LOG/dock-where.log" 2>&1 &
+DPID=$!
+wait_for "$LOG/dock-where.log" "^state flags=0x1 minimized-windows" 5 ||
+    fail "no dock-state for the second Dock"
+"$B/wsctl" sync
+expect_pixel 4 $((TILE_Y + 24)) 303030 "a Dock connected: W3 keeps its bottom-row tile"
+"$B/wsctl" dock list | grep '"W3"$' | grep ' minimized ' | grep -qv 'in-dock' &&
+    pass "dock list: W3 minimized, not in the Dock" || fail "W3 listed in the Dock"
+"$B/wsctl" key d || fail "wsctl key d (W3 minimized, with a Dock)"
+mark
+expect_pixel 4 $((TILE_Y + 24)) 202020 "W3 moved from its tile into the Dock"
+wait_for "$LOG/dock-where.log" "id=$W3ID .* minimized in-dock" 5 &&
+    pass "the Dock heard W3 move into it" || fail "W3 not listed in the Dock"
+"$B/wsctl" dock restore "$W3ID" || fail "wsctl dock restore (where)"
+mark
+expect_pixel 690 590 20a050 "W3 restored from the Dock"
+"$B/wsctl" key r || fail "wsctl key r (with a Dock)"
+mark
+expect_pixel 690 590 202020 "W3 minimized onto the bottom row"
+expect_pixel 4 $((TILE_Y + 24)) 303030 "onto the bottom row with a Dock connected: a tile"
+"$B/wsctl" dock list | grep '"W3"$' | grep ' minimized ' | grep -qv 'in-dock' &&
+    pass "dock list: W3 on the bottom row, not in the Dock" ||
+    fail "a bottom-row window went into the Dock"
+"$B/wsctl" dock restore "$W3ID" || fail "wsctl dock restore (bottom row)"
+mark
+expect_pixel 4 $((TILE_Y + 24)) 202020 "tile gone after the restore"
+"$B/wsctl" key d || fail "wsctl key d (with a Dock)"
+mark
+expect_pixel 690 590 202020 "W3 minimized into the Dock"
+expect_pixel 4 $((TILE_Y + 24)) 202020 "into the Dock: no tile"
+kill "$DPID"
+wait "$DPID" 2>/dev/null
+DPID=
+"$B/wsctl" sync
+expect_pixel 4 $((TILE_Y + 24)) 303030 "the Dock gone: W3 back onto the bottom row"
+grep -q '^error' "$LOG/dock-where.log" && fail "the second Dock got errors"
+# With no Dock connected, minimizing into the Dock gives a tile.
+"$B/wsctl" dock restore "$W3ID" || fail "wsctl dock restore (no Dock)"
+mark
+expect_pixel 690 590 20a050 "W3 restored"
+"$B/wsctl" key d || fail "wsctl key d (no Dock)"
+mark
+expect_pixel 690 590 202020 "W3 minimized into the Dock with no Dock"
+expect_pixel 4 $((TILE_Y + 24)) 303030 "no Dock: onto the bottom row instead"
+expect_pixel 20 $((TILE_Y + 24)) 20a050 "the tile shows W3"
 
 # The Dock's edge (WS_SERVER_DOCK_EDGE): a Dock says which screen edge
 # it keeps and how thick it is; every Dock connection hears it and
