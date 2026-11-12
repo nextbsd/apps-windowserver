@@ -62,6 +62,7 @@ What works, tested headless:
 - Minimized windows as live tiles along the bottom of the screen (see [Minimized windows](#minimized-windows)).
 - The usable area, the screen minus the active app's Mac-style menu bar and the Dock's strip, sent to every app, and screen size changes (see [The screen and its usable area](#the-screen-and-its-usable-area)).
 - The Dock's view of every app's windows, with change notices, activation, restoring and previews (see [The Dock](#the-dock)).
+- Built-in images for every standard cursor kind: arrow, I-beam, pointing, open and closed hand, crosshair, left-right and up-down resize, and not allowed. A kind the server doesn't know shows the arrow.
 - Snapshots and synthetic input for testing.
 - Touchpad scroll phases and momentum scrolling, with synthetic two-finger scrolls (see [Touchpad](#touchpad)).
 - The window overview, Exposé and App Exposé, opened by a Start tap, Control+Up/Down, the Mission Control key or a three-finger swipe (see [The overview](#the-overview)).
@@ -78,7 +79,6 @@ Not done yet:
 
 - The GNUstep backend (`libgnustep-nextbsd` in the libs-back fork) and a real `ws-session`.
 - Waiting for the GPU kext's IOKit match, and display hotplug through IOKit.
-- Images for the standard cursors other than the arrow.
 - Touch, tablets, gestures other than swipes up and down, and switches. Per-device keyboard settings.
 - Skipping windows hidden behind opaque ones while compositing.
 - GPU compositing (EGL/GBM), several displays, HiDPI.

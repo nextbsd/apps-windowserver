@@ -44,6 +44,10 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_COMMIT_FRAME | WS_SERVER_WINDOW_IDS | \
 				 WS_SERVER_MENU_BAR)
 
+/* The standard cursors with a built-in image (cursor.c): kinds 0 to
+   WS_CURSOR_NOT_ALLOWED. */
+#define WS_NSTD_CURSORS		(WS_CURSOR_NOT_ALLOWED + 1)
+
 /* Connections that aren't apps: wsctl and the Dock's window list. */
 #define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK)
 
@@ -463,9 +467,7 @@ struct ws_server {
 	uint32_t	usable_menu_bar;
 
 	/* cursor */
-	pixman_image_t	*cursor_default;
-	int		cursor_default_hot_x;
-	int		cursor_default_hot_y;
+	pixman_image_t	*cursor_std[WS_NSTD_CURSORS]; /* built-in kinds */
 	pixman_image_t	*cursor_image;	/* current, not owned */
 	int		cursor_hot_x;
 	int		cursor_hot_y;
