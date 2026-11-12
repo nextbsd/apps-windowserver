@@ -377,6 +377,8 @@ struct ws_tiling {
 	int		layout;		/* WS_TILING_DWINDLE or _MASTER */
 	uint32_t	modifier;	/* WS_MOD_* of TilingModifier */
 	bool		dirty;		/* lay out again before the next frame */
+	bool		starting;	/* just switched on: the windows tiled
+					   now were on screen already */
 	struct ws_tiling_space space;
 	struct ws_window *focus;	/* tiled window that had the focus */
 	struct ws_window *border;	/* has the border drawn round it */

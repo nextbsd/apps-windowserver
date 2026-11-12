@@ -330,7 +330,7 @@ wsctl tiling grow                    # or shrink
 wsctl tiling toggle                  # float or tile the key window (float, tile WINDOW)
 ```
 
-GNUstep apps tell WindowServer which windows are panels or can't be resized, and their minimum and maximum sizes, from libs-back's NextBSD backend, and redraw at the frames they're given (`WS_EVENT_WINDOW_FRAME`). An X server's windows (XLibre.app's Xnextbsd) tile at their own size until it resizes them when WindowServer gives them a frame.
+GNUstep apps tell WindowServer which windows are panels or can't be resized, and their minimum and maximum sizes, from libs-back's NextBSD backend, and redraw at the frames they're given (`WS_EVENT_WINDOW_FRAME`). A tile's frame comes with `WS_FRAME_TILED`, and the frame given back when tiling ends without it, so the backend keeps a window's saved frame (GNUstep's frame autosave) from before tiling: an app opened again in stacking comes back at its own size, not its tile's. An X server's windows (XLibre.app's Xnextbsd) tile at their own size until it resizes them when WindowServer gives them a frame.
 
 ### Settings
 

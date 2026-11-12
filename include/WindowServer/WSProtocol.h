@@ -639,8 +639,10 @@ typedef struct ws_req_cursor {
  * changes (the Dock moved). The mode is the screen's (one layout per
  * screen now; one per workspace once there are workspaces). Owners hear
  * their windows' new frames as WS_EVENT_WINDOW_FRAME, as for any frame
- * the server sets, and draw them at the new size. Leaving tiling mode
- * gives every window back the frame it had before it was tiled.
+ * the server sets, with WS_FRAME_TILED, and draw them at the new size.
+ * Leaving tiling mode (or floating a window) gives every window back the
+ * frame it had before it was tiled, without WS_FRAME_TILED, so an owner
+ * that saves window frames can tell tiles from the frames to keep.
  *
  * Layouts (TilingLayout): "dwindle" gives the first window part of the
  * area and the next one part of what is left, splitting the longer side
