@@ -40,7 +40,9 @@ usage(void)
 	    "       wsctl dock activate APP_ID [WINDOW]\n"
 	    "       wsctl dock restore WINDOW\n"
 	    "       wsctl dock preview WINDOW SIZE FILE.ppm\n"
-	    "       wsctl dock watch [SECONDS] (stay the Dock, print notices)\n");
+	    "       wsctl dock watch [SECONDS] (stay the Dock, print notices)\n"
+	    "       wsctl dock edge left|right|top|bottom|none THICKNESS [SECONDS]\n"
+	    "                                (report a Dock edge, stay SECONDS)\n");
 	exit(2);
 }
 
@@ -185,14 +187,34 @@ on_signal(int sig)
 	stop = 1;
 }
 
+static const char *const dock_edges[] = { "none", "left", "right", "top",
+    "bottom" };
+
+static const char *
+dock_edge_name(uint32_t edge)
+{
+	return edge <= WS_DOCK_EDGE_BOTTOM ? dock_edges[edge] : "?";
+}
+
+/* The Dock's edge as WS_EVENT_DOCK_STATE gives it. */
+static void
+print_dock_edge(const char *prefix, const ws_event_dock_state_t *s)
+{
+	printf("%sedge=%s thickness=%u client=%u\n", prefix,
+	    dock_edge_name(s->edge), s->thickness, s->edge_client);
+}
+
 static void
 print_dock_event(const ws_event_t *ev)
 {
 	switch (ev->hdr.type) {
 	case WS_EVENT_DOCK_STATE:
-		printf("state flags=0x%x%s\n", ev->u.dock_state.flags,
+		printf("state flags=0x%x%s edge=%s thickness=%u\n",
+		    ev->u.dock_state.flags,
 		    (ev->u.dock_state.flags & WS_DOCK_MINIMIZED_WINDOWS) ?
-		    " minimized-windows" : "");
+		    " minimized-windows" : "",
+		    dock_edge_name(ev->u.dock_state.edge),
+		    ev->u.dock_state.thickness);
 		break;
 	case WS_EVENT_PREVIEW_CHANGED:
 		printf("preview-changed window=%u\n", ev->hdr.window);
@@ -249,6 +271,70 @@ dock_watch(ws_connection_t *c, int seconds)
 	return 0;
 }
 
+/* wsctl dock edge: report an edge, print the state that confirms it (or
+ * the server's error), then stay connected, as a Dock that keeps the
+ * edge, for `seconds`, printing each change. */
+static int
+dock_edge(ws_connection_t *c, const char *name, const char *thickness,
+    int seconds)
+{
+	time_t end;
+	uint32_t edge, px;
+	ws_event_t ev;
+	int confirmed = 0, r;
+
+	for (edge = 0; edge <= WS_DOCK_EDGE_BOTTOM; edge++)
+		if (strcmp(name, dock_edges[edge]) == 0)
+			break;
+	if (edge > WS_DOCK_EDGE_BOTTOM)
+		usage();
+	px = edge == WS_DOCK_EDGE_NONE ? 0 : (uint32_t)strtoul(thickness, NULL, 0);
+	if ((ws_server_flags(c) & WS_SERVER_DOCK_EDGE) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	if (ws_dock_set_edge(c, edge, px) < 0)
+		return -1;
+	signal(SIGTERM, on_signal);
+	signal(SIGINT, on_signal);
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	/* Two seconds for the state naming this connection (none: any). */
+	end = time(NULL) + 2;
+	while (!confirmed && time(NULL) <= end) {
+		r = ws_next_event(c, &ev, 200);
+		if (r < 0)
+			return -1;
+		if (r == 0)
+			continue;
+		if (ev.hdr.type == WS_EVENT_ERROR) {
+			fprintf(stderr, "wsctl: server: %s\n", ev.u.error.message);
+			errno = ev.u.error.code ? ev.u.error.code : EIO;
+			return -1;
+		}
+		if (ev.hdr.type == WS_EVENT_DOCK_STATE &&
+		    (edge == WS_DOCK_EDGE_NONE ||
+		    (ev.u.dock_state.edge_client == ws_client_id(c) &&
+		    ev.u.dock_state.edge == edge &&
+		    ev.u.dock_state.thickness == px))) {
+			print_dock_edge("", &ev.u.dock_state);
+			confirmed = 1;
+		}
+	}
+	if (!confirmed) {
+		errno = ETIMEDOUT;
+		return -1;
+	}
+	end = time(NULL) + seconds;
+	while (!stop && seconds > 0 && time(NULL) < end) {
+		r = ws_next_event(c, &ev, 200);
+		if (r < 0)
+			return -1;
+		if (r > 0 && ev.hdr.type == WS_EVENT_DOCK_STATE)
+			print_dock_edge("", &ev.u.dock_state);
+	}
+	return 0;
+}
+
 static int
 dock_main(int argc, char **argv)
 {
@@ -276,6 +362,17 @@ dock_main(int argc, char **argv)
 		r = ws_list_windows_flags(c, argc == 3 &&
 		    strcmp(argv[2], "-a") == 0 ? WS_LIST_ORDERED_OUT : 0,
 		    print_dock_window, NULL);
+		/* The Dock's edge: the state that came after the welcome
+		 * (queued while the list was read). */
+		while (r == 0 && ws_next_event(c, &ev, 0) > 0)
+			if (ev.hdr.type == WS_EVENT_DOCK_STATE &&
+			    (ws_server_flags(c) & WS_SERVER_DOCK_EDGE) != 0)
+				print_dock_edge("dock ", &ev.u.dock_state);
+			else if (ev.hdr.type == WS_EVENT_ERROR) {
+				fprintf(stderr, "wsctl: server: %s\n",
+				    ev.u.error.message);
+				r = -1;
+			}
 	} else if (strcmp(cmd, "activate") == 0 && (argc == 3 || argc == 4)) {
 		r = ws_dock_activate(c, (uint32_t)strtoul(argv[2], NULL, 0),
 		    argc == 4 ? (uint32_t)strtoul(argv[3], NULL, 0) : 0);
@@ -296,6 +393,8 @@ dock_main(int argc, char **argv)
 		}
 	} else if (strcmp(cmd, "watch") == 0 && argc <= 3) {
 		r = dock_watch(c, argc == 3 ? atoi(argv[2]) : 0);
+	} else if (strcmp(cmd, "edge") == 0 && (argc == 4 || argc == 5)) {
+		r = dock_edge(c, argv[2], argv[3], argc == 5 ? atoi(argv[4]) : 0);
 	} else {
 		ws_disconnect(c);
 		usage();

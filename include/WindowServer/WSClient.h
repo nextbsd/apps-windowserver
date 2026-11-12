@@ -246,11 +246,16 @@ int		 ws_overview(ws_connection_t *conn, uint32_t request,
  *			MinimizeIntoDock on, WindowServer then hands them
  *			over (WS_DOCK_MINIMIZED_WINDOWS) instead of drawing
  *			tiles
+ *   ws_dock_set_edge	say which screen edge this Dock is on
+ *			(WS_DOCK_EDGE_*) and how thick it is, so tiling
+ *			keeps it free; servers with WS_SERVER_DOCK_EDGE
  */
 int		 ws_dock_activate(ws_connection_t *conn, uint32_t app_id,
     uint32_t window);
 int		 ws_dock_restore(ws_connection_t *conn, uint32_t window);
 int		 ws_dock_show_minimized(ws_connection_t *conn, int on);
+int		 ws_dock_set_edge(ws_connection_t *conn, uint32_t edge,
+    uint32_t thickness);
 int		 ws_dock_preview(ws_connection_t *conn, uint32_t window,
     uint32_t max_size, ws_snapshot_t *out);
 

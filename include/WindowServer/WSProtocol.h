@@ -90,6 +90,8 @@ enum {
 					   minimized windows, 0 = no longer */
 	/* tools and the Dock (servers with WS_SERVER_OVERVIEW) */
 	WS_MSG_OVERVIEW,		/* ws_req_int_t: WS_OVERVIEW_* */
+	/* WS_CONNECT_DOCK only (servers with WS_SERVER_DOCK_EDGE) */
+	WS_MSG_DOCK_SET_EDGE,		/* ws_req_dock_edge_t */
 	WS_MSG_LAST
 };
 
@@ -160,6 +162,12 @@ typedef struct ws_req_int {		/* SET_LEVEL, SET_FLAGS, COMMIT,
 	int32_t		value;
 	uint32_t	reserved;
 } ws_req_int_t;
+
+typedef struct ws_req_dock_edge {	/* DOCK_SET_EDGE */
+	ws_req_header_t	hdr;
+	uint32_t	edge;		/* WS_DOCK_EDGE_* */
+	uint32_t	thickness;	/* pixels, at most half the screen */
+} ws_req_dock_edge_t;
 
 typedef struct ws_req_order {
 	ws_req_header_t	hdr;
@@ -277,8 +285,16 @@ typedef struct ws_req_cursor {
  *     When that Dock goes away or sends value 0, the next such Dock
  *     connection takes over, or else the server puts tiles back for the
  *     windows still minimized.
+ *   - WS_MSG_DOCK_SET_EDGE (ws_req_dock_edge_t, servers with
+ *     WS_SERVER_DOCK_EDGE): the screen edge this Dock sits on
+ *     (WS_DOCK_EDGE_*) and how many pixels it takes from it, measured
+ *     from the edge. Window tiling keeps that strip free. The newest
+ *     report from a Dock connection still connected counts; when that
+ *     Dock goes away or reports WS_DOCK_EDGE_NONE, the newest other
+ *     Dock's report does, or none. An edge above WS_DOCK_EDGE_BOTTOM or
+ *     a thickness over half the screen fails with EINVAL.
  *   - WS_EVENT_DOCK_STATE (WSTypes.h) after the welcome and whenever
- *     its flags change.
+ *     its flags or the Dock's edge change.
  */
 #define WS_MAX_PREVIEW		512
 

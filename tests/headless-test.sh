@@ -8,8 +8,8 @@
 # synthetic input, including minimizing a window to a tile and
 # restoring it, and the Dock's window list (wsctl dock), with minimized
 # windows handed to the Dock instead of tiles (MinimizeIntoDock), and
-# touchpad scroll phases and momentum scrolling, and the window overview
-# (Exposé).
+# the screen edge the Dock reports (WS_MSG_DOCK_SET_EDGE), touchpad
+# scroll phases and momentum scrolling, and the window overview (Exposé).
 #
 #   sh tests/headless-test.sh [BUILD_DIR]
 #
@@ -29,6 +29,8 @@ FAILS=0
 SPID=
 TPID=
 DPID=
+EPID=
+WPID=
 
 fail() {
 	echo "FAIL: $*"
@@ -41,6 +43,8 @@ pass() {
 
 cleanup() {
 	[ -n "$DPID" ] && kill "$DPID" 2>/dev/null
+	[ -n "$EPID" ] && kill "$EPID" 2>/dev/null
+	[ -n "$WPID" ] && kill "$WPID" 2>/dev/null
 	[ -n "$TPID" ] && kill "$TPID" 2>/dev/null
 	[ -n "$SPID" ] && kill "$SPID" 2>/dev/null
 	wait 2>/dev/null
@@ -289,6 +293,65 @@ DPID=
 expect_pixel 4 $((TILE_Y + 24)) 303030 "tile back once the Dock is gone"
 expect_pixel 20 $((TILE_Y + 24)) 20a050 "the tile shows W3"
 grep -q '^error' "$LOG/dock-watch.log" && fail "the Dock got errors"
+
+# The Dock's edge (WS_SERVER_DOCK_EDGE): a Dock says which screen edge
+# it keeps and how thick it is; every Dock connection hears it and
+# `wsctl dock list` shows it. The newest report counts while its Dock is
+# connected; when that Dock goes, the one before it counts again.
+# dock_edge_is EDGE THICKNESS: within two seconds
+dock_edge_is() {
+	i=0
+	while [ $i -lt 20 ]; do
+		"$B/wsctl" dock list | grep -q "^dock edge=$1 thickness=$2 " &&
+		    return 0
+		sleep 0.1
+		i=$((i + 1))
+	done
+	return 1
+}
+dock_edge_is none 0 && pass "dock list: no Dock edge yet" ||
+    fail "dock list: an edge before any Dock said so"
+"$B/wsctl" dock watch 60 >"$LOG/dock-edge-watch.log" 2>&1 &
+WPID=$!
+wait_for "$LOG/dock-edge-watch.log" "^watching" 5 || fail "no dock watch"
+"$B/wsctl" dock edge right 84 60 >"$LOG/dock-edge.log" 2>&1 &
+EPID=$!
+wait_for "$LOG/dock-edge.log" "^edge=right thickness=84 " 5 &&
+    pass "the Dock reported the right edge, 84 pixels" ||
+    fail "no dock-state with the right edge"
+dock_edge_is right 84 && pass "dock list shows the Dock's edge" ||
+    fail "dock list doesn't show the right edge"
+wait_for "$LOG/dock-edge-watch.log" "^state .* edge=right thickness=84$" 5 &&
+    pass "another Dock connection heard the edge" ||
+    fail "the watching Dock didn't hear the edge"
+"$B/wsctl" dock edge bottom 90 | grep -q "^edge=bottom thickness=90 " &&
+    pass "a newer report counts (bottom, 90)" || fail "dock edge bottom 90"
+dock_edge_is right 84 && pass "back to the right edge when that Dock went" ||
+    fail "the edge didn't fall back to the right"
+"$B/wsctl" dock edge top 100000 2>/dev/null &&
+    fail "a Dock thicker than half the screen was accepted" ||
+    pass "a Dock thicker than half the screen is refused"
+dock_edge_is right 84 && pass "a refused report changes nothing" ||
+    fail "a refused report changed the edge"
+kill "$EPID"
+wait "$EPID" 2>/dev/null
+EPID=
+dock_edge_is none 0 && pass "no edge once the Dock is gone" ||
+    fail "the edge stayed after the Dock went"
+# (after the right edge: its first state, at the welcome, said none too)
+i=0
+until sed -n '/edge=right/,$p' "$LOG/dock-edge-watch.log" |
+    grep -q '^state .* edge=none thickness=0$' || [ $i -ge 50 ]; do
+	sleep 0.1
+	i=$((i + 1))
+done
+[ $i -lt 50 ] &&
+    pass "the watching Dock heard the edge go" ||
+    fail "the watching Dock didn't hear the edge go"
+kill "$WPID"
+wait "$WPID" 2>/dev/null
+WPID=
+grep -q '^error' "$LOG/dock-edge-watch.log" && fail "the watching Dock got errors"
 
 # Touchpad scrolling (WS_SERVER_SCROLL_PHASES): a two-finger flick over
 # W1 (where nothing covers it) is began, changed..., ended when the

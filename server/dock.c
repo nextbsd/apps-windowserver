@@ -122,7 +122,81 @@ send_state(struct ws_server *srv, struct ws_client *c)
 	event_init(srv, &ev, WS_EVENT_DOCK_STATE, sizeof(ev.u.dock_state), 0);
 	ev.u.dock_state.flags = (c == srv->dock && dock_shows_minimized(srv)) ?
 	    WS_DOCK_MINIMIZED_WINDOWS : 0;
+	ev.u.dock_state.edge = srv->dock_edge;
+	ev.u.dock_state.thickness = srv->dock_thickness;
+	ev.u.dock_state.edge_client = srv->dock_edge_client;
 	client_send(srv, c, &ev, -1);
+}
+
+/* ---- the Dock's edge ---- */
+
+static const char *
+edge_name(uint32_t edge)
+{
+	static const char *names[] = { "none", "left", "right", "top",
+	    "bottom" };
+
+	return edge <= WS_DOCK_EDGE_BOTTOM ? names[edge] : "?";
+}
+
+/*
+ * The Dock's edge is the newest report of a Dock connection still
+ * connected (other than `gone`). If it changed, every Dock connection
+ * hears it.
+ */
+static void
+edge_update(struct ws_server *srv, struct ws_client *gone)
+{
+	struct ws_client *c, *best = NULL;
+
+	for (c = srv->clients; c != NULL; c = c->next)
+		if (c != gone && dock_usable(c) &&
+		    c->dock_edge != WS_DOCK_EDGE_NONE &&
+		    (best == NULL || c->dock_edge_serial > best->dock_edge_serial))
+			best = c;
+	if (best == NULL ? srv->dock_edge_client == 0 :
+	    (srv->dock_edge_client == best->id &&
+	    srv->dock_edge_serial == best->dock_edge_serial))
+		return;
+	srv->dock_edge = best != NULL ? best->dock_edge : WS_DOCK_EDGE_NONE;
+	srv->dock_thickness = best != NULL ? best->dock_thickness : 0;
+	srv->dock_edge_client = best != NULL ? best->id : 0;
+	srv->dock_edge_serial = best != NULL ? best->dock_edge_serial : 0;
+	if (best != NULL)
+		ws_info("the Dock (client %u) keeps the %s edge, %u pixels",
+		    best->id, edge_name(srv->dock_edge), srv->dock_thickness);
+	else
+		ws_info("no Dock keeps a screen edge");
+	/* Tiling (apps-windowserver#20) will lay out again here. */
+	for (c = srv->clients; c != NULL; c = c->next)
+		if (c != gone && dock_usable(c))
+			send_state(srv, c);
+}
+
+/* WS_MSG_DOCK_SET_EDGE: Dock c is on `edge`, `thickness` pixels thick.
+ * Returns 0 or an errno. */
+int
+dock_set_edge(struct ws_server *srv, struct ws_client *c, uint32_t edge,
+    uint32_t thickness)
+{
+	static uint64_t serial;
+	uint32_t limit;
+
+	if (edge > WS_DOCK_EDGE_BOTTOM)
+		return EINVAL;
+	limit = (edge == WS_DOCK_EDGE_LEFT || edge == WS_DOCK_EDGE_RIGHT) ?
+	    srv->width : srv->height;
+	if (edge == WS_DOCK_EDGE_NONE)
+		thickness = 0;
+	else if (thickness > limit / 2)
+		return EINVAL;
+	if (c->dock_edge == edge && c->dock_thickness == thickness)
+		return 0;
+	c->dock_edge = edge;
+	c->dock_thickness = thickness;
+	c->dock_edge_serial = ++serial;
+	edge_update(srv, NULL);
+	return 0;
 }
 
 /* Tiles follow who shows minimized windows: none while the Dock does,
@@ -201,6 +275,8 @@ dock_client_gone(struct ws_server *srv, struct ws_client *c)
 	dock_list_changed(srv);
 	if (srv->dock == c)
 		dock_hand_on(srv, c);
+	if (srv->dock_edge_client == c->id)
+		edge_update(srv, c);
 }
 
 /* ---- notices ---- */

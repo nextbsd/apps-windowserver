@@ -234,7 +234,9 @@ Apps see only their own windows. The Dock ([apps-dock](https://github.com/nextbs
 - **Requests.** `ws_dock_activate()` activates an app by its app id and brings its windows forward, or activates a window's app with that window in front and key (a minimized window is restored instead). `ws_dock_restore()` asks the owner of a minimized window to restore it, with the same `WS_EVENT_WINDOW_RESTORE` a double-click on its tile sends. `ws_dock_preview()` returns a scaled picture of a window (premultiplied ARGB8888 in a sealed memfd, at most `WS_MAX_PREVIEW` pixels on its longer side, with no tile or icon).
 - **Minimize into the Dock.** A Dock that can show minimized windows says so with `ws_dock_show_minimized()`. While `MinimizeIntoDock` is on, the oldest such Dock gets `WS_DOCK_MINIMIZED_WINDOWS` in `WS_EVENT_DOCK_STATE`: WindowServer draws no tiles and takes away the ones it drew, minimized windows are listed with `WS_WINDOW_INFO_IN_DOCK`, and every frame such a window commits sends the Dock `WS_EVENT_PREVIEW_CHANGED`. When that Dock goes away, another one takes over, or the tiles come back.
 
-`wsctl dock list|activate|restore|preview|watch` makes the same requests from the command line.
+- **The Dock's edge.** On servers with `WS_SERVER_DOCK_EDGE`, a Dock says which screen edge it sits on (left, right, top or bottom) and how many pixels thick it is with `ws_dock_set_edge()` (`WS_MSG_DOCK_SET_EDGE`), so that window tiling can keep that strip free. The newest report of a Dock that's still connected counts; when it goes, the one before it counts again. Every Dock connection gets the current edge, its thickness and the reporting client in `WS_EVENT_DOCK_STATE`, after the welcome and whenever it changes. Older Docks don't send it, and older servers don't set the flag, so a Dock checks for it first.
+
+`wsctl dock list|activate|restore|preview|watch|edge` makes the same requests from the command line; `wsctl dock list` ends with the Dock's edge (`dock edge=right thickness=84 client=12`).
 
 ## License
 

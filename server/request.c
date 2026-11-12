@@ -280,7 +280,8 @@ static bool
 is_dock_request(mach_msg_id_t id)
 {
 	return id == WS_MSG_DOCK_ACTIVATE || id == WS_MSG_DOCK_RESTORE ||
-	    id == WS_MSG_DOCK_PREVIEW || id == WS_MSG_DOCK_SHOW_MINIMIZED;
+	    id == WS_MSG_DOCK_PREVIEW || id == WS_MSG_DOCK_SHOW_MINIMIZED ||
+	    id == WS_MSG_DOCK_SET_EDGE;
 }
 
 static size_t
@@ -315,6 +316,8 @@ min_size(mach_msg_id_t id)
 		return sizeof(ws_req_cursor_t);
 	case WS_MSG_INJECT:
 		return sizeof(ws_req_inject_t);
+	case WS_MSG_DOCK_SET_EDGE:
+		return sizeof(ws_req_dock_edge_t);
 	default:
 		return sizeof(ws_req_header_t);
 	}
@@ -587,6 +590,14 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 	case WS_MSG_DOCK_SHOW_MINIMIZED:
 		dock_show_minimized(srv, c, value != 0);
 		break;
+	case WS_MSG_DOCK_SET_EDGE: {
+		ws_req_dock_edge_t *m = (void *)h;
+
+		if (dock_set_edge(srv, c, m->edge, m->thickness) != 0)
+			client_error(srv, c, (uint32_t)id, 0, EINVAL,
+			    "bad Dock edge or thickness");
+		break;
+	}
 	case WS_MSG_DOCK_PREVIEW:
 		handle_preview(srv, c, item, h->seq, h->window, value);
 		return;
