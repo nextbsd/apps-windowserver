@@ -77,6 +77,8 @@ pointer_motion(struct ws_server *srv, double x, double y)
 		x = srv->width - 1;
 	if (y > srv->height - 1)
 		y = srv->height - 1;
+	/* A finger on the touchpad again: momentum scrolling stops. */
+	scroll_touch(srv);
 	srv->ptr_x = x;
 	srv->ptr_y = y;
 	cursor_moved(srv);
@@ -131,6 +133,7 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 
 	if (button >= 32)
 		return;
+	scroll_touch(srv);
 	mask = 1u << button;
 	if (pressed) {
 		if (srv->buttons & mask)
@@ -185,17 +188,34 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 	}
 }
 
-void
-pointer_scroll(struct ws_server *srv, double dx, double dy, int32_t v120_x,
-    int32_t v120_y, uint32_t source)
+/* The window a scroll at the pointer goes to, or NULL. */
+struct ws_window *
+pointer_scroll_target(struct ws_server *srv)
 {
 	struct ws_window *w;
-	ws_event_t ev;
 
 	w = srv->grab != NULL ? srv->grab : window_at(srv, srv->ptr_x,
 	    srv->ptr_y);
 	if (w == NULL || w->tile_for != NULL)
+		return NULL;
+	return w;
+}
+
+/*
+ * Send a scroll event to w. ScrollSpeed scales the pixel deltas (not
+ * the wheel's detents) and NaturalScrolling turns them around.
+ */
+void
+pointer_scroll_send(struct ws_server *srv, struct ws_window *w, double dx,
+    double dy, int32_t v120_x, int32_t v120_y, uint32_t source,
+    uint32_t phase, uint32_t momentum_phase)
+{
+	ws_event_t ev;
+
+	if (w == NULL || w->owner->dead)
 		return;
+	dx *= srv->cfg.scroll_speed;
+	dy *= srv->cfg.scroll_speed;
 	if (srv->cfg.natural_scrolling) {
 		dx = -dx;
 		dy = -dy;
@@ -211,5 +231,17 @@ pointer_scroll(struct ws_server *srv, double dx, double dy, int32_t v120_x,
 	ev.u.scroll.v120_y = v120_y;
 	ev.u.scroll.source = source;
 	ev.u.scroll.modifiers = srv->modifiers;
+	ev.u.scroll.phase = phase;
+	ev.u.scroll.momentum_phase = momentum_phase;
 	client_send(srv, w->owner, &ev, -1);
+}
+
+/* A wheel or other scroll without phases (touchpad scrolls: scroll.c). */
+void
+pointer_scroll(struct ws_server *srv, double dx, double dy, int32_t v120_x,
+    int32_t v120_y, uint32_t source)
+{
+	scroll_touch(srv);
+	pointer_scroll_send(srv, pointer_scroll_target(srv), dx, dy, v120_x,
+	    v120_y, source, WS_SCROLL_PHASE_NONE, WS_SCROLL_PHASE_NONE);
 }

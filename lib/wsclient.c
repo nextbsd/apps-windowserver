@@ -1218,6 +1218,18 @@ ws_inject_scroll(ws_connection_t *c, double dx, double dy)
 	return inject(c, WS_INJECT_SCROLL, 0, dx, dy, 0, NULL);
 }
 
+WS_API int
+ws_inject_scroll_finger(ws_connection_t *c, double dx, double dy)
+{
+	return inject(c, WS_INJECT_SCROLL_FINGER, 0, dx, dy, 0, NULL);
+}
+
+WS_API int
+ws_inject_hold(ws_connection_t *c, int down)
+{
+	return inject(c, WS_INJECT_HOLD, down ? 1 : 0, 0, 0, 0, NULL);
+}
+
 WS_API const char *
 ws_event_name(uint16_t type)
 {

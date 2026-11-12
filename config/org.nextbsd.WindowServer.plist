@@ -32,10 +32,28 @@
 	<!-- skip kbdmux0 and sysmouse; only useful with per-device keyboards -->
 	<key>IgnoreMuxDevices</key>
 	<false/>
+	<!-- Touchpad. Tapping clicks (one finger left, two right); tap,
+	     then drag; SecondaryClick: TwoFingers, BottomRightCorner or
+	     Off. ThreeFingerDrag moves three-finger swipes to four
+	     fingers. Momentum scrolling carries on after the fingers
+	     lift. PointerSpeed is -1 to 1 (every pointing device);
+	     ScrollSpeed multiplies scroll distances. -->
 	<key>TapToClick</key>
+	<true/>
+	<key>TapToDrag</key>
+	<true/>
+	<key>SecondaryClick</key>
+	<string>TwoFingers</string>
+	<key>ThreeFingerDrag</key>
+	<false/>
+	<key>MomentumScrolling</key>
 	<true/>
 	<key>NaturalScrolling</key>
 	<false/>
+	<key>PointerSpeed</key>
+	<real>0</real>
+	<key>ScrollSpeed</key>
+	<real>1</real>
 	<!-- Ctrl+Alt+Backspace stops the server (development) -->
 	<key>AllowTerminate</key>
 	<true/>

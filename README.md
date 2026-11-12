@@ -62,12 +62,13 @@ What works, tested headless:
 - Minimized windows as live tiles along the bottom of the screen (see [Minimized windows](#minimized-windows)).
 - The Dock's view of every app's windows, with change notices, activation, restoring and previews (see [The Dock](#the-dock)).
 - Snapshots and synthetic input for testing.
+- Touchpad scroll phases and momentum scrolling, with synthetic two-finger scrolls (see [Touchpad](#touchpad)).
 
 Written but only compiled:
 
 - DRM/KMS output. It picks the card that has a connected display, sets the preferred mode, uses two dumb buffers with page flips (or `drmModeSetCrtc` if flips fail), and the hardware cursor, with a software cursor as fallback.
 - VT handling: no VT switching. The server takes over the VT that is on screen when it starts, puts it in `KD_GRAPHICS` and `K_RAW` with a raw termios, and locks switching with `VT_LOCKSWITCH`, so Ctrl+Alt+F*n* and `vidcontrol -s` can't take the screen away. It refuses to start if that VT is already in graphics mode or controlled by another process (Xorg, or another WindowServer). On exit, `SIGTERM`/`SIGINT`/`SIGHUP` or a crash it unlocks switching, gives the same VT back its VT mode, `KD_TEXT`, keyboard mode and termios, and drops DRM master, so the console comes back as it was.
-- libinput on seat0 through the IOKit libudev, with xkbcommon (`evdev` rules), relative and absolute pointers, wheel and touchpad scrolling. Power and sleep keys are logged, never typed.
+- libinput on seat0 through the IOKit libudev, with xkbcommon (`evdev` rules), relative and absolute pointers, wheel and touchpad scrolling, and the touchpad settings in [Touchpad](#touchpad). Power and sleep keys are logged, never typed.
 - Dropping from root to `_windowserver` after the devices are open.
 
 Not done yet:
@@ -75,7 +76,7 @@ Not done yet:
 - The GNUstep backend (`libgnustep-nextbsd` in the libs-back fork) and a real `ws-session`.
 - Waiting for the GPU kext's IOKit match, and display hotplug through IOKit.
 - Images for the standard cursors other than the arrow.
-- Touch, tablets, gestures and switches. Per-device keyboard settings.
+- Touch, tablets, most gestures and switches. Per-device keyboard settings.
 - Skipping windows hidden behind opaque ones while compositing.
 - GPU compositing (EGL/GBM), several displays, HiDPI.
 - A focus-stealing policy: today any app can make itself active.
@@ -107,7 +108,7 @@ build/wsctl key a              # type "a" into the active app
 build/wsctl snapshot out.ppm   # save the screen
 ```
 
-`wstest` prints every event it gets. `tests/headless-test.sh` (`gmake check`) does all of this with its own service name and socket, and checks the screen colours, the order of the activation events, that only the active app gets keys, joining an app, the XKB events, XRGB8888 buffers, restack notices, and minimizing: the tile's picture, icon and live update, selecting and dragging it, and restoring the window with a double-click. It also checks the Dock's requests (`wsctl dock`): that apps can't list other apps' windows, the list with app ids, change notices, minimized windows going into the Dock instead of tiles, previews, activating and restoring from the Dock, and the tiles coming back when the Dock goes away.
+`wstest` prints every event it gets. `tests/headless-test.sh` (`gmake check`) does all of this with its own service name and socket, and checks the screen colours, the order of the activation events, that only the active app gets keys, joining an app, the XKB events, XRGB8888 buffers, restack notices, and minimizing: the tile's picture, icon and live update, selecting and dragging it, and restoring the window with a double-click. It also checks the Dock's requests (`wsctl dock`): that apps can't list other apps' windows, the list with app ids, change notices, minimized windows going into the Dock instead of tiles, previews, activating and restoring from the Dock, and the tiles coming back when the Dock goes away. Then it checks touchpad scrolling: a two-finger flick's phases, momentum that slows down and stops when a finger rests on the touchpad, and no momentum when the fingers stopped before lifting.
 
 `kill -USR1` makes the server write a snapshot to `/tmp/WindowServer-snapshot.ppm`.
 
@@ -156,6 +157,28 @@ Clients without the flag get none of these.
 ### Restack notices
 
 When the server itself moves a window in the stack or orders it out (today that is RaiseOnClick), it sends the window's owner `WS_EVENT_WINDOW_ORDERED` (`ws_event_ordered_t`): `WS_ORDER_ABOVE` with the owner's own nearest visible windows below and above it, or `WS_ORDER_OUT`. A client's own ordering, level and destroy requests never cause one. An X server uses it to keep its stacking order right; clients that don't care ignore it. Servers that send it set `WS_SERVER_ORDERED`.
+
+### Touchpad
+
+Two-finger scrolling works as on a Mac. Servers that do this set `WS_SERVER_SCROLL_PHASES`.
+
+- **Scroll phases.** `ws_event_scroll_t` has two fields at its end, `phase` and `momentum_phase`, with the `NSEventPhase` values (`WS_SCROLL_PHASE_*`). A touchpad scroll (`WS_SCROLL_FINGER`) is one `BEGAN` event, `CHANGED` events, and an `ENDED` event with no delta when the fingers lift. All of it goes to the window the scroll started over. Wheel and other scrolls have both phases `NONE`. Older clients read the event without the new fields, and older servers send it without them, so they read as 0 (`NONE`). `WS_PROTOCOL_VERSION` stays 1.
+- **Momentum scrolling.** If the fingers were still moving when they lifted, the scroll carries on from their speed and slows down with friction, about 1.5 s after a fast flick: events with `phase` `NONE` and `momentum_phase` `BEGAN`, `CHANGED`..., then `ENDED` with no delta. It stops at once when a finger touches the touchpad again (libinput's hold gesture, a new scroll, pointer motion or a click). Apps that don't look at the phases just see more scroll events.
+- **Clicks.** Tapping is a click (one finger left, two right, three middle); tap and drag is on, without drag lock. A two-finger click is a secondary click (libinput's clickfinger method), or a click in the bottom-right corner, or neither, as `SecondaryClick` says.
+- **Three-finger drag**, macOS's accessibility option, is off by default. When it's on, libinput turns three-finger swipes into four-finger ones, and the WindowServer gestures that use three fingers need four.
+
+| Key | Default | |
+|---|---|---|
+| `TapToClick` | `true` | Tap to click. |
+| `TapToDrag` | `true` | Tap, then drag (no drag lock). |
+| `SecondaryClick` | `TwoFingers` | `TwoFingers` (a two-finger click or tap), `BottomRightCorner`, or `Off` (every touchpad click and tap is a left click). |
+| `ThreeFingerDrag` | `false` | Drag with three fingers without clicking. |
+| `MomentumScrolling` | `true` | Scrolling carries on after the fingers lift. |
+| `NaturalScrolling` | `false` | Content follows the fingers. |
+| `PointerSpeed` | `0` | libinput's pointer acceleration speed, -1 (slowest) to 1, for every pointing device. |
+| `ScrollSpeed` | `1` | Multiplies the scroll distance (touchpad, trackpoint and wheel pixel deltas, not the wheel's detents). |
+
+`wsctl scroll DX DY finger` injects one two-finger scroll step (`0 0` lifts the fingers), `wsctl flick DX DY [STEPS]` a quick two-finger scroll and lift, and `wsctl hold` fingers resting on the touchpad, like the rest of the synthetic input: on a headless server, or for root and the server's own user.
 
 ### Minimized windows
 

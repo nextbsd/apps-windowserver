@@ -150,6 +150,25 @@ keymap_detail(const ws_event_keymap_t *km, char *buf, size_t len)
 		close(km->fd);
 }
 
+static const char *
+phase_name(uint32_t phase)
+{
+	switch (phase) {
+	case WS_SCROLL_PHASE_NONE:
+		return "none";
+	case WS_SCROLL_PHASE_BEGAN:
+		return "began";
+	case WS_SCROLL_PHASE_CHANGED:
+		return "changed";
+	case WS_SCROLL_PHASE_ENDED:
+		return "ended";
+	case WS_SCROLL_PHASE_CANCELLED:
+		return "cancelled";
+	default:
+		return "other";
+	}
+}
+
 static void
 print_event(ws_connection_t *conn, const ws_event_t *ev, void *ctx)
 {
@@ -177,8 +196,10 @@ print_event(ws_connection_t *conn, const ws_event_t *ev, void *ctx)
 		    ev->u.pointer.click_count, ev->u.pointer.modifiers);
 		break;
 	case WS_EVENT_SCROLL:
-		snprintf(detail, sizeof(detail), "dx=%.2f dy=%.2f source=%u",
-		    ev->u.scroll.dx, ev->u.scroll.dy, ev->u.scroll.source);
+		snprintf(detail, sizeof(detail), "dx=%.2f dy=%.2f source=%u "
+		    "phase=%s momentum=%s", ev->u.scroll.dx, ev->u.scroll.dy,
+		    ev->u.scroll.source, phase_name(ev->u.scroll.phase),
+		    phase_name(ev->u.scroll.momentum_phase));
 		break;
 	case WS_EVENT_KEY_DOWN:
 	case WS_EVENT_KEY_UP:

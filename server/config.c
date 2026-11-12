@@ -19,7 +19,7 @@
 
 #include "server.h"
 
-enum ctype { C_STR, C_INT, C_BOOL, C_COLOR };
+enum ctype { C_STR, C_INT, C_BOOL, C_COLOR, C_REAL };
 
 struct ckey {
 	const char	*name;
@@ -32,6 +32,7 @@ struct ckey {
 		  sizeof(((struct ws_config *)0)->f) }
 #define I(n, f)	{ n, C_INT, offsetof(struct ws_config, f), sizeof(int) }
 #define B(n, f)	{ n, C_BOOL, offsetof(struct ws_config, f), sizeof(bool) }
+#define R(n, f)	{ n, C_REAL, offsetof(struct ws_config, f), sizeof(double) }
 
 static const struct ckey keys[] = {
 	S("KeyboardRules", keyboard_rules),
@@ -45,6 +46,12 @@ static const struct ckey keys[] = {
 	B("RaiseOnClick", raise_on_click),
 	B("IgnoreMuxDevices", ignore_mux_devices),
 	B("TapToClick", tap_to_click),
+	B("TapToDrag", tap_to_drag),
+	B("ThreeFingerDrag", three_finger_drag),
+	S("SecondaryClick", secondary_click),
+	R("PointerSpeed", pointer_speed),
+	R("ScrollSpeed", scroll_speed),
+	B("MomentumScrolling", momentum_scrolling),
 	B("NaturalScrolling", natural_scrolling),
 	B("AllowTerminate", allow_terminate),
 	B("HardwareCursor", hardware_cursor),
@@ -74,6 +81,13 @@ config_defaults(struct ws_config *cfg)
 	cfg->raise_on_click = true;
 	cfg->ignore_mux_devices = false;
 	cfg->tap_to_click = true;
+	cfg->tap_to_drag = true;
+	cfg->three_finger_drag = false;
+	strlcpy(cfg->secondary_click, "TwoFingers",
+	    sizeof(cfg->secondary_click));
+	cfg->pointer_speed = 0.0;
+	cfg->scroll_speed = 1.0;
+	cfg->momentum_scrolling = true;
 	cfg->natural_scrolling = false;
 	cfg->allow_terminate = true;
 	cfg->hardware_cursor = true;
@@ -126,6 +140,16 @@ config_set(struct ws_config *cfg, const struct ckey *k, const char *value)
 			return -1;
 		*(uint32_t *)(void *)p = (uint32_t)v & 0xffffff;
 		return 0;
+	case C_REAL: {
+		double d;
+
+		errno = 0;
+		d = strtod(value, &end);
+		if (errno != 0 || *end != '\0' || end == value)
+			return -1;
+		*(double *)(void *)p = d;
+		return 0;
+	}
 	}
 	return -1;
 }

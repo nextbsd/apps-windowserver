@@ -121,6 +121,8 @@ handle_kevent(struct ws_server *srv, struct kevent *kev)
 			keyboard_repeat_fire(srv);
 		else if (kev->ident == TIMER_HOUSEKEEPING)
 			clients_housekeeping(srv);
+		else if (kev->ident == TIMER_MOMENTUM)
+			scroll_momentum_fire(srv);
 		return;
 	}
 	type = tag < 64 ? (int)tag : *(int *)kev->udata;

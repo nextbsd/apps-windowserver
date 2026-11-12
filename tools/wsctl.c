@@ -30,7 +30,9 @@ usage(void)
 	    "       wsctl down|up [left|right|middle]\n"
 	    "       wsctl key NAME          (e.g. a, Return, shift+a, ctrl+q)\n"
 	    "       wsctl keydown|keyup NAME\n"
-	    "       wsctl scroll DX DY\n"
+	    "       wsctl scroll DX DY [finger]\n"
+	    "       wsctl flick DX DY [STEPS]  (two-finger scroll, then lift)\n"
+	    "       wsctl hold              (fingers rest on the touchpad)\n"
 	    "       wsctl sync\n"
 	    "       wsctl dock list [-a]     (every window, with ids; -a: hidden too)\n"
 	    "       wsctl dock activate APP_ID [WINDOW]\n"
@@ -313,6 +315,28 @@ main(int argc, char **argv)
 		r = ws_inject_key(c, argv[2], strcmp(cmd, "keydown") == 0);
 	} else if (strcmp(cmd, "scroll") == 0 && argc == 4) {
 		r = ws_inject_scroll(c, atof(argv[2]), atof(argv[3]));
+	} else if (strcmp(cmd, "scroll") == 0 && argc == 5 &&
+	    strcmp(argv[4], "finger") == 0) {
+		r = ws_inject_scroll_finger(c, atof(argv[2]), atof(argv[3]));
+	} else if (strcmp(cmd, "flick") == 0 && (argc == 4 || argc == 5)) {
+		/* DX, DY in STEPS finger scrolls 10 ms apart, then the lift:
+		 * fast enough for momentum scrolling. */
+		int steps = argc == 5 ? atoi(argv[4]) : 8;
+		struct timespec ts = { 0, 10 * 1000 * 1000 };
+
+		if (steps < 1)
+			steps = 1;
+		for (i = 0; r == 0 && i < steps; i++) {
+			r = ws_inject_scroll_finger(c, atof(argv[2]) / steps,
+			    atof(argv[3]) / steps);
+			nanosleep(&ts, NULL);
+		}
+		if (r == 0)
+			r = ws_inject_scroll_finger(c, 0, 0);
+	} else if (strcmp(cmd, "hold") == 0 && argc == 2) {
+		r = ws_inject_hold(c, 1);
+		if (r == 0)
+			r = ws_inject_hold(c, 0);
 	} else if (strcmp(cmd, "sync") == 0) {
 		r = ws_sync(c);
 	} else {
