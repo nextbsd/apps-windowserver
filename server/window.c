@@ -9,6 +9,7 @@
  */
 
 #include <errno.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -54,19 +55,77 @@ rect_contains(const ws_rect_t *r, double x, double y)
 	    y < (double)r->y + r->height;
 }
 
+/* w takes pointer events at (x, y): in its frame and its input region. */
+static bool
+window_hit(const struct ws_window *w, double x, double y)
+{
+	if (w->flags & WS_WINDOW_IGNORES_MOUSE)
+		return false;
+	if (!rect_contains(&w->frame, x, y))
+		return false;
+	if (!w->has_input_region)
+		return true;
+	return pixman_region32_contains_point(
+	    (pixman_region32_t *)&w->input_region,
+	    (int)floor(x) - w->frame.x, (int)floor(y) - w->frame.y, NULL) != 0;
+}
+
 /* Topmost visible window under (x, y) that takes pointer events. */
 struct ws_window *
 window_at(struct ws_server *srv, double x, double y)
 {
 	struct ws_window *w;
 
-	for (w = srv->stack_top; w != NULL; w = w->below) {
-		if (w->flags & WS_WINDOW_IGNORES_MOUSE)
-			continue;
-		if (rect_contains(&w->frame, x, y))
+	for (w = srv->stack_top; w != NULL; w = w->below)
+		if (window_hit(w, x, y))
 			return w;
-	}
 	return NULL;
+}
+
+/*
+ * The window under (x, y) if it is one of connection c's, else NULL
+ * (another connection's window, a tile or the desktop is there): what
+ * a pointer grab or query (WS_MSG_POINTER_GRAB, _QUERY_POINTER) calls
+ * c's window under the pointer.
+ */
+struct ws_window *
+window_at_owned(struct ws_server *srv, struct ws_client *c, double x, double y)
+{
+	struct ws_window *w = window_at(srv, x, y);
+
+	return w != NULL && w->owner == c && w->tile_for == NULL ? w : NULL;
+}
+
+/*
+ * WS_MSG_WINDOW_SET_INPUT_REGION: replace the input region with rects,
+ * or add them (WS_REGION_APPEND), or go back to the whole window
+ * (WS_REGION_RESET). It isn't clipped: window_hit() checks the frame
+ * first, so the region fits whatever size the window has (an X server
+ * sends the new shape before the resize).
+ */
+void
+window_set_input_region(struct ws_server *srv, struct ws_window *w,
+    const ws_rect_t *rects, unsigned n, uint32_t flags)
+{
+	unsigned i;
+
+	if (flags & WS_REGION_RESET) {
+		w->has_input_region = false;
+		pixman_region32_clear(&w->input_region);
+		pointer_recheck(srv);
+		return;
+	}
+	if ((flags & WS_REGION_APPEND) == 0 || !w->has_input_region)
+		pixman_region32_clear(&w->input_region);
+	w->has_input_region = true;
+	for (i = 0; i < n; i++) {
+		if (rects[i].width <= 0 || rects[i].height <= 0)
+			continue;
+		pixman_region32_union_rect(&w->input_region, &w->input_region,
+		    rects[i].x, rects[i].y, (unsigned)rects[i].width,
+		    (unsigned)rects[i].height);
+	}
+	pointer_recheck(srv);
 }
 
 /* ---- stack ---- */
@@ -207,6 +266,9 @@ app_activate(struct ws_server *srv, struct ws_client *c, struct ws_window *key)
 
 	if (c != NULL && (c->dead || (c->flags & WS_CONNECT_TOOL)))
 		return;
+	/* Another app takes over: a pointer grab of the old one ends. */
+	if (srv->pgrab != NULL && srv->pgrab->app != c)
+		pointer_ungrab(srv, srv->pgrab, true);
 	if (old == c) {
 		if (c != NULL && key != NULL)
 			set_key_window(srv, c, key);
@@ -326,16 +388,50 @@ clamp_level(int32_t level)
 	return level;
 }
 
+/*
+ * WS_MSG_RESERVE_WINDOW_IDS: a block of `count` ids for c to name its
+ * new windows with, from the same space as the server's own ids.
+ */
+int
+window_reserve_ids(struct ws_server *srv, struct ws_client *c, uint32_t count,
+    uint32_t *base)
+{
+	if (count == 0 || count > WS_MAX_WINDOW_IDS)
+		return EINVAL;
+	if (srv->next_window_id > UINT32_MAX - count)
+		return ENOSPC;
+	*base = srv->next_window_id;
+	srv->next_window_id += count;
+	c->wid_next = *base;
+	c->wid_end = *base + count;
+	return 0;
+}
+
+/* May c create a window with id `id` (from its block, not used yet)? */
+int
+window_create_check_id(struct ws_server *srv, struct ws_client *c, uint32_t id)
+{
+	(void)srv;
+	if (id == 0 || id < c->wid_next || id >= c->wid_end)
+		return EINVAL;
+	return 0;
+}
+
+/* id: one window_create_check_id() accepted, or 0 for the next free one. */
 struct ws_window *
 window_create(struct ws_server *srv, struct ws_client *c, const ws_rect_t *frame,
-    int32_t level, uint32_t flags, const char *title)
+    int32_t level, uint32_t flags, const char *title, uint32_t id)
 {
 	struct ws_window *w;
 
 	w = calloc(1, sizeof(*w));
 	if (w == NULL)
 		return NULL;
-	w->id = srv->next_window_id++;
+	if (id != 0) {
+		w->id = id;
+		c->wid_next = id + 1;
+	} else
+		w->id = srv->next_window_id++;
 	w->owner = c;
 	w->level = clamp_level(level);
 	w->flags = flags;
@@ -346,6 +442,7 @@ window_create(struct ws_server *srv, struct ws_client *c, const ws_rect_t *frame
 		w->frame.height = 0;
 	strlcpy(w->title, title, sizeof(w->title));
 	pixman_region32_init(&w->pending_damage);
+	pixman_region32_init(&w->input_region);
 	w->next = srv->windows;
 	srv->windows = w;
 	dock_list_changed(srv);
@@ -392,6 +489,12 @@ window_destroy(struct ws_server *srv, struct ws_window *w)
 	else
 		buffer_unref(srv, w->buffer);
 	pixman_region32_fini(&w->pending_damage);
+	pixman_region32_fini(&w->input_region);
+	if (w->cursor_buffer != NULL) {
+		cursor_buffer_gone(srv, w->cursor_buffer);
+		buffer_unref(srv, w->cursor_buffer);
+		w->cursor_buffer = NULL;
+	}
 	for (pp = &srv->windows; *pp != NULL; pp = &(*pp)->next)
 		if (*pp == w) {
 			*pp = w->next;
@@ -632,12 +735,21 @@ window_damage(struct ws_server *srv, struct ws_window *w,
 	}
 }
 
+/*
+ * Commit what was attached and damaged. With WS_COMMIT_SET_FRAME the
+ * window takes `frame` in the same step (WS_SERVER_COMMIT_FRAME), so the
+ * screen never shows the new frame with the old buffer: nothing is
+ * composited between the two.
+ */
 void
-window_commit(struct ws_server *srv, struct ws_window *w, uint32_t flags)
+window_commit(struct ws_server *srv, struct ws_window *w, uint32_t flags,
+    const ws_rect_t *frame)
 {
 	pixman_region32_t r;
 	bool full = false;
 
+	if ((flags & WS_COMMIT_SET_FRAME) && frame != NULL)
+		window_set_frame(srv, w, frame);
 	if (w->pending_attach) {
 		struct ws_buffer *old = w->buffer;
 

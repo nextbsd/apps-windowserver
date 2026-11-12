@@ -471,6 +471,8 @@ overview_open(struct ws_server *srv, int mode)
 	if (overview_active(srv) && ov->mode == mode &&
 	    (mode != WS_OVERVIEW_APP || ov->app_id == app->id))
 		return;
+	/* The overview takes the pointer: a grab ends. */
+	pointer_ungrab(srv, srv->pgrab, true);
 	ov->mode = mode;
 	ov->app_id = mode == WS_OVERVIEW_APP ? app->id : 0;
 	ov->selected = -1;

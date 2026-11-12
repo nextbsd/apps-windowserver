@@ -5,8 +5,15 @@
  * Pointer routing: hover, implicit grab while a button is held, click
  * activation and click counting. Tiles of minimized windows are the
  * server's own: they get no events, and tile.c handles their clicks.
+ *
+ * A connection may also grab the pointer (WS_MSG_POINTER_GRAB, see
+ * "Pointer grabs" in WSProtocol.h): with WS_GRAB_POINTER every event
+ * goes to it, hover only ever names one of its windows, and a press
+ * activates nothing. Pointer tracking (WS_MSG_POINTER_TRACK) sends the
+ * active app's tracking connections motion over anything else too.
  */
 
+#include <errno.h>
 #include <math.h>
 #include <string.h>
 
@@ -15,37 +22,89 @@
 #define DOUBLE_CLICK_USEC	500000u
 #define DOUBLE_CLICK_DIST	4.0
 
+/*
+ * A pointer event about window w to its owner, or, with w NULL, to
+ * connection `to` about none of its windows (hdr.window 0, screen
+ * position).
+ */
 static void
-send_pointer(struct ws_server *srv, struct ws_window *w, uint16_t type,
-    uint32_t button, uint32_t click_count)
+send_pointer_to(struct ws_server *srv, struct ws_client *to,
+    struct ws_window *w, uint16_t type, uint32_t button, uint32_t click_count)
 {
 	ws_event_t ev;
 
-	if (w == NULL || w->tile_for != NULL)
+	if (w != NULL) {
+		if (w->tile_for != NULL)
+			return;
+		to = w->owner;
+	}
+	if (to == NULL || to->dead)
 		return;
-	event_init(srv, &ev, type, sizeof(ev.u.pointer), w->id);
-	ev.u.pointer.x = srv->ptr_x - w->frame.x;
-	ev.u.pointer.y = srv->ptr_y - w->frame.y;
+	event_init(srv, &ev, type, sizeof(ev.u.pointer), w != NULL ? w->id : 0);
+	ev.u.pointer.x = srv->ptr_x - (w != NULL ? w->frame.x : 0);
+	ev.u.pointer.y = srv->ptr_y - (w != NULL ? w->frame.y : 0);
 	ev.u.pointer.screen_x = srv->ptr_x;
 	ev.u.pointer.screen_y = srv->ptr_y;
 	ev.u.pointer.button = button;
 	ev.u.pointer.click_count = click_count;
 	ev.u.pointer.buttons = srv->buttons;
 	ev.u.pointer.modifiers = srv->modifiers;
-	client_send(srv, w->owner, &ev, -1);
+	client_send(srv, to, &ev, -1);
 }
 
-/* Recompute the window under the pointer (not while a button is held). */
+static void
+send_pointer(struct ws_server *srv, struct ws_window *w, uint16_t type,
+    uint32_t button, uint32_t click_count)
+{
+	if (w != NULL)
+		send_pointer_to(srv, NULL, w, type, button, click_count);
+}
+
+/* With WS_GRAB_POINTER: everything goes to the grabbing connection. */
+static bool
+grabbed(struct ws_server *srv)
+{
+	return srv->pgrab != NULL && srv->pgrab_mode == WS_GRAB_POINTER;
+}
+
+/*
+ * Motion with hdr.window 0 to the active app's tracking connections
+ * (WS_MSG_POINTER_TRACK) that aren't getting this motion already: the
+ * pointer is over none of their windows.
+ */
+static void
+send_tracking(struct ws_server *srv, struct ws_window *target)
+{
+	struct ws_client *c;
+
+	if (srv->active == NULL)
+		return;
+	for (c = srv->clients; c != NULL; c = c->next)
+		if (c->pointer_track && !c->dead && c->app == srv->active &&
+		    (target == NULL || target->tile_for != NULL ||
+		    target->owner != c))
+			send_pointer_to(srv, c, NULL, WS_EVENT_MOUSE_MOVED, 0, 0);
+}
+
+/*
+ * Recompute the window under the pointer (not while a button is held,
+ * unless the pointer is grabbed: then it's the window under it if that
+ * is one of the grabbing connection's, else none).
+ */
 void
 pointer_recheck(struct ws_server *srv)
 {
 	struct ws_window *w;
 
-	if (srv->grab != NULL)
+	if (srv->grab != NULL && !grabbed(srv))
 		return;
 	/* While the overview is open, no window is under the pointer. */
-	w = overview_active(srv) ? NULL : window_at(srv, srv->ptr_x,
-	    srv->ptr_y);
+	if (overview_active(srv))
+		w = NULL;
+	else if (grabbed(srv))
+		w = window_at_owned(srv, srv->pgrab, srv->ptr_x, srv->ptr_y);
+	else
+		w = window_at(srv, srv->ptr_x, srv->ptr_y);
 	if (w == srv->hover)
 		return;
 	if (srv->hover != NULL)
@@ -68,6 +127,115 @@ pointer_window_gone(struct ws_server *srv, struct ws_window *w)
 	pointer_recheck(srv);
 }
 
+/*
+ * End c's pointer grab, if it holds it. notify: the server ends it, not
+ * c (WS_EVENT_POINTER_UNGRABBED).
+ */
+void
+pointer_ungrab(struct ws_server *srv, struct ws_client *c, bool notify)
+{
+	ws_event_t ev;
+	bool was_grabbed;
+
+	if (c == NULL || srv->pgrab != c)
+		return;
+	was_grabbed = grabbed(srv);
+	srv->pgrab = NULL;
+	srv->pgrab_mode = 0;
+	ws_debug("client %u's pointer grab ended%s", c->id,
+	    notify ? " by the server" : "");
+	if (notify && !c->dead) {
+		event_init(srv, &ev, WS_EVENT_POINTER_UNGRABBED, 0, 0);
+		client_send(srv, c, &ev, -1);
+	}
+	if (!was_grabbed)
+		return;
+	/* Buttons still held: their release goes where the implicit grab
+	 * would have it, the window under the pointer now. */
+	if (srv->buttons != 0) {
+		srv->grab = srv->hover;
+		srv->grab_suppressed = false;
+	}
+	pointer_recheck(srv);
+	cursor_update(srv);
+}
+
+/* WS_MSG_POINTER_GRAB: only the active app, one connection at a time. */
+int
+pointer_grab(struct ws_server *srv, struct ws_client *c, uint32_t mode)
+{
+	if (mode != WS_GRAB_POINTER && mode != WS_GRAB_OUTSIDE)
+		return EINVAL;
+	if ((c->flags & WS_CONNECT_TOOL) || c->app != srv->active ||
+	    overview_active(srv))
+		return EPERM;
+	if (srv->pgrab != NULL && srv->pgrab != c)
+		return EBUSY;
+	srv->pgrab = c;
+	srv->pgrab_mode = mode;
+	ws_debug("client %u grabbed the pointer (%s)", c->id,
+	    mode == WS_GRAB_POINTER ? "all events" : "outside presses");
+	if (mode == WS_GRAB_POINTER) {
+		/* From now on only c's windows are under the pointer. */
+		if (srv->hover != NULL && srv->hover->owner != c) {
+			send_pointer(srv, srv->hover, WS_EVENT_MOUSE_EXITED, 0, 0);
+			srv->hover = NULL;
+		}
+		pointer_recheck(srv);
+		cursor_update(srv);
+	}
+	return 0;
+}
+
+/*
+ * WS_MSG_WARP_POINTER: the active app, while the pointer is over one of
+ * its windows (or a button pressed in one is held), or the connection
+ * holding the pointer grab. (x, y) is local to w, or the screen's.
+ */
+int
+pointer_warp(struct ws_server *srv, struct ws_client *c, struct ws_window *w,
+    double x, double y)
+{
+	struct ws_window *t = srv->grab != NULL ? srv->grab : srv->hover;
+
+	if ((c->flags & WS_CONNECT_TOOL) || c->app != srv->active ||
+	    overview_active(srv))
+		return EPERM;
+	if (srv->pgrab != c && (t == NULL || t->tile_for != NULL ||
+	    t->owner->app != c->app))
+		return EPERM;
+	if (!isfinite(x) || !isfinite(y))
+		return EINVAL;
+	if (w != NULL) {
+		x += w->frame.x;
+		y += w->frame.y;
+	}
+	pointer_motion(srv, x, y);
+	return 0;
+}
+
+/* WS_MSG_QUERY_POINTER: the active app, or a connection under the pointer. */
+int
+pointer_query(struct ws_server *srv, struct ws_client *c,
+    ws_pointer_info_t *info)
+{
+	struct ws_window *w;
+
+	if (c->flags & WS_CONNECT_TOOL)
+		return EPERM;
+	w = overview_active(srv) ? NULL :
+	    window_at_owned(srv, c, srv->ptr_x, srv->ptr_y);
+	if (c->app != srv->active && w == NULL)
+		return EPERM;
+	memset(info, 0, sizeof(*info));
+	info->x = srv->ptr_x;
+	info->y = srv->ptr_y;
+	info->buttons = srv->buttons;
+	info->modifiers = srv->modifiers;
+	info->window = w != NULL ? w->id : 0;
+	return 0;
+}
+
 void
 pointer_motion(struct ws_server *srv, double x, double y)
 {
@@ -88,7 +256,14 @@ pointer_motion(struct ws_server *srv, double x, double y)
 		overview_motion(srv);
 		return;
 	}
+	if (grabbed(srv)) {
+		pointer_recheck(srv);
+		send_pointer_to(srv, srv->pgrab, srv->hover, srv->buttons != 0 ?
+		    WS_EVENT_MOUSE_DRAGGED : WS_EVENT_MOUSE_MOVED, 0, 0);
+		return;
+	}
 	if (srv->grab != NULL) {
+		send_tracking(srv, srv->grab);
 		if (srv->grab->tile_for != NULL) {
 			if (srv->buttons & (1u << WS_BUTTON_LEFT))
 				tile_drag(srv, srv->grab);
@@ -101,6 +276,7 @@ pointer_motion(struct ws_server *srv, double x, double y)
 	pointer_recheck(srv);
 	if (srv->hover != NULL)
 		send_pointer(srv, srv->hover, WS_EVENT_MOUSE_MOVED, 0, 0);
+	send_tracking(srv, srv->hover);
 }
 
 static uint32_t
@@ -153,6 +329,41 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 	}
 	if (!pressed && (srv->ov.buttons & mask)) {
 		srv->ov.buttons &= ~mask;
+		return;
+	}
+	/* A popup grab hears about a press outside its windows, and ends. */
+	if (pressed && srv->buttons == 0 && srv->pgrab != NULL &&
+	    srv->pgrab_mode == WS_GRAB_OUTSIDE && !overview_active(srv) &&
+	    window_at_owned(srv, srv->pgrab, srv->ptr_x, srv->ptr_y) == NULL) {
+		c = srv->pgrab;
+		pointer_ungrab(srv, c, false);
+		send_pointer_to(srv, c, NULL, WS_EVENT_POINTER_OUTSIDE, button, 0);
+	}
+	if (grabbed(srv)) {
+		/* No activation, raising or tiles: the grab gets it all. */
+		if (pressed) {
+			if (srv->buttons & mask)
+				return;
+			pointer_recheck(srv);
+			if (srv->hover == NULL)
+				send_pointer_to(srv, srv->pgrab, NULL,
+				    WS_EVENT_POINTER_OUTSIDE, button, 0);
+			srv->buttons |= mask;
+			count = click_count(srv, button);
+			send_pointer_to(srv, srv->pgrab, srv->hover,
+			    WS_EVENT_MOUSE_DOWN, button, count);
+			return;
+		}
+		if ((srv->buttons & mask) == 0)
+			return;
+		srv->buttons &= ~mask;
+		send_pointer_to(srv, srv->pgrab, srv->hover, WS_EVENT_MOUSE_UP,
+		    button, srv->click_count);
+		if (srv->buttons == 0) {
+			srv->grab = NULL;
+			srv->grab_suppressed = false;
+			srv->tile_dragging = false;
+		}
 		return;
 	}
 	if (pressed) {
@@ -208,12 +419,17 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 	}
 }
 
-/* The window a scroll at the pointer goes to, or NULL. */
+/*
+ * The window a scroll at the pointer goes to, or NULL (with the pointer
+ * grabbed, NULL sends it to the grabbing connection about no window).
+ */
 struct ws_window *
 pointer_scroll_target(struct ws_server *srv)
 {
 	struct ws_window *w;
 
+	if (grabbed(srv))
+		return window_at_owned(srv, srv->pgrab, srv->ptr_x, srv->ptr_y);
 	w = srv->grab != NULL ? srv->grab : window_at(srv, srv->ptr_x,
 	    srv->ptr_y);
 	if (w == NULL || w->tile_for != NULL)
@@ -230,9 +446,11 @@ pointer_scroll_send(struct ws_server *srv, struct ws_window *w, double dx,
     double dy, int32_t v120_x, int32_t v120_y, uint32_t source,
     uint32_t phase, uint32_t momentum_phase)
 {
+	struct ws_client *to = w != NULL ? w->owner :
+	    grabbed(srv) ? srv->pgrab : NULL;
 	ws_event_t ev;
 
-	if (w == NULL || w->owner->dead || overview_active(srv))
+	if (to == NULL || to->dead || overview_active(srv))
 		return;
 	dx *= srv->cfg.scroll_speed;
 	dy *= srv->cfg.scroll_speed;
@@ -242,9 +460,10 @@ pointer_scroll_send(struct ws_server *srv, struct ws_window *w, double dx,
 		v120_x = -v120_x;
 		v120_y = -v120_y;
 	}
-	event_init(srv, &ev, WS_EVENT_SCROLL, sizeof(ev.u.scroll), w->id);
-	ev.u.scroll.x = srv->ptr_x - w->frame.x;
-	ev.u.scroll.y = srv->ptr_y - w->frame.y;
+	event_init(srv, &ev, WS_EVENT_SCROLL, sizeof(ev.u.scroll),
+	    w != NULL ? w->id : 0);
+	ev.u.scroll.x = srv->ptr_x - (w != NULL ? w->frame.x : 0);
+	ev.u.scroll.y = srv->ptr_y - (w != NULL ? w->frame.y : 0);
 	ev.u.scroll.dx = dx;
 	ev.u.scroll.dy = dy;
 	ev.u.scroll.v120_x = v120_x;
@@ -253,7 +472,7 @@ pointer_scroll_send(struct ws_server *srv, struct ws_window *w, double dx,
 	ev.u.scroll.modifiers = srv->modifiers;
 	ev.u.scroll.phase = phase;
 	ev.u.scroll.momentum_phase = momentum_phase;
-	client_send(srv, w->owner, &ev, -1);
+	client_send(srv, to, &ev, -1);
 }
 
 /* A wheel or other scroll without phases (touchpad scrolls: scroll.c). */

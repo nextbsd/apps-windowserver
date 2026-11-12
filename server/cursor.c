@@ -2,11 +2,13 @@
  * Copyright (c) 2026, Joseph Maloney
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The pointer cursor: the built-in arrow, per-app cursors, and the
+ * The pointer cursor: the built-in arrow, per-connection and per-window
+ * cursors (a window's wins over its connection's), and the
  * choice between the display's hardware cursor plane and a software
  * cursor composited in the server's top tier.
  */
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -100,14 +102,20 @@ sw_cursor_damage(struct ws_server *srv)
 	}
 }
 
-/* Pick the cursor for the window under the pointer and show it. */
+/*
+ * Pick the cursor for the window under the pointer and show it. While a
+ * connection holds a pointer grab, it's that connection's: its window's
+ * over its own windows (hover is only ever one of those then), its own
+ * elsewhere.
+ */
 void
 cursor_update(struct ws_server *srv)
 {
-	struct ws_window *w = srv->grab != NULL ? srv->grab : srv->hover;
+	struct ws_window *w = srv->pgrab != NULL || srv->grab == NULL ?
+	    srv->hover : srv->grab;
 	/* Tiles are the server's: they get the default arrow. */
 	struct ws_client *c = w != NULL && w->tile_for == NULL ? w->owner :
-	    NULL;
+	    srv->pgrab;
 	pixman_image_t *img = srv->cursor_default;
 	int hx = srv->cursor_default_hot_x, hy = srv->cursor_default_hot_y;
 	bool visible = true, hw = false;
@@ -117,7 +125,14 @@ cursor_update(struct ws_server *srv)
 	if (c != NULL && !c->dead) {
 		if (c->cursor_hidden)
 			visible = false;
-		if (c->cursor_kind == WS_CURSOR_CUSTOM &&
+		if (w != NULL && w->owner == c && w->cursor_set) {
+			if (w->cursor_kind == WS_CURSOR_CUSTOM &&
+			    w->cursor_buffer != NULL) {
+				img = w->cursor_buffer->image;
+				hx = w->cursor_hot_x;
+				hy = w->cursor_hot_y;
+			}
+		} else if (c->cursor_kind == WS_CURSOR_CUSTOM &&
 		    c->cursor_buffer != NULL) {
 			img = c->cursor_buffer->image;
 			hx = c->cursor_hot_x;
@@ -169,4 +184,34 @@ cursor_buffer_gone(struct ws_server *srv, struct ws_buffer *b)
 		srv->cursor_image = NULL;	/* force a reload */
 		srv->cursor_hot_x = -1;
 	}
+}
+
+/*
+ * WS_MSG_WINDOW_SET_CURSOR: w's own cursor, a standard kind or a custom
+ * image (b, which the window keeps a reference to), or WS_CURSOR_INHERIT
+ * for its connection's again.
+ */
+int
+cursor_window_set(struct ws_server *srv, struct ws_window *w, uint32_t kind,
+    struct ws_buffer *b, int32_t hot_x, int32_t hot_y)
+{
+	struct ws_buffer *old = w->cursor_buffer;
+
+	if (kind == WS_CURSOR_CUSTOM && b == NULL)
+		return EINVAL;
+	if (kind != WS_CURSOR_CUSTOM)
+		b = NULL;
+	if (b != NULL)
+		b->refs++;
+	w->cursor_set = kind != WS_CURSOR_INHERIT;
+	w->cursor_kind = kind;
+	w->cursor_buffer = b;
+	w->cursor_hot_x = hot_x;
+	w->cursor_hot_y = hot_y;
+	if (old != NULL) {
+		cursor_buffer_gone(srv, old);
+		buffer_unref(srv, old);
+	}
+	cursor_update(srv);
+	return 0;
 }

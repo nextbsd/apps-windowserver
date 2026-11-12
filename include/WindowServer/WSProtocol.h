@@ -99,6 +99,21 @@ enum {
 	WS_MSG_SET_KEYBOARD_LAYOUT,	/* sync, ws_req_int_t: layout index */
 	WS_MSG_LIST_KEYBOARD_LAYOUTS,	/* answers on the socket */
 	WS_MSG_LIST_INPUT_DEVICES,	/* answers on the socket */
+	/* servers with WS_SERVER_POINTER_GRAB, see "Pointer grabs" */
+	WS_MSG_POINTER_GRAB,		/* sync or one-way, ws_req_int_t:
+					   WS_GRAB_* */
+	WS_MSG_POINTER_UNGRAB,
+	/* servers with WS_SERVER_POINTER_WARP, see "Pointer warp and query" */
+	WS_MSG_WARP_POINTER,		/* ws_req_point_t */
+	WS_MSG_QUERY_POINTER,		/* sync: u.pointer */
+	WS_MSG_POINTER_TRACK,		/* ws_req_int_t: 1 = on, 0 = off */
+	/* servers with WS_SERVER_WINDOW_CURSOR */
+	WS_MSG_WINDOW_SET_CURSOR,	/* ws_req_cursor_t, hdr.window */
+	/* servers with WS_SERVER_INPUT_REGION */
+	WS_MSG_WINDOW_SET_INPUT_REGION,	/* ws_req_region_t */
+	/* servers with WS_SERVER_WINDOW_IDS */
+	WS_MSG_RESERVE_WINDOW_IDS,	/* sync, ws_req_int_t: how many;
+					   u.window_ids */
 	WS_MSG_LAST
 };
 
@@ -166,7 +181,14 @@ typedef struct ws_req_window_create {
 	int32_t		level;
 	uint32_t	flags;		/* WS_WINDOW_* */
 	char		title[128];
+	/* optional tail (servers with WS_SERVER_WINDOW_IDS), see "Window
+	   ids chosen by the client" */
+	uint32_t	window_id;	/* 0 = the server picks */
+	uint32_t	reserved;
 } ws_req_window_create_t;
+
+/* A create request from before the optional tail. */
+#define WS_WINDOW_CREATE_MIN_SIZE offsetof(ws_req_window_create_t, window_id)
 
 typedef struct ws_req_frame {
 	ws_req_header_t	hdr;
@@ -176,11 +198,143 @@ typedef struct ws_req_frame {
 typedef struct ws_req_int {		/* SET_LEVEL, SET_FLAGS, COMMIT,
 					 * ATTACH, BUFFER_DESTROY,
 					 * CURSOR_VISIBLE, ACTIVATE,
-					 * SNAPSHOT */
+					 * SNAPSHOT, POINTER_GRAB,
+					 * POINTER_TRACK,
+					 * RESERVE_WINDOW_IDS */
 	ws_req_header_t	hdr;
 	int32_t		value;
 	uint32_t	reserved;
 } ws_req_int_t;
+
+/*
+ * WS_MSG_WINDOW_COMMIT with WS_COMMIT_SET_FRAME (servers with
+ * WS_SERVER_COMMIT_FRAME): the window takes `frame` and the attached
+ * buffer in one step, so a resize never shows the new frame with the
+ * old buffer or the other way round. Without the flag a commit is a
+ * plain ws_req_int_t (flags in `value`). Older servers read only
+ * `value` and ignore the frame, so check for the flag first (the
+ * client library falls back to WS_MSG_WINDOW_SET_FRAME, then commit).
+ */
+typedef struct ws_req_commit {
+	ws_req_header_t	hdr;
+	int32_t		value;		/* WS_COMMIT_* */
+	uint32_t	reserved;
+	ws_rect_t	frame;		/* WS_COMMIT_SET_FRAME */
+} ws_req_commit_t;
+
+/* WS_MSG_WARP_POINTER */
+typedef struct ws_req_point {
+	ws_req_header_t	hdr;		/* hdr.window: x, y are local to this
+					   window of the sender; 0 = screen */
+	double		x;
+	double		y;
+} ws_req_point_t;
+
+/*
+ * WS_MSG_WINDOW_SET_INPUT_REGION (servers with WS_SERVER_INPUT_REGION):
+ * the part of the window that takes pointer events, as rectangles in
+ * window-local coordinates (X's input shape). Elsewhere the pointer
+ * passes through to what is below, as with WS_WINDOW_IGNORES_MOUSE.
+ * What is drawn doesn't change: the buffer's alpha gives the window
+ * its visible shape. A request without WS_REGION_APPEND replaces the
+ * region (count 0: the window takes no pointer events at all), one
+ * with it adds its rectangles, so a region of more than
+ * WS_MAX_REGION_RECTS rectangles goes in several requests;
+ * WS_REGION_RESET makes the whole window take them again, the default.
+ * Being window-local, the region moves with the window; the parts of it
+ * outside the frame do nothing, whatever size the window has then, so
+ * it may be sent before a resize. It applies at once, not at the next
+ * commit.
+ */
+#define WS_MAX_REGION_RECTS	56
+
+typedef struct ws_req_region {
+	ws_req_header_t	hdr;
+	uint32_t	count;
+	uint32_t	flags;		/* WS_REGION_* */
+	ws_rect_t	rects[WS_MAX_REGION_RECTS];
+} ws_req_region_t;
+
+/*
+ * Pointer grabs (servers with WS_SERVER_POINTER_GRAB), for menus that
+ * open on a click and stay open after the release (click-release-click
+ * menus in X, GTK and Qt), where the implicit grab while a button is
+ * held isn't enough.
+ *
+ * WS_MSG_POINTER_GRAB (ws_req_int_t, `value` WS_GRAB_*), sent with a
+ * reply port to learn the outcome or one-way (errors then come as
+ * WS_EVENT_ERROR). Only a connection of the active app may grab
+ * (EPERM otherwise), and only one connection holds the grab: a grab
+ * by another connection fails with EBUSY. A connection that holds it
+ * may send it again to change the mode. hdr.window is ignored.
+ *
+ *   WS_GRAB_POINTER: every pointer event comes to the grabbing
+ *	connection, wherever the pointer is, until it sends
+ *	WS_MSG_POINTER_UNGRAB. Over one of its own windows the events
+ *	are about that window as usual, MOUSE_ENTERED and _EXITED
+ *	included; over anything else (another app's window, a tile, the
+ *	desktop) hdr.window is 0 and x, y are the screen position. A
+ *	press activates nothing, raises nothing and makes nothing key,
+ *	and no other connection sees the pointer. A press outside the
+ *	connection's windows first sends WS_EVENT_POINTER_OUTSIDE, then
+ *	comes as WS_EVENT_MOUSE_DOWN with hdr.window 0.
+ *   WS_GRAB_OUTSIDE: events go where they would without it, but the
+ *	first press outside the connection's windows sends it
+ *	WS_EVENT_POINTER_OUTSIDE and ends the grab, then goes ahead as
+ *	usual (it may activate another app). For popups that just need
+ *	to know when to close, like Wayland's xdg_popup.
+ *
+ * The cursor while grabbed is the grabbing connection's: its window's
+ * over its own windows, its connection cursor elsewhere.
+ *
+ * The server ends a grab itself, and sends WS_EVENT_POINTER_UNGRABBED,
+ * when the app stops being active (Command-Tab, a Dock activation) or
+ * the overview opens, so a client that never lets go can't keep the
+ * pointer from the rest of the desktop. A grab also ends when the
+ * connection goes away. WS_MSG_POINTER_UNGRAB from a connection
+ * without the grab does nothing.
+ */
+
+/*
+ * Pointer warp and query (servers with WS_SERVER_POINTER_WARP).
+ *
+ * WS_MSG_WARP_POINTER (ws_req_point_t) moves the pointer, for X's
+ * XWarpPointer. Only the active app may warp, and only while the
+ * pointer is over one of its windows (or a button pressed in one is
+ * held) or while the sender holds a pointer grab; other warps fail
+ * with EPERM (WS_EVENT_ERROR). The position is clamped to the screen;
+ * the pointer moves there as if the user moved it (enter and exit
+ * events, motion).
+ *
+ * WS_MSG_QUERY_POINTER (sync): the reply's u.pointer
+ * (ws_pointer_info_t) says where the pointer is, the buttons and
+ * modifiers held, and the sender's own window under it. Only for the
+ * active app, or a connection with a window under the pointer
+ * (EPERM otherwise).
+ *
+ * WS_MSG_POINTER_TRACK (ws_req_int_t, 1 on, 0 off): while its app is
+ * active, the connection also gets WS_EVENT_MOUSE_MOVED with
+ * hdr.window 0 and the screen position when the pointer moves over
+ * anything that isn't one of its windows, the way XQueryPointer lets an
+ * X client (xeyes) follow the pointer over the whole screen.
+ */
+
+/*
+ * Window ids chosen by the client (servers with WS_SERVER_WINDOW_IDS).
+ * Creating a window is a round trip, because the server picks its id.
+ * Instead, a connection may reserve a block of ids once,
+ * WS_MSG_RESERVE_WINDOW_IDS (sync, ws_req_int_t: how many, 1 to
+ * WS_MAX_WINDOW_IDS), and then name the id of each new window itself
+ * in WS_MSG_WINDOW_CREATE's window_id, sent one-way; errors come back
+ * as WS_EVENT_ERROR. The reply's u.window_ids gives the block: ids
+ * base to base + count - 1, never used for another window. Each id
+ * names one window: ids are taken in increasing order, so one that is
+ * lower than or equal to an id already used, or outside the block,
+ * fails with EINVAL. A new reservation replaces the block. Ids the
+ * server picks and reserved ids come from the same space, so ids stay
+ * unique across connections.
+ */
+#define WS_MAX_WINDOW_IDS	4096
 
 typedef struct ws_req_dock_edge {	/* DOCK_SET_EDGE */
 	ws_req_header_t	hdr;
@@ -206,6 +360,18 @@ typedef struct ws_req_damage {
 	ws_rect_t	rects[WS_MAX_DAMAGE_RECTS];	/* window-local */
 } ws_req_damage_t;
 
+/*
+ * WS_MSG_SET_CURSOR: the connection's cursor, shown while the pointer is
+ * over its windows. WS_MSG_WINDOW_SET_CURSOR (servers with
+ * WS_SERVER_WINDOW_CURSOR, hdr.window) gives one window a cursor of its
+ * own, which wins over the connection's over that window, so the right
+ * cursor shows the moment the pointer enters it. WS_CURSOR_INHERIT
+ * takes it away again. Several windows may share one buffer; the
+ * server keeps its own reference until the cursor changes or the
+ * window is destroyed, so the client may destroy the buffer right
+ * after. Hiding the cursor (WS_MSG_CURSOR_VISIBLE) applies to the
+ * connection's windows whatever their cursors.
+ */
 typedef struct ws_req_cursor {
 	ws_req_header_t	hdr;
 	uint32_t	kind;		/* WS_CURSOR_* */
@@ -529,6 +695,11 @@ typedef struct ws_reply {
 			char	 key[64];	/* SET_SETTINGS: the key that
 						   failed, or was left out */
 		} settings;
+		ws_pointer_info_t pointer;	/* QUERY_POINTER */
+		struct {
+			uint32_t base;		/* RESERVE_WINDOW_IDS */
+			uint32_t count;
+		} window_ids;
 		uint8_t	raw[128];
 	} u;
 } ws_reply_t;

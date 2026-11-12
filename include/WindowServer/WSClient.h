@@ -123,6 +123,23 @@ int		 ws_window_set_title(ws_connection_t *conn, uint32_t window,
 int		 ws_window_set_flags(ws_connection_t *conn, uint32_t window,
     uint32_t flags);
 int		 ws_window_make_key(ws_connection_t *conn, uint32_t window);
+/*
+ * ws_window_create without the round trip, on servers with
+ * WS_SERVER_WINDOW_IDS: the id comes from a block the library reserves
+ * (one round trip per 256 windows), and the request goes one-way, so a
+ * failure arrives later as WS_EVENT_ERROR about that id. On older
+ * servers it is ws_window_create.
+ */
+uint32_t	 ws_window_create_nowait(ws_connection_t *conn,
+    const ws_rect_t *frame, int32_t level, uint32_t flags, const char *title);
+/*
+ * The part of the window that takes pointer events (servers with
+ * WS_SERVER_INPUT_REGION, else ENOTSUP), window-local rectangles: X's
+ * input shape. count 0 makes the whole window let the pointer through;
+ * rects NULL makes all of it take events again.
+ */
+int		 ws_window_set_input_region(ws_connection_t *conn,
+    uint32_t window, const ws_rect_t *rects, unsigned count);
 
 /*
  * Buffers: a memfd of width*height premultiplied ARGB8888 pixels,
@@ -158,6 +175,13 @@ int		 ws_window_damage(ws_connection_t *conn, uint32_t window,
     const ws_rect_t *rects, unsigned count);
 int		 ws_window_commit(ws_connection_t *conn, uint32_t window,
     uint32_t flags);
+/*
+ * Commit with a new frame, so a resize shows its new size and its new
+ * buffer together (servers with WS_SERVER_COMMIT_FRAME; on older ones
+ * it sets the frame, then commits).
+ */
+int		 ws_window_commit_frame(ws_connection_t *conn, uint32_t window,
+    uint32_t flags, const ws_rect_t *frame);
 
 /*
  * Minimizing, on servers with WS_SERVER_MINIMIZE (ws_server_flags()).
@@ -186,6 +210,48 @@ int		 ws_set_app_icon(ws_connection_t *conn, uint32_t width,
 int		 ws_set_cursor(ws_connection_t *conn, uint32_t kind,
     ws_buffer_t *image, int32_t hot_x, int32_t hot_y);
 int		 ws_set_cursor_visible(ws_connection_t *conn, int visible);
+/*
+ * A cursor for one window, shown over it instead of the connection's
+ * (servers with WS_SERVER_WINDOW_CURSOR, else ENOTSUP).
+ * WS_CURSOR_INHERIT goes back to the connection's. The server keeps its
+ * own reference to the image, so it may be destroyed right after.
+ */
+int		 ws_window_set_cursor(ws_connection_t *conn, uint32_t window,
+    uint32_t kind, ws_buffer_t *image, int32_t hot_x, int32_t hot_y);
+
+/*
+ * Pointer grabs (servers with WS_SERVER_POINTER_GRAB, else ENOTSUP; see
+ * "Pointer grabs" in WSProtocol.h). ws_pointer_grab waits for the
+ * answer: EPERM unless this connection's app is active, EBUSY if
+ * another connection holds the grab. mode WS_GRAB_POINTER sends every
+ * pointer event here (hdr.window 0 over anything that isn't one of
+ * this connection's windows) and activates nothing; WS_GRAB_OUTSIDE
+ * only sends WS_EVENT_POINTER_OUTSIDE for the first press outside its
+ * windows, and ends there. The server ends a grab itself with
+ * WS_EVENT_POINTER_UNGRABBED when the app is deactivated or the
+ * overview opens.
+ */
+int		 ws_pointer_grab(ws_connection_t *conn, uint32_t mode);
+int		 ws_pointer_ungrab(ws_connection_t *conn);
+/*
+ * Pointer warp and query (servers with WS_SERVER_POINTER_WARP, else
+ * ENOTSUP; see "Pointer warp and query" in WSProtocol.h).
+ *   ws_warp_pointer	move the pointer to x, y, local to `window` (one
+ *			of this connection's) or the screen's (window 0);
+ *			only while this app is active and the pointer is
+ *			over one of its windows, or this connection holds
+ *			the grab (else WS_EVENT_ERROR, EPERM)
+ *   ws_query_pointer	where the pointer is; for the active app, or
+ *			while the pointer is over one of this
+ *			connection's windows (EPERM otherwise)
+ *   ws_pointer_track	while this app is active, also get
+ *			WS_EVENT_MOUSE_MOVED with hdr.window 0 over
+ *			anything that isn't one of its windows
+ */
+int		 ws_warp_pointer(ws_connection_t *conn, uint32_t window,
+    double x, double y);
+int		 ws_query_pointer(ws_connection_t *conn, ws_pointer_info_t *info);
+int		 ws_pointer_track(ws_connection_t *conn, int on);
 
 /* Activation: make this app the active app, or give it up. */
 int		 ws_activate(ws_connection_t *conn);

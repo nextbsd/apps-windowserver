@@ -41,6 +41,9 @@ struct ws_connection {
 	int		sock;
 	int		dead;
 	uint32_t	next_buffer_id;
+	/* window ids reserved for ws_window_create_nowait */
+	uint32_t	wid_next;
+	uint32_t	wid_end;
 	ws_screen_info_t screen;
 	ws_rect_t	usable;		/* WS_SERVER_USABLE_AREA, else the
 					   whole screen */
@@ -757,7 +760,8 @@ ws_window_create(ws_connection_t *c, const ws_rect_t *frame, int32_t level,
 	ws_req_window_create_t m;
 	ws_reply_t reply;
 
-	req_init(c, &m.hdr, WS_MSG_WINDOW_CREATE, sizeof(m), 0);
+	/* Without the optional tail: the server picks the id. */
+	req_init(c, &m.hdr, WS_MSG_WINDOW_CREATE, WS_WINDOW_CREATE_MIN_SIZE, 0);
 	m.frame = *frame;
 	m.level = level;
 	m.flags = flags;
@@ -767,6 +771,48 @@ ws_window_create(ws_connection_t *c, const ws_rect_t *frame, int32_t level,
 	if (send_rpc(c, &m.hdr, &reply) < 0)
 		return 0;
 	return reply.u.create.window;
+}
+
+/* How many window ids ws_window_create_nowait reserves at a time. */
+#define WINDOW_ID_BLOCK		256
+
+WS_API uint32_t
+ws_window_create_nowait(ws_connection_t *c, const ws_rect_t *frame,
+    int32_t level, uint32_t flags, const char *title)
+{
+	ws_req_window_create_t m;
+	ws_req_int_t r;
+	ws_reply_t reply;
+
+	if ((c->server_flags & WS_SERVER_WINDOW_IDS) == 0)
+		return ws_window_create(c, frame, level, flags, title);
+	if (c->wid_next == c->wid_end) {
+		/* One round trip per block of ids. */
+		req_init(c, &r.hdr, WS_MSG_RESERVE_WINDOW_IDS, sizeof(r), 0);
+		r.value = WINDOW_ID_BLOCK;
+		r.reserved = 0;
+		if (send_rpc(c, &r.hdr, &reply) < 0)
+			return 0;
+		if (reply.u.window_ids.base == 0 ||
+		    reply.u.window_ids.count == 0) {
+			errno = EPROTO;
+			return 0;
+		}
+		c->wid_next = reply.u.window_ids.base;
+		c->wid_end = reply.u.window_ids.base + reply.u.window_ids.count;
+	}
+	req_init(c, &m.hdr, WS_MSG_WINDOW_CREATE, sizeof(m), 0);
+	m.frame = *frame;
+	m.level = level;
+	m.flags = flags;
+	memset(m.title, 0, sizeof(m.title));
+	if (title != NULL)
+		strlcpy(m.title, title, sizeof(m.title));
+	m.window_id = c->wid_next;
+	m.reserved = 0;
+	if (send_oneway(c, &m.hdr) < 0)
+		return 0;
+	return c->wid_next++;
 }
 
 WS_API int
@@ -978,7 +1024,65 @@ ws_window_damage(ws_connection_t *c, uint32_t window, const ws_rect_t *rects,
 WS_API int
 ws_window_commit(ws_connection_t *c, uint32_t window, uint32_t flags)
 {
-	return send_int(c, WS_MSG_WINDOW_COMMIT, window, (int32_t)flags);
+	return send_int(c, WS_MSG_WINDOW_COMMIT, window,
+	    (int32_t)(flags & ~(uint32_t)WS_COMMIT_SET_FRAME));
+}
+
+WS_API int
+ws_window_commit_frame(ws_connection_t *c, uint32_t window, uint32_t flags,
+    const ws_rect_t *frame)
+{
+	ws_req_commit_t m;
+
+	if (frame == NULL)
+		return ws_window_commit(c, window, flags);
+	if ((c->server_flags & WS_SERVER_COMMIT_FRAME) == 0) {
+		/* Older servers: the frame first, as before. */
+		if (ws_window_set_frame(c, window, frame) < 0)
+			return -1;
+		return ws_window_commit(c, window, flags);
+	}
+	req_init(c, &m.hdr, WS_MSG_WINDOW_COMMIT, sizeof(m), window);
+	m.value = (int32_t)(flags | WS_COMMIT_SET_FRAME);
+	m.reserved = 0;
+	m.frame = *frame;
+	return send_oneway(c, &m.hdr);
+}
+
+WS_API int
+ws_window_set_input_region(ws_connection_t *c, uint32_t window,
+    const ws_rect_t *rects, unsigned count)
+{
+	ws_req_region_t m;
+	uint32_t flags = 0;
+	unsigned n;
+
+	if ((c->server_flags & WS_SERVER_INPUT_REGION) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	if (rects == NULL) {
+		req_init(c, &m.hdr, WS_MSG_WINDOW_SET_INPUT_REGION,
+		    offsetof(ws_req_region_t, rects), window);
+		m.count = 0;
+		m.flags = WS_REGION_RESET;
+		return send_oneway(c, &m.hdr);
+	}
+	do {
+		n = count > WS_MAX_REGION_RECTS ? WS_MAX_REGION_RECTS : count;
+		req_init(c, &m.hdr, WS_MSG_WINDOW_SET_INPUT_REGION,
+		    offsetof(ws_req_region_t, rects) + n * sizeof(ws_rect_t),
+		    window);
+		m.count = n;
+		m.flags = flags;
+		memcpy(m.rects, rects, n * sizeof(ws_rect_t));
+		if (send_oneway(c, &m.hdr) < 0)
+			return -1;
+		rects += n;
+		count -= n;
+		flags = WS_REGION_APPEND;
+	} while (count > 0);
+	return 0;
 }
 
 /* ---- minimizing ---- */
@@ -1047,6 +1151,97 @@ ws_set_cursor(ws_connection_t *c, uint32_t kind, ws_buffer_t *image,
 	m.hot_x = hot_x;
 	m.hot_y = hot_y;
 	return send_oneway(c, &m.hdr);
+}
+
+WS_API int
+ws_window_set_cursor(ws_connection_t *c, uint32_t window, uint32_t kind,
+    ws_buffer_t *image, int32_t hot_x, int32_t hot_y)
+{
+	ws_req_cursor_t m;
+
+	if ((c->server_flags & WS_SERVER_WINDOW_CURSOR) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	req_init(c, &m.hdr, WS_MSG_WINDOW_SET_CURSOR, sizeof(m), window);
+	m.kind = kind;
+	m.buffer_id = image != NULL ? image->id : 0;
+	m.hot_x = hot_x;
+	m.hot_y = hot_y;
+	return send_oneway(c, &m.hdr);
+}
+
+/* ---- pointer grabs, warp and query ---- */
+
+WS_API int
+ws_pointer_grab(ws_connection_t *c, uint32_t mode)
+{
+	ws_req_int_t m;
+
+	if ((c->server_flags & WS_SERVER_POINTER_GRAB) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	req_init(c, &m.hdr, WS_MSG_POINTER_GRAB, sizeof(m), 0);
+	m.value = (int32_t)mode;
+	m.reserved = 0;
+	return send_rpc(c, &m.hdr, NULL);
+}
+
+WS_API int
+ws_pointer_ungrab(ws_connection_t *c)
+{
+	ws_req_header_t h;
+
+	if ((c->server_flags & WS_SERVER_POINTER_GRAB) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	req_init(c, &h, WS_MSG_POINTER_UNGRAB, sizeof(h), 0);
+	return send_oneway(c, &h);
+}
+
+WS_API int
+ws_warp_pointer(ws_connection_t *c, uint32_t window, double x, double y)
+{
+	ws_req_point_t m;
+
+	if ((c->server_flags & WS_SERVER_POINTER_WARP) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	req_init(c, &m.hdr, WS_MSG_WARP_POINTER, sizeof(m), window);
+	m.x = x;
+	m.y = y;
+	return send_oneway(c, &m.hdr);
+}
+
+WS_API int
+ws_query_pointer(ws_connection_t *c, ws_pointer_info_t *info)
+{
+	ws_req_header_t h;
+	ws_reply_t reply;
+
+	if ((c->server_flags & WS_SERVER_POINTER_WARP) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	req_init(c, &h, WS_MSG_QUERY_POINTER, sizeof(h), 0);
+	if (send_rpc(c, &h, &reply) < 0)
+		return -1;
+	if (info != NULL)
+		*info = reply.u.pointer;
+	return 0;
+}
+
+WS_API int
+ws_pointer_track(ws_connection_t *c, int on)
+{
+	if ((c->server_flags & WS_SERVER_POINTER_WARP) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	return send_int(c, WS_MSG_POINTER_TRACK, 0, on ? 1 : 0);
 }
 
 WS_API int
@@ -1415,6 +1610,8 @@ ws_event_name(uint16_t type)
 		[WS_EVENT_SETTINGS_CHANGED] = "settings-changed",
 		[WS_EVENT_KEYBOARD_LAYOUT] = "keyboard-layout",
 		[WS_EVENT_INPUT_DEVICE] = "input-device",
+		[WS_EVENT_POINTER_OUTSIDE] = "pointer-outside",
+		[WS_EVENT_POINTER_UNGRABBED] = "pointer-ungrabbed",
 	};
 
 	if (type < WS_EVENT_MAX && names[type] != NULL)
