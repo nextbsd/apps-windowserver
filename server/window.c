@@ -339,6 +339,64 @@ window_destroy(struct ws_server *srv, struct ws_window *w)
 
 /* ---- ordering, level, frame ---- */
 
+/* ---- icon placement ---- */
+
+static bool
+rects_overlap(const ws_rect_t *a, const ws_rect_t *b)
+{
+	return a->x < b->x + b->width && b->x < a->x + a->width &&
+	    a->y < b->y + b->height && b->y < a->y + a->height;
+}
+
+/* Another visible icon window covers r. */
+static bool
+icon_overlaps(struct ws_server *srv, const struct ws_window *w,
+    const ws_rect_t *r)
+{
+	struct ws_window *o;
+
+	for (o = srv->stack_bottom; o != NULL; o = o->above)
+		if (o != w && (o->flags & WS_WINDOW_ICON) != 0 &&
+		    rects_overlap(r, &o->frame))
+			return (true);
+	return (false);
+}
+
+/*
+ * App icons and miniwindows ask for a place only where their app thinks
+ * one is free, and every app thinks the bottom-left corner is. So when
+ * one is shown over another, it moves to the first free place along the
+ * bottom of the screen, left to right, then the row above, as a window
+ * manager does for X11 apps, and its app hears where with
+ * WS_EVENT_WINDOW_FRAME. One that's already clear, or that's been put
+ * somewhere by a GSIconManager (a Dock), stays where it was asked to be.
+ * Dragging one onto another later is the user's choice and is left alone.
+ */
+static void
+place_icon(struct ws_server *srv, struct ws_window *w)
+{
+	ws_rect_t r = w->frame;
+	ws_event_t ev;
+	int32_t cols, rows, i;
+
+	if (r.width <= 0 || r.height <= 0 || !icon_overlaps(srv, w, &r))
+		return;
+	cols = (int32_t)srv->width / r.width;
+	rows = (int32_t)srv->height / r.height;
+	for (i = 0; i < cols * rows; i++) {
+		r.x = (i % cols) * r.width;
+		r.y = (int32_t)srv->height - (i / cols + 1) * r.height;
+		if (!icon_overlaps(srv, w, &r))
+			break;
+	}
+	if (i == cols * rows)
+		return;		/* the screen is full of icons: leave it */
+	w->frame = r;
+	event_init(srv, &ev, WS_EVENT_WINDOW_FRAME, sizeof(ev.u.frame), w->id);
+	ev.u.frame.frame = r;
+	client_send(srv, w->owner, &ev, -1);
+}
+
 void
 window_order(struct ws_server *srv, struct ws_window *w, int op,
     struct ws_window *rel)
@@ -364,7 +422,8 @@ window_order(struct ws_server *srv, struct ws_window *w, int op,
 		    (w->below == NULL || w->below->level < w->level))
 			return;
 		stack_unlink(srv, w);
-	}
+	} else if ((w->flags & WS_WINDOW_ICON) != 0)
+		place_icon(srv, w);
 	w->visible = true;
 	stack_place(srv, w, op, rel);
 	damage_rect(srv, &w->frame);

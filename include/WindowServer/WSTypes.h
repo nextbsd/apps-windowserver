@@ -62,6 +62,8 @@ extern "C" {
 #define WS_WINDOW_NO_ACTIVATE	0x0002	/* clicks don't activate the app */
 #define WS_WINDOW_OPAQUE	0x0004	/* buffer alpha can be ignored */
 #define WS_WINDOW_IGNORES_MOUSE	0x0008	/* pointer events pass through */
+#define WS_WINDOW_ICON		0x0010	/* app icon or miniwindow: the server
+					   finds it a free place (see window.c) */
 
 /* Pixel formats. Only premultiplied ARGB is accepted in protocol 1. */
 #define WS_FORMAT_ARGB8888	1	/* 32 bpp, premultiplied, native endian */
