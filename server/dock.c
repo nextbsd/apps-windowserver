@@ -170,10 +170,13 @@ edge_update(struct ws_server *srv, struct ws_client *gone)
 		    best->id, edge_name(srv->dock_edge), srv->dock_thickness);
 	else
 		ws_info("no Dock keeps a screen edge");
-	/* Tiling (apps-windowserver#20) will lay out again here. */
 	for (c = srv->clients; c != NULL; c = c->next)
 		if (c != gone && dock_usable(c))
 			send_state(srv, c);
+	/* Every app hears the new usable area, and the tiles move out of
+	   the Dock's way. Tiling (apps-windowserver#20) will lay out again
+	   here too. */
+	screen_usable_update(srv);
 }
 
 /* WS_MSG_DOCK_SET_EDGE: Dock c is on `edge`, `thickness` pixels thick.

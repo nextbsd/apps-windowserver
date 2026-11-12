@@ -267,6 +267,7 @@ conn_readable(struct ws_server *srv, struct ws_conn *conn)
 	    (srv->cursor_hw ? WS_SERVER_HW_CURSOR : 0) | WS_SERVER_FEATURES;
 	ev.u.welcome.screen_count = 1;
 	screen_info(srv, &ev.u.welcome.screen);
+	ev.u.welcome.usable = srv->usable;
 	client_send(srv, c, &ev, -1);
 	if (c->flags & WS_CONNECT_XKB)
 		keyboard_client_ready(srv, c);

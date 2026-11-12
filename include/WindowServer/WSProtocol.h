@@ -307,7 +307,9 @@ typedef struct ws_req_cursor {
  *   - WS_MSG_DOCK_SET_EDGE (ws_req_dock_edge_t, servers with
  *     WS_SERVER_DOCK_EDGE): the screen edge this Dock sits on
  *     (WS_DOCK_EDGE_*) and how many pixels it takes from it, measured
- *     from the edge. Window tiling keeps that strip free. The newest
+ *     from the edge. That strip is left out of the usable area (see
+ *     "The screen and its usable area"), and window tiling will keep
+ *     it free. The newest
  *     report from a Dock connection still connected counts; when that
  *     Dock goes away or reports WS_DOCK_EDGE_NONE, the newest other
  *     Dock's report does, or none. An edge above WS_DOCK_EDGE_BOTTOM or
@@ -337,6 +339,37 @@ typedef struct ws_req_cursor {
  * WS_EVENT_OVERVIEW_ITEM for each window shown, and WS_EVENT_LIST_END.
  * Dock connections also get WS_EVENT_OVERVIEW_STATE whenever it starts
  * opening and when it has closed.
+ */
+
+/*
+ * The screen and its usable area.
+ *
+ * Usable area (servers with WS_SERVER_USABLE_AREA): the welcome carries
+ * it after the screen (ws_event_welcome_t.usable), and every connection
+ * gets WS_EVENT_USABLE_AREA (ws_event_usable_area_t) whenever it
+ * changes. It is the screen minus the strip of the edge the Dock keeps
+ * (WS_MSG_DOCK_SET_EDGE, see "The Dock"), the screen itself while no
+ * Dock has said; later it will also leave out a menu bar strip along
+ * the top. Apps use it as NSScreen's visibleFrame. WindowServer puts
+ * its own things inside it: minimized-window tiles go along its bottom
+ * edge from its left edge (just above a bottom Dock, right of a left
+ * one), and are placed again when it changes; tiles the user dragged
+ * stay, moved inside it only if they'd be outside. The overview lays
+ * the windows out inside it, and a window minimized into the Dock
+ * comes from the Dock's edge.
+ *
+ * Screen changes (servers with WS_SERVER_SCREEN_CHANGES): when the
+ * screen's size or mode changes, every connection gets
+ * WS_EVENT_SCREEN_CHANGED with the new ws_screen_info_t, then
+ * WS_EVENT_USABLE_AREA. Window frames keep their screen coordinates
+ * (top-left origin), except that a window that was on the screen and
+ * no longer fits is moved back onto it, and one that was partly off is
+ * moved so that at least its top-left part shows; their owners get
+ * WS_EVENT_WINDOW_FRAME, after the two events above. Tiles are placed
+ * again. A headless server changes size on WS_INJECT_SCREEN_SIZE
+ * (`wsctl screen size WxH`), for tests; a DRM server has a single mode
+ * for now, so it sends the event once mode changes come (hotplug,
+ * Displays).
  */
 
 /*

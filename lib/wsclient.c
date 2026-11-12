@@ -41,6 +41,8 @@ struct ws_connection {
 	int		dead;
 	uint32_t	next_buffer_id;
 	ws_screen_info_t screen;
+	ws_rect_t	usable;		/* WS_SERVER_USABLE_AREA, else the
+					   whole screen */
 	/* events read while waiting for something else */
 	ws_event_t	*queue;
 	size_t		qhead;
@@ -98,6 +100,25 @@ kr_errno(kern_return_t kr)
 	}
 }
 
+/*
+ * mach_msg, restarted when a signal interrupts it, as Darwin's mach_msg()
+ * does for callers that don't ask for MACH_SEND_INTERRUPT or
+ * MACH_RCV_INTERRUPT. NextBSD's returns MACH_*_INTERRUPTED instead, so
+ * a signal arriving during a request (seen in the Dock while it starts)
+ * failed it with EINTR, a window creation included.
+ */
+static kern_return_t
+msg_send(ws_req_header_t *h)
+{
+	kern_return_t kr;
+
+	do
+		kr = mach_msg(&h->head, MACH_SEND_MSG, h->head.msgh_size, 0,
+		    MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	while (kr == MACH_SEND_INTERRUPTED);
+	return kr;
+}
+
 static int
 send_oneway(ws_connection_t *c, ws_req_header_t *h)
 {
@@ -109,8 +130,7 @@ send_oneway(ws_connection_t *c, ws_req_header_t *h)
 	}
 	h->head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
 	h->head.msgh_local_port = MACH_PORT_NULL;
-	kr = mach_msg(&h->head, MACH_SEND_MSG, h->head.msgh_size, 0,
-	    MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	kr = msg_send(h);
 	if (kr != MACH_MSG_SUCCESS) {
 		errno = kr_errno(kr);
 		return -1;
@@ -136,8 +156,7 @@ send_rpc(ws_connection_t *c, ws_req_header_t *h, ws_reply_t *out)
 	h->head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
 	    MACH_MSG_TYPE_MAKE_SEND_ONCE);
 	h->head.msgh_local_port = c->reply;
-	kr = mach_msg(&h->head, MACH_SEND_MSG, h->head.msgh_size, 0,
-	    MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	kr = msg_send(h);
 	if (kr != MACH_MSG_SUCCESS) {
 		errno = kr_errno(kr);
 		return -1;
@@ -146,6 +165,8 @@ send_rpc(ws_connection_t *c, ws_req_header_t *h, ws_reply_t *out)
 		memset(&rb, 0, sizeof(rb));
 		kr = mach_msg(&rb.r.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
 		    sizeof(rb), c->reply, RPC_TIMEOUT_MS, MACH_PORT_NULL);
+		if (kr == MACH_RCV_INTERRUPTED)
+			continue;	/* a signal: wait again (msg_send) */
 		if (kr != MACH_MSG_SUCCESS) {
 			errno = kr_errno(kr);
 			return -1;
@@ -221,6 +242,15 @@ fd_take(ws_connection_t *c)
 	memmove(c->fds, c->fds + 1, (size_t)(c->nfds - 1) * sizeof(int));
 	c->nfds--;
 	return fd;
+}
+
+static void
+screen_rect(const ws_screen_info_t *s, ws_rect_t *r)
+{
+	r->x = s->x;
+	r->y = s->y;
+	r->width = (int32_t)s->width;
+	r->height = (int32_t)s->height;
 }
 
 /* Take one whole event out of rbuf. Returns 1, 0 if incomplete, -1 if bad. */
@@ -512,6 +542,10 @@ connect_impl(const char *service, const char *app_name, uint32_t flags,
 		goto fail;
 	c->screen = ev.u.welcome.screen;
 	c->server_flags = ev.u.welcome.server_flags;
+	if (c->server_flags & WS_SERVER_USABLE_AREA)
+		c->usable = ev.u.welcome.usable;
+	else
+		screen_rect(&c->screen, &c->usable);
 	return c;
 
 fail:
@@ -621,6 +655,17 @@ ws_main_screen(ws_connection_t *c)
 }
 
 WS_API int
+ws_usable_area(ws_connection_t *c, ws_rect_t *area)
+{
+	*area = c->usable;
+	if ((c->server_flags & WS_SERVER_USABLE_AREA) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	return 0;
+}
+
+WS_API int
 ws_pending(ws_connection_t *c)
 {
 	ws_event_header_t hdr;
@@ -637,8 +682,15 @@ static void
 note_event(ws_connection_t *c, const ws_event_t *ev)
 {
 	if (ev->hdr.type == WS_EVENT_SCREEN_CHANGED &&
-	    ev->u.screen.screen_id == c->screen.screen_id)
+	    ev->u.screen.screen_id == c->screen.screen_id) {
 		c->screen = ev->u.screen;
+		/* until the usable area that follows */
+		if ((c->server_flags & WS_SERVER_USABLE_AREA) == 0)
+			screen_rect(&c->screen, &c->usable);
+	}
+	if (ev->hdr.type == WS_EVENT_USABLE_AREA &&
+	    ev->u.usable_area.screen_id == c->screen.screen_id)
+		c->usable = ev->u.usable_area.usable;
 }
 
 WS_API int
@@ -1260,6 +1312,13 @@ ws_inject_swipe(ws_connection_t *c, uint32_t fingers, int phase, double dx,
 }
 
 WS_API int
+ws_inject_screen_size(ws_connection_t *c, uint32_t width, uint32_t height)
+{
+	return inject(c, WS_INJECT_SCREEN_SIZE, 0, (double)width,
+	    (double)height, 0, NULL);
+}
+
+WS_API int
 ws_overview(ws_connection_t *c, uint32_t request, ws_event_overview_t *state,
     void (*fn)(const ws_event_overview_item_t *, void *), void *ctx)
 {
@@ -1350,6 +1409,7 @@ ws_event_name(uint16_t type)
 		[WS_EVENT_PREVIEW] = "preview",
 		[WS_EVENT_OVERVIEW_STATE] = "overview-state",
 		[WS_EVENT_OVERVIEW_ITEM] = "overview-item",
+		[WS_EVENT_USABLE_AREA] = "usable-area",
 	};
 
 	if (type < WS_EVENT_MAX && names[type] != NULL)

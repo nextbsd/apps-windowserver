@@ -163,8 +163,9 @@ layout(struct ws_server *srv)
 		}
 		g[ng - 1].n++;
 	}
-	aw = (double)srv->width - 2 * MARGIN;
-	ah = (double)srv->height - MARGIN_TOP - MARGIN;
+	/* Inside the usable area: the Dock stays clear. */
+	aw = (double)srv->usable.width - 2 * MARGIN;
+	ah = (double)srv->usable.height - MARGIN_TOP - MARGIN;
 
 	/* How many group columns. */
 	for (gc = 1; gc <= ng; gc++) {
@@ -230,9 +231,10 @@ layout(struct ws_server *srv)
 		/* The group's cell; a short last row of groups is centred. */
 		k = i / gc;
 		m = (int)(k == gr - 1 ? ng - k * gc : gc);
-		cx0 = MARGIN + (int)lround((aw - (m * cw + (m - 1) * GROUP_GAP)) /
-		    2 + (i % gc) * (cw + GROUP_GAP));
-		cy0 = MARGIN_TOP + (int)lround(k * (ch + LABEL + GROUP_GAP));
+		cx0 = srv->usable.x + MARGIN + (int)lround((aw - (m * cw +
+		    (m - 1) * GROUP_GAP)) / 2 + (i % gc) * (cw + GROUP_GAP));
+		cy0 = srv->usable.y + MARGIN_TOP +
+		    (int)lround(k * (ch + LABEL + GROUP_GAP));
 		bx = cx0 + (int)lround((cw - bw) / 2);
 		by = cy0 + (int)lround((ch - bh) / 2);
 		y = by;
@@ -576,10 +578,25 @@ home_rect(struct ws_server *srv, struct ws_window *w)
 	if (w->minimized) {
 		if (w->tile != NULL)
 			return w->tile->frame;
-		/* in the Dock: from the right edge, where the Dock is */
+		/* in the Dock: from the middle of the Dock's edge (the
+		   right one if it hasn't said) */
 		r.width = r.height = 64;
-		r.x = (int32_t)srv->width - 64;
+		r.x = ((int32_t)srv->width - 64) / 2;
 		r.y = ((int32_t)srv->height - 64) / 2;
+		switch (srv->dock_edge) {
+		case WS_DOCK_EDGE_LEFT:
+			r.x = 0;
+			break;
+		case WS_DOCK_EDGE_TOP:
+			r.y = 0;
+			break;
+		case WS_DOCK_EDGE_BOTTOM:
+			r.y = (int32_t)srv->height - 64;
+			break;
+		default:
+			r.x = (int32_t)srv->width - 64;
+			break;
+		}
 		return r;
 	}
 	buffer_extent(w, &cw, &ch);

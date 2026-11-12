@@ -431,26 +431,44 @@ icon_overlaps(struct ws_server *srv, const struct ws_window *w,
  * App icons and miniwindows ask for a place only where their app thinks
  * one is free, and every app thinks the bottom-left corner is. So when
  * one is shown over another, it moves to the first free place along the
- * bottom of the screen, left to right, then the row above, as a window
- * manager does for X11 apps, and its app hears where with
- * WS_EVENT_WINDOW_FRAME. One that's already clear, or that's been put
- * somewhere by a GSIconManager (a Dock), stays where it was asked to be.
- * Dragging one onto another later is the user's choice and is left alone.
+ * bottom of the usable area (the screen minus the Dock's strip, see
+ * screen.c), left to right, then the row above, as a window manager does
+ * for X11 apps, and its app hears where with WS_EVENT_WINDOW_FRAME. One
+ * that's already clear, or that's been put somewhere by a GSIconManager
+ * (a Dock), stays where it was asked to be. Dragging one onto another
+ * later is the user's choice and is left alone. The server's own tiles
+ * also move when they're not inside the usable area (under the Dock).
  */
+static bool
+rect_inside(const ws_rect_t *outer, const ws_rect_t *r)
+{
+	return r->x >= outer->x && r->y >= outer->y &&
+	    r->x + r->width <= outer->x + outer->width &&
+	    r->y + r->height <= outer->y + outer->height;
+}
+
 static void
 place_icon(struct ws_server *srv, struct ws_window *w)
 {
-	ws_rect_t r = w->frame;
+	ws_rect_t r = w->frame, u = srv->usable;
 	ws_event_t ev;
 	int32_t cols, rows, i;
 
-	if (r.width <= 0 || r.height <= 0 || !icon_overlaps(srv, w, &r))
+	if (r.width <= 0 || r.height <= 0)
 		return;
-	cols = (int32_t)srv->width / r.width;
-	rows = (int32_t)srv->height / r.height;
+	if (!icon_overlaps(srv, w, &r) &&
+	    (w->tile_for == NULL || rect_inside(&u, &r)))
+		return;
+	if (u.width <= 0 || u.height <= 0) {
+		u.x = u.y = 0;
+		u.width = (int32_t)srv->width;
+		u.height = (int32_t)srv->height;
+	}
+	cols = u.width / r.width;
+	rows = u.height / r.height;
 	for (i = 0; i < cols * rows; i++) {
-		r.x = (i % cols) * r.width;
-		r.y = (int32_t)srv->height - (i / cols + 1) * r.height;
+		r.x = u.x + (i % cols) * r.width;
+		r.y = u.y + u.height - (i / cols + 1) * r.height;
 		if (!icon_overlaps(srv, w, &r))
 			break;
 	}
@@ -769,8 +787,8 @@ window_minimize(struct ws_server *srv, struct ws_window *w, int32_t where)
 
 /*
  * Give minimized window w its tile, at the icon level, in the first
- * free place along the bottom of the screen (the same placement as app
- * icons). The tile is the server's own: it is in the stack but not in
+ * free place along the bottom of the usable area (the same placement as
+ * app icons). The tile is the server's own: it is in the stack but not in
  * srv->windows, so clients can't name it, and tile.c draws it from w's
  * buffer.
  */
@@ -792,8 +810,10 @@ window_tile_add(struct ws_server *srv, struct ws_window *w)
 	t->tile_for = w;
 	t->level = WS_LEVEL_DOCK;
 	t->flags = WS_WINDOW_ICON | WS_WINDOW_NO_KEY | WS_WINDOW_NO_ACTIVATE;
-	t->frame.x = 0;
-	t->frame.y = (int32_t)srv->height - size;
+	/* the bottom-left corner of the usable area: just above a bottom
+	   Dock, right of a left one */
+	t->frame.x = srv->usable.x;
+	t->frame.y = srv->usable.y + srv->usable.height - size;
 	t->frame.width = size;
 	t->frame.height = size;
 	pixman_region32_init(&t->pending_damage);
@@ -859,25 +879,132 @@ window_request_restore(struct ws_server *srv, struct ws_window *w)
 	client_send(srv, w->owner, &ev, -1);
 }
 
-/* The user dragged tile t to x, y. */
-void
-window_tile_move(struct ws_server *srv, struct ws_window *t, int32_t x,
+/* Move tile t to x, y, kept inside the usable area. */
+static void
+tile_move_inside(struct ws_server *srv, struct ws_window *t, int32_t x,
     int32_t y)
 {
-	if (x > (int32_t)srv->width - t->frame.width)
-		x = (int32_t)srv->width - t->frame.width;
-	if (y > (int32_t)srv->height - t->frame.height)
-		y = (int32_t)srv->height - t->frame.height;
-	if (x < 0)
-		x = 0;
-	if (y < 0)
-		y = 0;
+	const ws_rect_t *u = &srv->usable;
+
+	if (x > u->x + u->width - t->frame.width)
+		x = u->x + u->width - t->frame.width;
+	if (y > u->y + u->height - t->frame.height)
+		y = u->y + u->height - t->frame.height;
+	if (x < u->x)
+		x = u->x;
+	if (y < u->y)
+		y = u->y;
 	if (x == t->frame.x && y == t->frame.y)
 		return;
 	damage_rect(srv, &t->frame);
 	t->frame.x = x;
 	t->frame.y = y;
 	damage_rect(srv, &t->frame);
+}
+
+/* The user dragged tile t to x, y: it stays there from now on, inside
+ * the usable area. */
+void
+window_tile_move(struct ws_server *srv, struct ws_window *t, int32_t x,
+    int32_t y)
+{
+	t->tile_moved = true;
+	tile_move_inside(srv, t, x, y);
+}
+
+/*
+ * The usable area changed (the Dock moved, or the screen changed): put
+ * the tiles inside it again. Tiles the user dragged stay where they are
+ * if they still fit, or move just inside it. The others go along its
+ * bottom again, in stacking order, out of the way first so each one
+ * only sees those placed before it.
+ */
+void
+window_tiles_place(struct ws_server *srv)
+{
+	struct ws_window *t;
+
+	for (t = srv->stack_bottom; t != NULL; t = t->above)
+		if (t->tile_for != NULL && t->tile_moved)
+			tile_move_inside(srv, t, t->frame.x, t->frame.y);
+	for (t = srv->stack_bottom; t != NULL; t = t->above)
+		if (t->tile_for != NULL && !t->tile_moved) {
+			damage_rect(srv, &t->frame);
+			t->frame.x = t->frame.y = INT32_MIN / 2;
+		}
+	for (t = srv->stack_bottom; t != NULL; t = t->above)
+		if (t->tile_for != NULL && !t->tile_moved) {
+			t->frame.x = srv->usable.x;
+			t->frame.y = srv->usable.y + srv->usable.height -
+			    t->frame.height;
+			place_icon(srv, t);
+			damage_rect(srv, &t->frame);
+			ws_debug("window %u: tile at %d,%d", t->tile_for->id,
+			    t->frame.x, t->frame.y);
+		}
+	pointer_recheck(srv);
+}
+
+/* Window edges that must stay on the screen when a window was partly
+ * off it already. */
+#define KEEP_VISIBLE_X	32
+#define KEEP_VISIBLE_Y	24
+
+/* v within lo..hi; lo wins if hi < lo. */
+static int32_t
+clamp32(int32_t v, int32_t lo, int32_t hi)
+{
+	if (v > hi)
+		v = hi;
+	if (v < lo)
+		v = lo;
+	return v;
+}
+
+/*
+ * The screen changed from old_width x old_height to its current size:
+ * a shown or minimized window that was on the old screen and no longer
+ * fits on the new one moves back onto it (its top-left corner first if
+ * it's bigger than the screen); one that was partly off already keeps at
+ * least its top-left part on the screen. Their owners hear where with
+ * WS_EVENT_WINDOW_FRAME.
+ */
+void
+windows_keep_on_screen(struct ws_server *srv, uint32_t old_width,
+    uint32_t old_height)
+{
+	ws_rect_t old = { 0, 0, (int32_t)old_width, (int32_t)old_height };
+	ws_rect_t scr = { 0, 0, (int32_t)srv->width, (int32_t)srv->height };
+	struct ws_window *w;
+	ws_event_t ev;
+	ws_rect_t r;
+
+	for (w = srv->windows; w != NULL; w = w->next) {
+		r = w->frame;
+		/* Windows that aren't shown (an app's offscreen helpers)
+		   stay where their app put them. */
+		if ((!w->visible && !w->minimized) || r.width <= 0 ||
+		    r.height <= 0 || rect_inside(&scr, &r))
+			continue;
+		if (rect_inside(&old, &r)) {
+			r.x = clamp32(r.x, 0, scr.width - r.width);
+			r.y = clamp32(r.y, 0, scr.height - r.height);
+		} else {
+			r.x = clamp32(r.x, KEEP_VISIBLE_X - r.width,
+			    scr.width - KEEP_VISIBLE_X);
+			r.y = clamp32(r.y, r.y < 0 ? r.y : 0,
+			    scr.height - KEEP_VISIBLE_Y);
+		}
+		if (r.x == w->frame.x && r.y == w->frame.y)
+			continue;
+		ws_debug("window %u kept on the screen: %d,%d -> %d,%d",
+		    w->id, w->frame.x, w->frame.y, r.x, r.y);
+		window_set_frame(srv, w, &r);
+		event_init(srv, &ev, WS_EVENT_WINDOW_FRAME, sizeof(ev.u.frame),
+		    w->id);
+		ev.u.frame.frame = r;
+		client_send(srv, w->owner, &ev, -1);
+	}
 }
 
 /* Bring tile t to the top of its level. */

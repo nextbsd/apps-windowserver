@@ -279,6 +279,7 @@ main(int argc, char **argv)
 
 	if (compositor_init(srv) < 0)
 		goto out;
+	screen_usable_compute(srv, &srv->usable);
 	if (tile_init(srv) < 0)
 		goto out;
 	srv->display_active = true;

@@ -36,7 +36,8 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_XRGB | WS_SERVER_ORDERED | \
 				 WS_SERVER_MINIMIZE | WS_SERVER_DOCK | \
 				 WS_SERVER_SCROLL_PHASES | WS_SERVER_OVERVIEW | \
-				 WS_SERVER_DOCK_EDGE | WS_SERVER_MINIMIZE_WHERE)
+				 WS_SERVER_DOCK_EDGE | WS_SERVER_MINIMIZE_WHERE | \
+				 WS_SERVER_USABLE_AREA | WS_SERVER_SCREEN_CHANGES)
 
 /* Connections that aren't apps: wsctl and the Dock's window list. */
 #define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK)
@@ -133,6 +134,8 @@ struct ws_window {
 					   srv->windows, and get no events. */
 	pixman_image_t	*tile_image;	/* a tile: what it shows */
 	bool		tile_dirty;	/* a tile: redraw tile_image */
+	bool		tile_moved;	/* a tile the user dragged: it stays
+					   where it was put */
 	struct ws_window *above;	/* visible stack, bottom -> top */
 	struct ws_window *below;
 	struct ws_window *next;		/* all windows */
@@ -381,6 +384,8 @@ struct ws_server {
 	uint32_t	dock_thickness;		/* pixels from that edge */
 	uint32_t	dock_edge_client;	/* client id, 0 = none */
 	uint64_t	dock_edge_serial;
+	/* The usable area (screen.c): the screen minus the Dock's strip. */
+	ws_rect_t	usable;
 
 	/* cursor */
 	pixman_image_t	*cursor_default;
@@ -463,6 +468,12 @@ void	event_init(struct ws_server *srv, ws_event_t *ev, uint16_t type,
 	    size_t payload, uint32_t window);
 void	screen_info(struct ws_server *srv, ws_screen_info_t *si);
 
+/* ---- screen.c ---- */
+void	screen_usable_compute(struct ws_server *srv, ws_rect_t *r);
+void	screen_usable_update(struct ws_server *srv);
+int	screen_resize(struct ws_server *srv, uint32_t width, uint32_t height);
+void	screen_changed(struct ws_server *srv);
+
 /* ---- request.c ---- */
 void	request_handle(struct ws_server *srv, struct ws_mach_item *item);
 
@@ -504,6 +515,9 @@ void	window_request_restore(struct ws_server *srv, struct ws_window *w);
 void	window_tile_move(struct ws_server *srv, struct ws_window *t,
 	    int32_t x, int32_t y);
 void	window_tile_raise(struct ws_server *srv, struct ws_window *t);
+void	window_tiles_place(struct ws_server *srv);
+void	windows_keep_on_screen(struct ws_server *srv, uint32_t old_width,
+	    uint32_t old_height);
 
 /* ---- tile.c ---- */
 int	tile_init(struct ws_server *srv);
@@ -597,6 +611,8 @@ void	cursor_buffer_gone(struct ws_server *srv, struct ws_buffer *b);
 
 /* ---- compositor.c ---- */
 int	compositor_init(struct ws_server *srv);
+int	compositor_resize(struct ws_server *srv, uint32_t width,
+	    uint32_t height);
 void	compositor_fini(struct ws_server *srv);
 void	compositor_repaint(struct ws_server *srv);
 void	composite_window(struct ws_server *srv, struct ws_window *w,

@@ -161,6 +161,11 @@ extern "C" {
 #define WS_SERVER_MINIMIZE_WHERE 0x0800	/* WS_MSG_WINDOW_MINIMIZE may say
 					   where the window goes
 					   (WS_MINIMIZE_*) */
+#define WS_SERVER_USABLE_AREA	0x1000	/* the usable area: in the welcome
+					   and WS_EVENT_USABLE_AREA */
+#define WS_SERVER_SCREEN_CHANGES 0x2000	/* sends WS_EVENT_SCREEN_CHANGED
+					   when the screen's size or mode
+					   changes */
 
 /* Where a minimized window goes ("Minimizing" in WSProtocol.h). */
 #define WS_MINIMIZE_DEFAULT	0	/* the server's MinimizeIntoDock */
@@ -181,6 +186,9 @@ extern "C" {
 /* added after protocol 1 shipped (WS_SERVER_OVERVIEW) */
 #define WS_INJECT_SWIPE		8	/* a touchpad swipe: button = fingers,
 					   pressed = WS_GESTURE_*, dx, dy */
+/* added after protocol 1 shipped (WS_SERVER_SCREEN_CHANGES) */
+#define WS_INJECT_SCREEN_SIZE	9	/* headless servers only: the screen
+					   becomes x by y pixels (tests) */
 
 /* Gesture phases (WS_INJECT_SWIPE). */
 #define WS_GESTURE_BEGIN	1
@@ -212,7 +220,8 @@ typedef struct ws_screen_info {
 /* Server -> client event types. */
 enum {
 	WS_EVENT_WELCOME = 1,
-	WS_EVENT_SCREEN_CHANGED,
+	WS_EVENT_SCREEN_CHANGED,	/* ws_screen_info_t; sent by servers
+					   with WS_SERVER_SCREEN_CHANGES */
 	WS_EVENT_APP_ACTIVATED,
 	WS_EVENT_APP_DEACTIVATED,
 	WS_EVENT_KEY_WINDOW_GAINED,
@@ -249,6 +258,8 @@ enum {
 	   Dock connections when the overview opens and closes */
 	WS_EVENT_OVERVIEW_STATE,	/* ws_event_overview_t */
 	WS_EVENT_OVERVIEW_ITEM,		/* ws_event_overview_item_t */
+	/* WS_SERVER_USABLE_AREA: to every connection */
+	WS_EVENT_USABLE_AREA,		/* ws_event_usable_area_t */
 	WS_EVENT_MAX
 };
 
@@ -272,7 +283,28 @@ typedef struct ws_event_welcome {
 	uint32_t	server_flags;
 	uint32_t	screen_count;
 	ws_screen_info_t screen;
+	/* added after protocol 1 shipped (WS_SERVER_USABLE_AREA); older
+	   servers send the welcome without it, and it reads as 0 */
+	ws_rect_t	usable;		/* see ws_event_usable_area_t */
 } ws_event_welcome_t;
+
+/*
+ * The usable area (servers with WS_SERVER_USABLE_AREA): the part of
+ * the screen that windows should use, the screen minus the strip the
+ * Dock keeps on its edge (WS_MSG_DOCK_SET_EDGE) and, later, a menu bar
+ * strip along the top. It is what NSScreen's visibleFrame is on macOS:
+ * new windows are centred and cascaded inside it, zooming fills it,
+ * and WindowServer puts its own things (minimized-window tiles, the
+ * overview) there. Every connection gets it in the welcome and then
+ * WS_EVENT_USABLE_AREA whenever it changes: the Dock moved to another
+ * edge, got thicker or thinner, connected or went away, or the screen
+ * changed (after WS_EVENT_SCREEN_CHANGED). Screen coordinates.
+ */
+typedef struct ws_event_usable_area {
+	uint32_t	screen_id;
+	uint32_t	reserved;
+	ws_rect_t	usable;
+} ws_event_usable_area_t;
 
 typedef struct ws_event_app {
 	uint32_t	other_client;	/* the app on the other side, or 0 */
@@ -560,6 +592,7 @@ typedef struct ws_event {
 		ws_event_snapshot_t	preview;	/* WS_EVENT_PREVIEW */
 		ws_event_overview_t	overview;
 		ws_event_overview_item_t overview_item;
+		ws_event_usable_area_t	usable_area;
 		uint8_t			raw[232];
 	} u;
 } ws_event_t;

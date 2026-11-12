@@ -9,8 +9,10 @@
 # restoring it, and the Dock's window list (wsctl dock), with minimized
 # windows handed to the Dock instead of tiles (MinimizeIntoDock, and
 # per request with WS_MINIMIZE_INTO_DOCK or WS_MINIMIZE_BOTTOM_ROW), and
-# the screen edge the Dock reports (WS_MSG_DOCK_SET_EDGE), touchpad
-# scroll phases and momentum scrolling, and the window overview (Exposé).
+# the screen edge the Dock reports (WS_MSG_DOCK_SET_EDGE), the usable
+# area and tiles kept out of the Dock's strip, screen size changes,
+# touchpad scroll phases and momentum scrolling, and the window
+# overview (Exposé).
 #
 #   sh tests/headless-test.sh [BUILD_DIR]
 #
@@ -406,6 +408,145 @@ kill "$WPID"
 wait "$WPID" 2>/dev/null
 WPID=
 grep -q '^error' "$LOG/dock-edge-watch.log" && fail "the watching Dock got errors"
+
+# The usable area (WS_SERVER_USABLE_AREA): the screen minus the strip
+# the Dock keeps. Every connection has it from the welcome and hears it
+# change; the tiles (W3's, minimized onto the bottom row) stay inside
+# it: just above a bottom Dock, right of a left one.
+# usable_is X,Y WxH: within two seconds
+usable_is() {
+	i=0
+	while [ $i -lt 20 ]; do
+		"$B/wsctl" screen | grep -q "^usable $1$" && return 0
+		sleep 0.1
+		i=$((i + 1))
+	done
+	"$B/wsctl" screen
+	return 1
+}
+# dock_at EDGE THICKNESS: a Dock (wsctl, in the background) keeps EDGE.
+# The Dock before it goes only once this one counts, so the usable area
+# changes once.
+dock_at() {
+	"$B/wsctl" dock edge "$1" "$2" 60 >"$LOG/usable-dock-$1.log" 2>&1 &
+	_old=$EPID
+	EPID=$!
+	wait_for "$LOG/usable-dock-$1.log" "^edge=$1 thickness=$2 " 5 ||
+	    fail "no Dock on the $1 edge"
+	[ -n "$_old" ] && kill "$_old" && wait "$_old" 2>/dev/null
+}
+"$B/wsctl" screen | grep -q '^screen 1280x800$' && usable_is "0,0 1280x800" &&
+    pass "wsctl screen: 1280x800, all of it usable without a Dock" ||
+    fail "wsctl screen without a Dock"
+grep -q 'connected app=Alpha .* usable=0,0,1280x800$' "$LOG/wstest.log" &&
+    pass "the welcome carried the usable area" || fail "no usable area in the welcome"
+expect_pixel 4 $((TILE_Y + 24)) 303030 "W3's tile in the bottom-left corner"
+mark
+PU0=$MARKS
+dock_at bottom 90
+usable_is "0,0 1280x710" && pass "bottom Dock, 90 pixels: usable 0,0 1280x710" ||
+    fail "usable area with a bottom Dock"
+"$B/wsctl" sync
+expect_pixel 4 $((710 - 64 + 24)) 303030 "the tile moved just above the bottom Dock"
+expect_pixel 4 $((TILE_Y + 24)) 202020 "nothing left under the bottom Dock"
+"$B/wsctl" snapshot "$LOG/usable-bottom.ppm" >/dev/null
+dock_at left 70
+usable_is "70,0 1210x800" && pass "left Dock, 70 pixels: usable 70,0 1210x800" ||
+    fail "usable area with a left Dock"
+"$B/wsctl" sync
+expect_pixel 74 $((TILE_Y + 24)) 303030 "the tile moved right of the left Dock"
+expect_pixel 4 $((TILE_Y + 24)) 202020 "nothing left under the left Dock"
+dock_at top 50
+usable_is "0,50 1280x750" && pass "top Dock, 50 pixels: usable 0,50 1280x750" ||
+    fail "usable area with a top Dock"
+"$B/wsctl" sync
+expect_pixel 4 $((TILE_Y + 24)) 303030 "a top Dock leaves the tile in the bottom-left corner"
+kill "$EPID"
+wait "$EPID" 2>/dev/null
+EPID=
+usable_is "0,0 1280x800" && pass "the Dock gone: the whole screen is usable again" ||
+    fail "usable area after the Dock went"
+mark
+PU1=$MARKS
+for a in Alpha Beta Gamma; do
+	areas=$(awk -v from="$PU0" -v to="$PU1" -v app="app=$a" \
+	    'NR > from && NR <= to && $3 == app && $4 == "type=usable-area" \
+	    { sub("area=", "", $6); printf "%s ", $6 }' "$LOG/wstest.log")
+	[ "$areas" = "0,0,1280x710 70,0,1210x800 0,50,1280x750 0,0,1280x800 " ] &&
+	    pass "$a heard each usable area once ($areas)" ||
+	    fail "$a's usable-area events: $areas"
+done
+# Dragging the tile under where a bottom Dock is keeps it out of the
+# strip; a dragged tile stays where it was put when the Dock moves.
+dock_at bottom 90
+"$B/wsctl" sync
+"$B/wsctl" move 20 $((646 + 24)) && "$B/wsctl" down &&
+    "$B/wsctl" move 220 $((646 + 74)) && "$B/wsctl" move 420 $((646 + 124)) &&
+    "$B/wsctl" up || fail "wsctl drag tile (bottom Dock)"
+expect_pixel 420 $((646 + 24)) 20a050 "the dragged tile stopped at the Dock's strip"
+dock_at right 84
+usable_is "0,0 1196x800" || fail "usable area with a right Dock"
+"$B/wsctl" sync
+expect_pixel 420 $((646 + 24)) 20a050 "a dragged tile stays where it was put"
+kill "$EPID"
+wait "$EPID" 2>/dev/null
+EPID=
+
+# Screen changes (WS_SERVER_SCREEN_CHANGES, apps-windowserver#10): a
+# headless screen changes size with `wsctl screen size`. Every
+# connection hears screen-changed, then usable-area; windows that no
+# longer fit move back onto the screen (their owners hear where), and
+# the tiles go along the new bottom.
+"$B/wsctl" screen watch 60 >"$LOG/screen-watch.log" 2>&1 &
+WPID=$!
+wait_for "$LOG/screen-watch.log" "^watching" 5 || fail "no screen watch"
+mark
+PC0=$MARKS
+"$B/wsctl" screen size 1024x600 >"$LOG/screen-size.log" 2>&1 &&
+    grep -q '^screen-changed 1024x600$' "$LOG/screen-size.log" &&
+    grep -q '^usable-area usable 0,0 1024x600$' "$LOG/screen-size.log" &&
+    pass "wsctl screen size 1024x600: screen-changed, then usable-area" ||
+    { fail "wsctl screen size 1024x600"; cat "$LOG/screen-size.log"; }
+"$B/wsctl" screen | grep -q '^screen 1024x600$' &&
+    pass "a new connection gets the new size" || fail "new size in the welcome"
+"$B/wsctl" snapshot "$LOG/screen-small.ppm" | grep -q ': 1024x600$' &&
+    pass "the snapshot is 1024x600" || fail "snapshot size after the change"
+mark
+PC1=$MARKS
+wait_for "$LOG/screen-watch.log" "^screen-changed 1024x600" 5 &&
+    wait_for "$LOG/screen-watch.log" "^usable-area usable 0,0 1024x600" 5 &&
+    pass "a connection that was already there heard it" || fail "screen watch"
+for a in Alpha Beta Gamma; do
+	sc=$(awk -v from="$PC0" -v to="$PC1" -v app="app=$a" 'NR > from &&
+	    NR <= to && $3 == app && $4 == "type=screen-changed" {
+	    sub("serial=", "", $2); print $2 }' "$LOG/wstest.log")
+	ua=$(awk -v from="$PC0" -v to="$PC1" -v app="app=$a" 'NR > from &&
+	    NR <= to && $3 == app && $4 == "type=usable-area" {
+	    sub("serial=", "", $2); print $2 }' "$LOG/wstest.log")
+	[ -n "$sc" ] && [ -n "$ua" ] && [ "$sc" -lt "$ua" ] &&
+	    pass "$a heard screen-changed, then usable-area" ||
+	    fail "$a: screen-changed ($sc) and usable-area ($ua)"
+done
+in_part "$PC0" "$PC1" 'app=Alpha type=screen-changed win=- size=1024x600' ||
+    fail "screen-changed without the new size"
+# W3 (300,250 500x400, minimized) ran off the bottom, W4 (900,100
+# 300x200) off the right edge; W1 and W2 still fit.
+in_part "$PC0" "$PC1" 'app=Beta type=window-frame win=W3 frame=300,200,500x400' &&
+    pass "W3 moved up onto the screen; Beta heard where" || fail "W3 not kept on the screen"
+in_part "$PC0" "$PC1" 'app=Gamma type=window-frame win=W4 frame=724,100,300x200' &&
+    pass "W4 moved left onto the screen; Gamma heard where" || fail "W4 not kept on the screen"
+in_part "$PC0" "$PC1" 'type=window-frame win=W[12] ' &&
+    fail "a window that still fits moved" || pass "windows that still fit stay put"
+expect_pixel 900 200 c0c030 "W4 drawn at its new place"
+expect_pixel 420 $((536 + 24)) 20a050 "the dragged tile moved inside the smaller screen"
+"$B/wsctl" screen size 1280x800 | grep -q '^screen-changed 1280x800$' &&
+    pass "back to 1280x800" || fail "wsctl screen size 1280x800"
+"$B/wsctl" screen size 2x2 2>/dev/null &&
+    fail "a 2x2 screen was accepted" || pass "a too small screen is refused"
+kill "$WPID"
+wait "$WPID" 2>/dev/null
+WPID=
+grep -q 'error' "$LOG/screen-watch.log" && fail "the screen watcher got errors"
 
 # Touchpad scrolling (WS_SERVER_SCROLL_PHASES): a two-finger flick over
 # W1 (where nothing covers it) is began, changed..., ended when the
