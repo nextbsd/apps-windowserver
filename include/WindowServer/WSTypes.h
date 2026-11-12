@@ -217,6 +217,10 @@ extern "C" {
 					   a one-way WS_MSG_WINDOW_CREATE
 					   naming its own id ("Window ids
 					   chosen by the client") */
+#define WS_SERVER_MENU_BAR	0x00400000 /* WS_MSG_SET_MENU_BAR: the active
+					   app's menu bar strip along the top
+					   comes off the usable area ("The
+					   menu bar strip" in WSProtocol.h) */
 
 /* Where a minimized window goes ("Minimizing" in WSProtocol.h). */
 #define WS_MINIMIZE_DEFAULT	0	/* the server's MinimizeIntoDock */
@@ -353,24 +357,36 @@ typedef struct ws_event_welcome {
 	/* added after protocol 1 shipped (WS_SERVER_USABLE_AREA); older
 	   servers send the welcome without it, and it reads as 0 */
 	ws_rect_t	usable;		/* see ws_event_usable_area_t */
+	/* added after protocol 1 shipped (WS_SERVER_MENU_BAR); read as 0
+	   from older servers */
+	uint32_t	menu_bar;	/* see ws_event_usable_area_t */
+	uint32_t	reserved2;
 } ws_event_welcome_t;
 
 /*
  * The usable area (servers with WS_SERVER_USABLE_AREA): the part of
- * the screen that windows should use, the screen minus the strip the
- * Dock keeps on its edge (WS_MSG_DOCK_SET_EDGE) and, later, a menu bar
- * strip along the top. It is what NSScreen's visibleFrame is on macOS:
+ * the screen that windows should use, the screen minus the menu bar
+ * strip along the top (WS_MSG_SET_MENU_BAR) and the strip the Dock
+ * keeps on its edge (WS_MSG_DOCK_SET_EDGE); a top Dock's strip is
+ * below the menu bar's. It is what NSScreen's visibleFrame is on macOS:
  * new windows are centred and cascaded inside it, zooming fills it,
  * and WindowServer puts its own things (minimized-window tiles, the
  * overview) there. Every connection gets it in the welcome and then
  * WS_EVENT_USABLE_AREA whenever it changes: the Dock moved to another
- * edge, got thicker or thinner, connected or went away, or the screen
- * changed (after WS_EVENT_SCREEN_CHANGED). Screen coordinates.
+ * edge, got thicker or thinner, connected or went away, the menu bar
+ * strip changed, or the screen changed (after WS_EVENT_SCREEN_CHANGED).
+ * Screen coordinates. `menu_bar` is the height of the menu bar strip
+ * (0 for none), which a top Dock sits directly below.
  */
 typedef struct ws_event_usable_area {
 	uint32_t	screen_id;
 	uint32_t	reserved;
 	ws_rect_t	usable;
+	/* added after protocol 1 shipped (WS_SERVER_MENU_BAR); older
+	   servers send the event without it, and it reads as 0 */
+	uint32_t	menu_bar;	/* pixels the menu bar takes from the
+					   top of the screen */
+	uint32_t	reserved2;
 } ws_event_usable_area_t;
 
 typedef struct ws_event_app {

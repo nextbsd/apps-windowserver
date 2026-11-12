@@ -5,11 +5,11 @@
  * The screen's usable area and screen changes (see "The screen and its
  * usable area" in WSProtocol.h).
  *
- * The usable area is the screen minus the strip the Dock keeps on its
- * edge: what NSScreen's visibleFrame is on macOS. Every connection gets
- * it in the welcome and WS_EVENT_USABLE_AREA when it changes, and the
- * server's own things (minimized-window tiles, the overview) stay
- * inside it.
+ * The usable area is the screen minus the menu bar strip along the top
+ * (the Mac menu style) and the strip the Dock keeps on its edge: what
+ * NSScreen's visibleFrame is on macOS. Every connection gets it in the
+ * welcome and WS_EVENT_USABLE_AREA when it changes, and the server's
+ * own things (minimized-window tiles, the overview) stay inside it.
  */
 
 #include <errno.h>
@@ -17,11 +17,20 @@
 
 #include "server.h"
 
-/* The usable area for the current screen and Dock. */
+/* The menu bar strip's height, at most a quarter of the screen. */
+static uint32_t
+menu_bar_height(const struct ws_server *srv)
+{
+	return srv->menu_bar > srv->height / 4 ? srv->height / 4 :
+	    srv->menu_bar;
+}
+
+/* The usable area for the current screen, menu bar and Dock. */
 void
 screen_usable_compute(struct ws_server *srv, ws_rect_t *r)
 {
 	uint32_t t = srv->dock_thickness;
+	uint32_t mb;
 
 	r->x = 0;
 	r->y = 0;
@@ -29,9 +38,14 @@ screen_usable_compute(struct ws_server *srv, ws_rect_t *r)
 	r->height = (int32_t)srv->height;
 
 	/*
-	 * A menu bar strip along the top (the Mac menu style, E36) will be
-	 * taken off here, before the Dock: a top Dock then sits below it.
+	 * The menu bar strip along the top comes off first: a top Dock sits
+	 * directly below it, and its thickness counts from the bar down.
+	 * Checked against the screen when the app said so; the screen may
+	 * have shrunk since. Never more than a quarter of it.
 	 */
+	mb = menu_bar_height(srv);
+	r->y += (int32_t)mb;
+	r->height -= (int32_t)mb;
 
 	/* The Dock was checked against the screen when it said so; the
 	 * screen may have shrunk since. Never more than half of it. */
@@ -76,6 +90,7 @@ send_usable(struct ws_server *srv)
 		    sizeof(ev.u.usable_area), 0);
 		ev.u.usable_area.screen_id = 1;
 		ev.u.usable_area.usable = srv->usable;
+		ev.u.usable_area.menu_bar = srv->usable_menu_bar;
 		client_send(srv, c, &ev, -1);
 	}
 }
@@ -84,7 +99,9 @@ static void
 usable_set(struct ws_server *srv, const ws_rect_t *r)
 {
 	srv->usable = *r;
-	ws_info("usable area %d,%d %dx%d", r->x, r->y, r->width, r->height);
+	srv->usable_menu_bar = menu_bar_height(srv);
+	ws_info("usable area %d,%d %dx%d, menu bar %u", r->x, r->y, r->width,
+	    r->height, srv->usable_menu_bar);
 	send_usable(srv);
 	window_tiles_place(srv);
 	srv->ov.dirty = true;		/* the overview lays out again */
@@ -101,9 +118,74 @@ screen_usable_update(struct ws_server *srv)
 	ws_rect_t r;
 
 	screen_usable_compute(srv, &r);
-	if (rects_equal(&r, &srv->usable))
+	if (rects_equal(&r, &srv->usable) &&
+	    menu_bar_height(srv) == srv->usable_menu_bar)
 		return;
 	usable_set(srv, &r);
+}
+
+/* ---- the menu bar strip ---- */
+
+/*
+ * Work out which app's report sets the menu bar strip (see "The menu bar
+ * strip" in WSProtocol.h): the active app's, if it has said; else the
+ * app that set it last, while it's still there; else none. If the strip
+ * changed, the usable area follows.
+ */
+void
+menu_bar_update(struct ws_server *srv)
+{
+	struct ws_client *a = srv->active, *owner = srv->menu_bar_app;
+	uint32_t height = 0;
+
+	if (a != NULL && !a->dead && a->menu_bar >= 0)
+		owner = a;
+	else if (owner != NULL && (owner->dead || owner->menu_bar < 0))
+		owner = NULL;
+	if (owner != NULL)
+		height = (uint32_t)owner->menu_bar;
+	srv->menu_bar_app = owner;
+	if (height == srv->menu_bar)
+		return;
+	srv->menu_bar = height;
+	if (owner != NULL)
+		ws_info("menu bar strip %u pixels (app %u, %s)", height,
+		    owner->id, owner->app_name);
+	else
+		ws_info("no menu bar strip");
+	screen_usable_update(srv);
+}
+
+/* WS_MSG_SET_MENU_BAR from app c (a client->app): its bar is `height`
+ * pixels, 0 for none. Returns 0 or an errno. */
+int
+menu_bar_set(struct ws_server *srv, struct ws_client *c, uint32_t height)
+{
+	if (height > srv->height / 4)
+		return EINVAL;
+	c->menu_bar = (int32_t)height;
+	menu_bar_update(srv);
+	return 0;
+}
+
+/*
+ * App c is going away. If another connection carries the app on
+ * (`heir`, see app_member_gone), the app's report goes with it;
+ * otherwise a strip c set goes away, unless the active app has said.
+ */
+void
+menu_bar_app_gone(struct ws_server *srv, struct ws_client *c,
+    struct ws_client *heir)
+{
+	if (heir != NULL) {
+		heir->menu_bar = c->menu_bar;
+		if (srv->menu_bar_app == c)
+			srv->menu_bar_app = heir;
+		return;
+	}
+	if (srv->menu_bar_app == c)
+		srv->menu_bar_app = NULL;
+	menu_bar_update(srv);
 }
 
 /*

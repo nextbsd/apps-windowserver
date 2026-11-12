@@ -47,6 +47,7 @@ struct ws_connection {
 	ws_screen_info_t screen;
 	ws_rect_t	usable;		/* WS_SERVER_USABLE_AREA, else the
 					   whole screen */
+	uint32_t	menu_bar;	/* WS_SERVER_MENU_BAR, else 0 */
 	/* events read while waiting for something else */
 	ws_event_t	*queue;
 	size_t		qhead;
@@ -550,6 +551,8 @@ connect_impl(const char *service, const char *app_name, uint32_t flags,
 		c->usable = ev.u.welcome.usable;
 	else
 		screen_rect(&c->screen, &c->usable);
+	if (c->server_flags & WS_SERVER_MENU_BAR)
+		c->menu_bar = ev.u.welcome.menu_bar;
 	return c;
 
 fail:
@@ -669,6 +672,12 @@ ws_usable_area(ws_connection_t *c, ws_rect_t *area)
 	return 0;
 }
 
+WS_API uint32_t
+ws_menu_bar_height(ws_connection_t *c)
+{
+	return c->menu_bar;
+}
+
 WS_API int
 ws_pending(ws_connection_t *c)
 {
@@ -693,8 +702,10 @@ note_event(ws_connection_t *c, const ws_event_t *ev)
 			screen_rect(&c->screen, &c->usable);
 	}
 	if (ev->hdr.type == WS_EVENT_USABLE_AREA &&
-	    ev->u.usable_area.screen_id == c->screen.screen_id)
+	    ev->u.usable_area.screen_id == c->screen.screen_id) {
 		c->usable = ev->u.usable_area.usable;
+		c->menu_bar = ev->u.usable_area.menu_bar;
+	}
 }
 
 WS_API int
@@ -1254,6 +1265,12 @@ WS_API int
 ws_activate(ws_connection_t *c)
 {
 	return send_int(c, WS_MSG_ACTIVATE, 0, 0);
+}
+
+WS_API int
+ws_set_menu_bar(ws_connection_t *c, uint32_t height)
+{
+	return send_int(c, WS_MSG_SET_MENU_BAR, 0, height);
 }
 
 WS_API int

@@ -10,7 +10,9 @@
 # windows handed to the Dock instead of tiles (MinimizeIntoDock, and
 # per request with WS_MINIMIZE_INTO_DOCK or WS_MINIMIZE_BOTTOM_ROW), and
 # the screen edge the Dock reports (WS_MSG_DOCK_SET_EDGE), the usable
-# area and tiles kept out of the Dock's strip, screen size changes,
+# area and tiles kept out of the Dock's strip, the active app's menu
+# bar strip (WS_MSG_SET_MENU_BAR) with a top Dock below it, screen size
+# changes,
 # touchpad scroll phases and momentum scrolling, and the window
 # overview (Exposé).
 #
@@ -33,6 +35,7 @@ SPID=
 TPID=
 DPID=
 EPID=
+MPID=
 WPID=
 
 fail() {
@@ -47,6 +50,7 @@ pass() {
 cleanup() {
 	[ -n "$DPID" ] && kill "$DPID" 2>/dev/null
 	[ -n "$EPID" ] && kill "$EPID" 2>/dev/null
+	[ -n "$MPID" ] && kill "$MPID" 2>/dev/null
 	[ -n "$WPID" ] && kill "$WPID" 2>/dev/null
 	[ -n "$TPID" ] && kill "$TPID" 2>/dev/null
 	[ -n "$SPID" ] && kill "$SPID" 2>/dev/null
@@ -491,6 +495,77 @@ expect_pixel 420 $((646 + 24)) 20a050 "a dragged tile stays where it was put"
 kill "$EPID"
 wait "$EPID" 2>/dev/null
 EPID=
+
+# The menu bar strip (WS_SERVER_MENU_BAR, libs-back#3): the active
+# app's Mac-style menu bar comes off the top of the usable area, and a
+# top Dock sits directly below it. Only the active app sets it; an
+# active app that never said keeps the strip of the app that did.
+# wsctl menubar connects as such an app.
+# menubar_is N: wsctl screen (a new connection: from the welcome)
+menubar_is() {
+	i=0
+	while [ $i -lt 20 ]; do
+		"$B/wsctl" screen | grep -q "^menubar $1$" && return 0
+		sleep 0.1
+		i=$((i + 1))
+	done
+	"$B/wsctl" screen
+	return 1
+}
+menubar_is 0 && pass "no menu bar strip to start with" || fail "a menu bar strip at the start"
+"$B/wsctl" menubar 24 60 >"$LOG/menubar-a.log" 2>&1 &
+MPID=$!
+wait_for "$LOG/menubar-a.log" "^menubar 24 usable 0,24 1280x776$" 5 &&
+    pass "an active app's 24-pixel bar: usable 0,24 1280x776" ||
+    { fail "menu bar strip from the active app"; cat "$LOG/menubar-a.log"; }
+MA=$(awk '$1 == "client" { print $2; exit }' "$LOG/menubar-a.log")
+menubar_is 24 && usable_is "0,24 1280x776" &&
+    pass "the welcome carries the strip (menubar 24)" ||
+    fail "the welcome's menu bar"
+dock_at top 50
+usable_is "0,74 1280x726" &&
+    pass "a top Dock sits below the bar: usable 0,74 1280x726" ||
+    fail "usable area with the bar and a top Dock"
+"$B/wsctl" menubar 30 0 inactive | grep -q "^menubar 24 " &&
+    menubar_is 24 && pass "an inactive app's report doesn't count" ||
+    fail "an inactive app changed the strip"
+ALPHA=$(awk '$1 == "connected" && $2 == "app=Alpha" \
+    { sub("client=", "", $3); print $3; exit }' "$LOG/wstest.log")
+"$B/wsctl" dock activate "$ALPHA" && "$B/wsctl" sync && menubar_is 24 &&
+    pass "an active app that never said keeps the strip" ||
+    fail "the strip after activating an app without a bar"
+"$B/wsctl" menubar 0 >"$LOG/menubar-b.log" 2>&1 && menubar_is 0 &&
+    usable_is "0,50 1280x750" &&
+    pass "an active app without a bar (0) clears it; the Dock moves up" ||
+    fail "a 0 report from the active app"
+"$B/wsctl" dock activate "$MA" && menubar_is 24 &&
+    usable_is "0,74 1280x726" &&
+    pass "the app's kept report counts again when it's activated" ||
+    fail "the strip after activating the bar's app again"
+"$B/wsctl" menubar 300 >/dev/null 2>"$LOG/menubar-c.log" &&
+    fail "a 300-pixel bar on an 800-pixel screen was taken" ||
+    { grep -q "bad menu bar height" "$LOG/menubar-c.log" &&
+    pass "more than a quarter of the screen refused (EINVAL)" ||
+    fail "the error for a 300-pixel bar"; }
+menubar_is 24 || fail "a refused report changed the strip"
+kill "$MPID"
+wait "$MPID" 2>/dev/null
+MPID=
+menubar_is 0 && usable_is "0,50 1280x750" &&
+    pass "the bar's app gone: no strip, the top Dock moves up" ||
+    fail "the strip after its app went"
+grep -q 'menubar=24' "$LOG/wstest.log" &&
+    pass "apps heard the strip in WS_EVENT_USABLE_AREA" ||
+    fail "no menubar in wstest's usable-area events"
+kill "$EPID"
+wait "$EPID" 2>/dev/null
+EPID=
+usable_is "0,0 1280x800" || fail "usable area after the menu bar test"
+# Beta was the active app, with its windows in front, before this.
+BETA=$(awk '$1 == "connected" && $2 == "app=Beta" \
+    { sub("client=", "", $3); print $3; exit }' "$LOG/wstest.log")
+"$B/wsctl" dock activate "$BETA" && "$B/wsctl" sync ||
+    fail "activating Beta again"
 
 # Screen changes (WS_SERVER_SCREEN_CHANGES, apps-windowserver#10): a
 # headless screen changes size with `wsctl screen size`. Every

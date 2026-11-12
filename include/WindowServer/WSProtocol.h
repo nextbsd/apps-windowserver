@@ -114,6 +114,10 @@ enum {
 	/* servers with WS_SERVER_WINDOW_IDS */
 	WS_MSG_RESERVE_WINDOW_IDS,	/* sync, ws_req_int_t: how many;
 					   u.window_ids */
+	/* app connections (servers with WS_SERVER_MENU_BAR), see "The menu
+	   bar strip" */
+	WS_MSG_SET_MENU_BAR,		/* ws_req_int_t: height in pixels,
+					   0 = no menu bar */
 	WS_MSG_LAST
 };
 
@@ -531,10 +535,13 @@ typedef struct ws_req_cursor {
  * Usable area (servers with WS_SERVER_USABLE_AREA): the welcome carries
  * it after the screen (ws_event_welcome_t.usable), and every connection
  * gets WS_EVENT_USABLE_AREA (ws_event_usable_area_t) whenever it
- * changes. It is the screen minus the strip of the edge the Dock keeps
- * (WS_MSG_DOCK_SET_EDGE, see "The Dock"), the screen itself while no
- * Dock has said; later it will also leave out a menu bar strip along
- * the top. Apps use it as NSScreen's visibleFrame. WindowServer puts
+ * changes. It is the screen minus the menu bar strip along the top
+ * (WS_MSG_SET_MENU_BAR, see "The menu bar strip") and the strip of the
+ * edge the Dock keeps (WS_MSG_DOCK_SET_EDGE, see "The Dock"), the
+ * screen itself while neither has been said. A top Dock's strip starts
+ * below the menu bar's. Apps use it as NSScreen's visibleFrame. The
+ * welcome and the event also carry the menu bar's height (`menu_bar`),
+ * so a top Dock knows how far down to sit. WindowServer puts
  * its own things inside it: minimized-window tiles go along its bottom
  * edge from its left edge (just above a bottom Dock, right of a left
  * one), and are placed again when it changes; tiles the user dragged
@@ -554,6 +561,34 @@ typedef struct ws_req_cursor {
  * (`wsctl screen size WxH`), for tests; a DRM server has a single mode
  * for now, so it sends the event once mode changes come (hotplug,
  * Displays).
+ */
+
+/*
+ * The menu bar strip (servers with WS_SERVER_MENU_BAR). In the Mac menu
+ * style (NSMacintoshInterfaceStyle) each GNUstep app draws its own main
+ * menu as a bar along the top of the screen. The strip it takes comes
+ * off the usable area, so new windows, zoomed windows, tiles, the
+ * overview and window tiling stay below it, and a Dock on the top edge
+ * sits directly below it (its WS_MSG_DOCK_SET_EDGE thickness is
+ * measured from the bar's bottom edge).
+ *
+ * WS_MSG_SET_MENU_BAR (ws_req_int_t), from app connections (a joined
+ * connection speaks for its app; tools and Docks get EPERM): `value` is
+ * the bar's height in pixels, 0 when the app shows no bar (the NeXT or
+ * in-window menu style). More than a quarter of the screen's height
+ * fails with EINVAL. The server keeps each app's newest report.
+ *
+ * Only the active app sets the strip: there is no separate menu-bar
+ * process to trust, every app draws its own bar, and the active app's
+ * bar is the one on top. When an app becomes active its report, if it
+ * made one, sets the strip at once. An active app that never reported
+ * (an X11 app, a tool-like client, an app with no main menu) leaves the
+ * strip as the last active app that did report set it, so the strip
+ * doesn't come and go with the focus; that app may still change or
+ * clear it while inactive (it hears the style change after the user
+ * moved on). When that app goes away and the active app hasn't
+ * reported, there is no strip. A report from any other inactive app is
+ * kept for when it becomes active.
  */
 
 /*
