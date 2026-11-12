@@ -32,13 +32,101 @@ libs-base and libs-gui are unmodified. The `nextbsd` backend installs beside the
 |---|---|
 | Server | `/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer` |
 | launchd job | `/System/Library/LaunchDaemons/org.nextbsd.WindowServer.plist` |
+| Defaults | `/System/Library/Preferences/org.nextbsd.WindowServer.plist` |
+| Client library | `/usr/lib/libWindowServerClient.so.1` and `.a` |
+| Headers | `/usr/include/WindowServer/` |
+| pkgconf file | `/usr/libdata/pkgconfig/WindowServerClient.pc` |
+| Test tools | `/usr/libexec/WindowServer/` (`wstest`, `wsctl`, `ws-session`) |
+| Client socket | `/var/run/WindowServer/ws.sock` |
 | Account | `_windowserver` (uid 88) |
 
-WindowServer starts as root to open the GPU and input devices, then runs as `_windowserver`.
+WindowServer starts as root to open the GPU and input devices, then runs as `_windowserver`. If that account doesn't exist yet, it says so and stays root.
+
+The client library is a plain C library with no dependencies beyond libc and NextBSD's Mach libraries, so it goes in `/usr/lib` with its headers in `/usr/include`, next to libdrm and libinput. The GNUstep backend links it with `pkgconf --libs WindowServerClient`.
 
 ## Status
 
-Nothing is built yet. The first milestone is a server that drives the display, reads input, and stacks test windows by level. It is started by hand from a text console. GNUstep apps, loginwindow and GPU compositing come after that.
+Phase 1, the software path, is written. The server, the client library and two test tools build, and the headless test passes on the arm64 VM. The DRM, VT and libinput code builds but hasn't run on real hardware yet. There is no GNUstep backend yet, so no real apps can use it. This is still a proof of concept.
+
+What works, tested headless:
+
+- The Mach service, the per-client socket and buffer passing.
+- Windows stacked strictly by level (the libs-gui `NSWindowLevel` numbers), then by order within a level.
+- One active app. A click in an inactive app's window deactivates the old app, activates the new one, raises the window, makes it key, and then delivers the click.
+- Keys go only to the key window of the active app, with server-side key repeat.
+- Damage-tracked compositing with pixman, buffer release and frame-done events.
+- Snapshots and synthetic input for testing.
+
+Written but only compiled:
+
+- DRM/KMS output. It picks the card that has a connected display, sets the preferred mode, uses two dumb buffers with page flips (or `drmModeSetCrtc` if flips fail), and the hardware cursor, with a software cursor as fallback.
+- VT handling: a free VT, `KD_GRAPHICS`, `K_RAW` with a raw termios, `VT_PROCESS` switching that drops and takes back DRM master, Ctrl+Alt+F*n* to switch, and everything restored on exit or crash.
+- libinput on seat0 through the IOKit libudev, with xkbcommon (`evdev` rules), relative and absolute pointers, wheel and touchpad scrolling. Power and sleep keys are logged, never typed.
+- Dropping from root to `_windowserver` after the devices are open.
+
+Not done yet:
+
+- The GNUstep backend (`libgnustep-nextbsd` in the libs-back fork) and a real `ws-session`.
+- Waiting for the GPU kext's IOKit match, and display hotplug through IOKit.
+- Images for the standard cursors other than the arrow.
+- Touch, tablets, gestures and switches. Per-device keyboard settings.
+- Skipping windows hidden behind opaque ones while compositing.
+- GPU compositing (EGL/GBM), several displays, HiDPI.
+- A focus-stealing policy: today any app can make itself active.
+- loginwindow, the lock shield and the app switcher. Their window levels are reserved.
+
+## Building
+
+On NextBSD, with the base display stack (libdrm, libinput, libxkbcommon, pixman) and gmake:
+
+```sh
+gmake
+gmake check          # the headless test, see below
+gmake install        # DESTDIR=... and the *DIR variables in GNUmakefile work
+```
+
+Everything is built into `build/`.
+
+## Trying it without a display
+
+Headless mode needs no GPU, VT or input devices and no privileges, so it runs anywhere, including over SSH while X is using the screen:
+
+```sh
+build/WindowServer --headless 1280x800 &
+build/wstest &                 # two apps, Alpha and Beta, three windows
+build/wsctl list               # the window stack, bottom to top
+build/wsctl pixel 350 300      # the colour on screen at 350,300
+build/wsctl click 150 450      # click into Alpha's window
+build/wsctl key a              # type "a" into the active app
+build/wsctl snapshot out.ppm   # save the screen
+```
+
+`wstest` prints every event it gets. `tests/headless-test.sh` (`gmake check`) does all of this with its own service name and socket, and checks the screen colours, the order of the activation events, and that only the active app gets keys.
+
+`kill -USR1` makes the server write a snapshot to `/tmp/WindowServer-snapshot.ppm`.
+
+## Running it on the display
+
+Don't do this while Xorg is running: X owns the display. From a text console, as root:
+
+```sh
+ws-session --server build/WindowServer
+```
+
+`ws-session` loads a temporary launchd job for the server, so its Mach service is in the system bootstrap where every user's apps can find it, and stops it on Ctrl-C. `Ctrl+Alt+Backspace` also stops the server, and `Ctrl+Alt+F1` switches to the first text console. For now it only starts the server; once the GNUstep backend exists it will also start gpbs, gdnc, the Dock and FileViewer, like startx does for X.
+
+You can also start `WindowServer` directly. That works too, but launchd then registers the Mach service in your own login's bootstrap, so only your own processes can find it.
+
+The installed LaunchDaemon ships `Disabled`, because it would otherwise take the console at boot. `launchctl load -F` starts it. launchd-842 only gives the console to a job labelled `com.apple.WindowServer` (core.c, around line 2226), so `org.nextbsd.WindowServer` needs a small launchd patch before it can run as the real console owner.
+
+## How apps talk to it
+
+Apps use `libWindowServerClient` (`<WindowServer/WSClient.h>`). The wire format is in `<WindowServer/WSProtocol.h>`.
+
+- **Mach** carries the requests: hello, create and destroy windows, frame, level, ordering, title, flags, attach a buffer, damage, commit, make key, cursor, activate and deactivate. Apps find the server by looking up `org.nextbsd.windowserver` (or `$WS_SERVICE_NAME`) in the bootstrap. The server reads each sender's pid from the Mach audit trailer.
+- **A Unix socket** carries what Mach can't yet. NextBSD's Mach can't pass file descriptors or shared memory, so window buffers are memfds sent over the socket, and the server sends its events there too: input, key window and app activation changes, buffer release, frame done and screen info. Apps get one file descriptor to poll. The hello reply over Mach tells the app where the socket is and gives it a one-time token to connect with.
+
+Window buffers are premultiplied ARGB8888, drawn by the app (with cairo, in the GNUstep backend). After a buffer is sent once, each frame only sends damage rectangles and a commit.
 
 ## License
 
