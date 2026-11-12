@@ -302,6 +302,7 @@ main(int argc, char **argv)
 		for (i = 0; i < n; i++)
 			handle_kevent(srv, &events[i]);
 		clients_reap(srv);
+		dock_flush(srv);
 	}
 	status = 0;
 

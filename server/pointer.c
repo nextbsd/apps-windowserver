@@ -146,7 +146,7 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 				c = w->owner->app;
 				if (c != srv->active &&
 				    (w->flags & WS_WINDOW_NO_ACTIVATE) == 0 &&
-				    (c->flags & WS_CONNECT_CONTROL) == 0) {
+				    (c->flags & WS_CONNECT_TOOL) == 0) {
 					app_activate(srv, c,
 					    (w->flags & WS_WINDOW_NO_KEY) ? NULL : w);
 					activated = true;

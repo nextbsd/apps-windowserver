@@ -6,7 +6,8 @@
 # libinput, runs wstest (two apps and a joined connection, four
 # windows), then uses wsctl to check the composited screen and drive
 # synthetic input, including minimizing a window to a tile and
-# restoring it.
+# restoring it, and the Dock's window list (wsctl dock), with minimized
+# windows handed to the Dock instead of tiles (MinimizeIntoDock).
 #
 #   sh tests/headless-test.sh [BUILD_DIR]
 #
@@ -17,12 +18,15 @@ export WS_SERVICE_NAME="org.nextbsd.windowserver.test.$$"
 export WS_SnapshotPath="/tmp/ws-test-$$-signal.ppm"
 # Not black, so a window drawn with the wrong alpha would show.
 export WS_BackgroundColor=202020
+# Tiles until a Dock connects, then the Dock shows minimized windows.
+export WS_MinimizeIntoDock=true
 LOG="/tmp/ws-test-$$"
 SOCK="$LOG/ws.sock"
 mkdir -p "$LOG" || exit 1
 FAILS=0
 SPID=
 TPID=
+DPID=
 
 fail() {
 	echo "FAIL: $*"
@@ -34,6 +38,7 @@ pass() {
 }
 
 cleanup() {
+	[ -n "$DPID" ] && kill "$DPID" 2>/dev/null
 	[ -n "$TPID" ] && kill "$TPID" 2>/dev/null
 	[ -n "$SPID" ] && kill "$SPID" 2>/dev/null
 	wait 2>/dev/null
@@ -83,6 +88,14 @@ mark() {
 	"$B/wsctl" sync
 	sleep 0.5
 	MARKS=$(wc -l <"$LOG/wstest.log")
+}
+
+# ppm_pixel FILE X Y: the colour at X,Y of a binary PPM wsctl wrote
+# ("P6\nW H\n255\n").
+ppm_pixel() {
+	_w=$(head -c 32 "$1" | awk 'NR == 2 { print $1 }')
+	_hl=$(head -c 32 "$1" | awk 'NR <= 3 { n += length($0) + 1 } END { print n }')
+	od -An -tx1 -j $((_hl + ($3 * _w + $2) * 3)) -N3 "$1" | tr -d ' \n'
 }
 
 # in_part FROM TO PATTERN: PATTERN (ERE) in lines FROM+1..TO.
@@ -215,6 +228,65 @@ expect_pixel 690 590 20a050 "W3 restored, with what it drew while minimized"
 expect_pixel 215 $((TILE_Y - 81)) 202020 "tile gone after the restore"
 "$B/wsctl" list | grep '"W3"$' | grep -q ' active key ' &&
     pass "W3 is key again" || fail "W3 not key after restoring"
+
+# The Dock (WS_SERVER_DOCK). Apps can't list every app's windows;
+# a Dock connection can, with ids.
+grep -q 'list refused app=Alpha EPERM' "$LOG/wstest.log" &&
+    pass "an app can't list other apps' windows (EPERM)" || fail "an app listed every window"
+"$B/wsctl" dock list >"$LOG/dock-list.txt" || fail "wsctl dock list"
+cat "$LOG/dock-list.txt"
+W3ID=$(awk '/"W3"$/ { sub("id=", "", $1); print $1 }' "$LOG/dock-list.txt")
+ALPHA=$(awk '/"W1"$/ { sub("app=", "", $2); print $2 }' "$LOG/dock-list.txt")
+grep '"W4"$' "$LOG/dock-list.txt" | grep -q " app=$ALPHA " &&
+    pass "dock list: W4 (Gamma) is in Alpha's app ($ALPHA)" || fail "dock list app ids"
+grep '"W3"$' "$LOG/dock-list.txt" | grep -q ' visible active key ' &&
+    pass "dock list: W3 visible, active and key" || fail "dock list flags"
+"$B/wsctl" dock list -a | grep -q '"W3"$' && pass "dock list -a" || fail "dock list -a"
+# While a Dock is connected, minimized windows go into it: no tile.
+"$B/wsctl" dock watch 60 >"$LOG/dock-watch.log" 2>&1 &
+DPID=$!
+wait_for "$LOG/dock-watch.log" "^state flags=0x1 minimized-windows" 5 &&
+    pass "the Dock was handed the minimized windows" || fail "no dock-state"
+"$B/wsctl" key m || fail "wsctl key m (with a Dock)"
+mark
+expect_pixel 690 590 202020 "W3 minimized again"
+expect_pixel 4 $((TILE_Y + 24)) 202020 "no tile while the Dock shows minimized windows"
+wait_for "$LOG/dock-watch.log" "id=$W3ID .* minimized in-dock" 5 &&
+    pass "the Dock heard the list change: W3 minimized, in the Dock" ||
+    fail "no list-changed with W3 in the Dock"
+"$B/wsctl" key c || fail "wsctl key c (with a Dock)"
+wait_for "$LOG/dock-watch.log" "^preview-changed window=$W3ID" 5 &&
+    pass "W3's commit while minimized: preview-changed" || fail "no preview-changed"
+"$B/wsctl" dock preview "$W3ID" 100 "$LOG/preview.ppm" | grep -q ': 100x80$' &&
+    pass "preview of W3 scaled to 100x80" || fail "preview size"
+got=$(ppm_pixel "$LOG/preview.ppm" 50 40)
+[ "$got" = 20a050 ] && pass "preview shows W3's last frame ($got)" || fail "preview pixel is $got, expected 20a050"
+mark
+P8=$MARKS
+"$B/wsctl" dock activate "$ALPHA" || fail "wsctl dock activate"
+mark
+P9=$MARKS
+in_part "$P8" "$P9" 'app=Alpha type=app-activated' &&
+    in_part "$P8" "$P9" 'app=Beta type=app-deactivated' &&
+    pass "the Dock activated Alpha" || fail "dock activate"
+"$B/wsctl" dock restore "$W3ID" || fail "wsctl dock restore"
+mark
+P10=$MARKS
+in_part "$P9" "$P10" 'app=Beta type=app-activated' &&
+    in_part "$P9" "$P10" 'app=Beta type=window-restore win=W3' &&
+    pass "the Dock's restore activated Beta and sent window-restore" || fail "dock restore"
+expect_pixel 690 590 20a050 "W3 restored from the Dock"
+# The Dock goes away while W3 is minimized: its tile comes back.
+"$B/wsctl" key m || fail "wsctl key m (before the Dock quits)"
+mark
+expect_pixel 4 $((TILE_Y + 24)) 202020 "still no tile"
+kill "$DPID"
+wait "$DPID" 2>/dev/null
+DPID=
+"$B/wsctl" sync
+expect_pixel 4 $((TILE_Y + 24)) 303030 "tile back once the Dock is gone"
+expect_pixel 20 $((TILE_Y + 24)) 20a050 "the tile shows W3"
+grep -q '^error' "$LOG/dock-watch.log" && fail "the Dock got errors"
 
 kill "$TPID"
 wait "$TPID" 2>/dev/null

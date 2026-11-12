@@ -243,10 +243,12 @@ parse_event(ws_connection_t *c, ws_event_t *ev)
 	memcpy(ev, c->rbuf, hdr.size);
 	c->rlen -= hdr.size;
 	memmove(c->rbuf, c->rbuf + hdr.size, c->rlen);
-	/* Only snapshots and keymaps carry a descriptor; it arrived with
-	 * their bytes. */
+	/* Only snapshots, previews and keymaps carry a descriptor; it
+	 * arrived with their bytes. */
 	if (ev->hdr.type == WS_EVENT_SNAPSHOT)
 		ev->u.snapshot.fd = fd_take(c);
+	else if (ev->hdr.type == WS_EVENT_PREVIEW)
+		ev->u.preview.fd = fd_take(c);
 	else if (ev->hdr.type == WS_EVENT_KEYMAP)
 		ev->u.keymap.fd = fd_take(c);
 	return 1;
@@ -258,6 +260,8 @@ event_close_fd(const ws_event_t *ev)
 {
 	if (ev->hdr.type == WS_EVENT_SNAPSHOT && ev->u.snapshot.fd >= 0)
 		close(ev->u.snapshot.fd);
+	else if (ev->hdr.type == WS_EVENT_PREVIEW && ev->u.preview.fd >= 0)
+		close(ev->u.preview.fd);
 	else if (ev->hdr.type == WS_EVENT_KEYMAP && ev->u.keymap.fd >= 0)
 		close(ev->u.keymap.fd);
 }
@@ -1005,13 +1009,36 @@ ws_deactivate(ws_connection_t *c)
 
 /* ---- tool requests ---- */
 
+/* Map the image a snapshot or preview event carries, and close its fd. */
+static int
+map_image(const ws_event_snapshot_t *s, ws_snapshot_t *out)
+{
+	size_t size;
+	void *p;
+
+	if (s->fd < 0) {
+		errno = EIO;
+		return -1;
+	}
+	size = (size_t)s->stride * s->height;
+	p = mmap(NULL, size, PROT_READ, MAP_SHARED, s->fd, 0);
+	close(s->fd);
+	if (p == MAP_FAILED)
+		return -1;
+	out->width = s->width;
+	out->height = s->height;
+	out->stride = s->stride;
+	out->format = s->format;
+	out->pixels = p;
+	out->map_size = size;
+	return 0;
+}
+
 WS_API int
 ws_snapshot(ws_connection_t *c, ws_snapshot_t *out)
 {
 	ws_req_int_t m;
 	ws_event_t ev;
-	size_t size;
-	void *p;
 
 	req_init(c, &m.hdr, WS_MSG_SNAPSHOT, sizeof(m), 0);
 	m.value = 0;
@@ -1020,22 +1047,7 @@ ws_snapshot(ws_connection_t *c, ws_snapshot_t *out)
 		return -1;
 	if (wait_for_event(c, WS_EVENT_SNAPSHOT, &ev, RPC_TIMEOUT_MS) < 0)
 		return -1;
-	if (ev.u.snapshot.fd < 0) {
-		errno = EIO;
-		return -1;
-	}
-	size = (size_t)ev.u.snapshot.stride * ev.u.snapshot.height;
-	p = mmap(NULL, size, PROT_READ, MAP_SHARED, ev.u.snapshot.fd, 0);
-	close(ev.u.snapshot.fd);
-	if (p == MAP_FAILED)
-		return -1;
-	out->width = ev.u.snapshot.width;
-	out->height = ev.u.snapshot.height;
-	out->stride = ev.u.snapshot.stride;
-	out->format = ev.u.snapshot.format;
-	out->pixels = p;
-	out->map_size = size;
-	return 0;
+	return map_image(&ev.u.snapshot, out);
 }
 
 WS_API void
@@ -1050,12 +1062,29 @@ WS_API int
 ws_list_windows(ws_connection_t *c,
     void (*fn)(const ws_event_window_info_t *, void *), void *ctx)
 {
-	ws_req_header_t h;
-	ws_event_t ev;
-	int r;
+	return ws_list_windows_flags(c, 0, fn, ctx);
+}
 
-	req_init(c, &h, WS_MSG_LIST_WINDOWS, sizeof(h), 0);
-	if (send_oneway(c, &h) < 0)
+WS_API int
+ws_list_windows_flags(ws_connection_t *c, uint32_t options,
+    void (*fn)(const ws_event_window_info_t *, void *), void *ctx)
+{
+	ws_req_header_t h;
+	ws_req_int_t m;
+	ws_event_t ev;
+	int r, err = 0;
+
+	if (options == 0) {
+		/* the request older servers know */
+		req_init(c, &h, WS_MSG_LIST_WINDOWS, sizeof(h), 0);
+		r = send_oneway(c, &h);
+	} else {
+		req_init(c, &m.hdr, WS_MSG_LIST_WINDOWS, sizeof(m), 0);
+		m.value = (int32_t)options;
+		m.reserved = 0;
+		r = send_oneway(c, &m.hdr);
+	}
+	if (r < 0)
 		return -1;
 	for (;;) {
 		r = read_event(c, &ev);
@@ -1070,15 +1099,70 @@ ws_list_windows(ws_connection_t *c,
 			}
 			continue;
 		}
-		if (ev.hdr.type == WS_EVENT_LIST_END)
+		if (ev.hdr.type == WS_EVENT_LIST_END) {
+			if (err != 0) {
+				errno = err;
+				return -1;
+			}
 			return 0;
+		}
 		if (ev.hdr.type == WS_EVENT_WINDOW_INFO) {
 			if (fn != NULL)
 				fn(&ev.u.window_info, ctx);
 			continue;
 		}
+		if (ev.hdr.type == WS_EVENT_ERROR &&
+		    ev.u.error.request == WS_MSG_LIST_WINDOWS) {
+			err = ev.u.error.code ? ev.u.error.code : EIO;
+			continue;
+		}
 		if (queue_push(c, &ev) < 0)
 			return -1;
+	}
+}
+
+/* ---- the Dock ---- */
+
+WS_API int
+ws_dock_activate(ws_connection_t *c, uint32_t app_id, uint32_t window)
+{
+	return send_int(c, WS_MSG_DOCK_ACTIVATE, window, (int32_t)app_id);
+}
+
+WS_API int
+ws_dock_show_minimized(ws_connection_t *c, int on)
+{
+	return send_int(c, WS_MSG_DOCK_SHOW_MINIMIZED, 0, on ? 1 : 0);
+}
+
+WS_API int
+ws_dock_restore(ws_connection_t *c, uint32_t window)
+{
+	ws_req_header_t h;
+
+	req_init(c, &h, WS_MSG_DOCK_RESTORE, sizeof(h), window);
+	return send_oneway(c, &h);
+}
+
+WS_API int
+ws_dock_preview(ws_connection_t *c, uint32_t window, uint32_t max_size,
+    ws_snapshot_t *out)
+{
+	ws_req_int_t m;
+	ws_event_t ev;
+
+	req_init(c, &m.hdr, WS_MSG_DOCK_PREVIEW, sizeof(m), window);
+	m.value = (int32_t)max_size;
+	m.reserved = 0;
+	if (send_rpc(c, &m.hdr, NULL) < 0)
+		return -1;
+	for (;;) {
+		if (wait_for_event(c, WS_EVENT_PREVIEW, &ev, RPC_TIMEOUT_MS) < 0)
+			return -1;
+		if (ev.hdr.window == window)
+			return map_image(&ev.u.preview, out);
+		/* an answer to an earlier, timed-out request */
+		event_close_fd(&ev);
 	}
 }
 
@@ -1166,6 +1250,10 @@ ws_event_name(uint16_t type)
 		[WS_EVENT_KEYS_HELD] = "keys-held",
 		[WS_EVENT_WINDOW_ORDERED] = "window-ordered",
 		[WS_EVENT_WINDOW_RESTORE] = "window-restore",
+		[WS_EVENT_DOCK_STATE] = "dock-state",
+		[WS_EVENT_WINDOW_LIST_CHANGED] = "window-list-changed",
+		[WS_EVENT_PREVIEW_CHANGED] = "preview-changed",
+		[WS_EVENT_PREVIEW] = "preview",
 	};
 
 	if (type < WS_EVENT_MAX && names[type] != NULL)

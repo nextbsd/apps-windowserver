@@ -60,6 +60,7 @@ What works, tested headless:
 - Keys go only to the key window of the active app, with server-side key repeat.
 - Damage-tracked compositing with pixman, buffer release and frame-done events.
 - Minimized windows as live tiles along the bottom of the screen (see [Minimized windows](#minimized-windows)).
+- The Dock's view of every app's windows, with change notices, activation, restoring and previews (see [The Dock](#the-dock)).
 - Snapshots and synthetic input for testing.
 
 Written but only compiled:
@@ -106,7 +107,7 @@ build/wsctl key a              # type "a" into the active app
 build/wsctl snapshot out.ppm   # save the screen
 ```
 
-`wstest` prints every event it gets. `tests/headless-test.sh` (`gmake check`) does all of this with its own service name and socket, and checks the screen colours, the order of the activation events, that only the active app gets keys, joining an app, the XKB events, XRGB8888 buffers, restack notices, and minimizing: the tile's picture, icon and live update, selecting and dragging it, and restoring the window with a double-click.
+`wstest` prints every event it gets. `tests/headless-test.sh` (`gmake check`) does all of this with its own service name and socket, and checks the screen colours, the order of the activation events, that only the active app gets keys, joining an app, the XKB events, XRGB8888 buffers, restack notices, and minimizing: the tile's picture, icon and live update, selecting and dragging it, and restoring the window with a double-click. It also checks the Dock's requests (`wsctl dock`): that apps can't list other apps' windows, the list with app ids, change notices, minimized windows going into the Dock instead of tiles, previews, activating and restoring from the Dock, and the tiles coming back when the Dock goes away.
 
 `kill -USR1` makes the server write a snapshot to `/tmp/WindowServer-snapshot.ppm`.
 
@@ -175,6 +176,19 @@ Two defaults set the look, and nothing theme-specific is compiled in:
 |---|---|---|
 | `MinimizeTileSize` | `64` | Tile size in pixels, 32 to 256. 64 lines tiles up with GNUstep app icons. |
 | `MinimizeTileImage` | empty | A picture drawn behind the window instead of the plain dark rounded tile, scaled to the tile: an 8-bit binary PAM (`RGB_ALPHA` or `RGB`) or PPM file, so the server needs no image libraries. |
+| `MinimizeIntoDock` | `false` | "Minimize into the Dock": while a Dock that can show minimized windows is connected, it shows them and WindowServer draws no tiles (see [The Dock](#the-dock)). |
+
+### The Dock
+
+Apps see only their own windows. The Dock ([apps-dock](https://github.com/nextbsd/apps-dock)) needs every app's, as Darwin's Dock gets them from CoreGraphics' private window list, so it opens a second connection, beside its GNUstep backend's, with `WS_CONNECT_DOCK`. Servers that have this set `WS_SERVER_DOCK`. The details are in "The Dock" in `WSProtocol.h`.
+
+- **Who gets it.** A Dock connection, like a `WS_CONNECT_CONTROL` one (`wsctl`), is a tool, not an app. The hello fails with `EPERM` unless the sender is root, the server's own user or the console user: the user of the loginwindow session, which has a root-owned `/var/run/loginwindow/<uid>.session` record. With no loginwindow session (a server started by hand) and on a headless server, any user may, as for the rest of the protocol. The same check now guards `WS_MSG_LIST_WINDOWS`, which only tool connections may send. The trust boundary is the user: the list holds other apps' window titles, and they all belong to the console user, so other users (an SSH login) can't read them, while the console user's own programs can, as on macOS before 10.15.
+- **The list.** `ws_list_windows_flags()` gives every window with its id, owner pid, app id (`app_id`, shared by connections that joined an app), title, level, frame, the flags the owner set (`window_flags`) and its state: visible, minimized, in the Dock, key, active. `WS_LIST_ORDERED_OUT` adds the windows that aren't shown. The new fields are at the end of `ws_event_window_info_t`, so older clients still read the list.
+- **Change notices.** `WS_EVENT_WINDOW_LIST_CHANGED` comes when a window is created, destroyed, ordered in or out, restacked, minimized, restored, retitled or gets a new level or flags, when the active app or a key window changes, or when a client goes away; at most one per pass of the event loop, so the Dock lists again instead of polling. A frame change alone sends none.
+- **Requests.** `ws_dock_activate()` activates an app by its app id and brings its windows forward, or activates a window's app with that window in front and key (a minimized window is restored instead). `ws_dock_restore()` asks the owner of a minimized window to restore it, with the same `WS_EVENT_WINDOW_RESTORE` a double-click on its tile sends. `ws_dock_preview()` returns a scaled picture of a window (premultiplied ARGB8888 in a sealed memfd, at most `WS_MAX_PREVIEW` pixels on its longer side, with no tile or icon).
+- **Minimize into the Dock.** A Dock that can show minimized windows says so with `ws_dock_show_minimized()`. While `MinimizeIntoDock` is on, the oldest such Dock gets `WS_DOCK_MINIMIZED_WINDOWS` in `WS_EVENT_DOCK_STATE`: WindowServer draws no tiles and takes away the ones it drew, minimized windows are listed with `WS_WINDOW_INFO_IN_DOCK`, and every frame such a window commits sends the Dock `WS_EVENT_PREVIEW_CHANGED`. When that Dock goes away, another one takes over, or the tiles come back.
+
+`wsctl dock list|activate|restore|preview|watch` makes the same requests from the command line.
 
 ## License
 

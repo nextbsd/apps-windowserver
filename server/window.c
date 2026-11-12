@@ -5,6 +5,7 @@
  * The window model: the visible stack (strictly by level, then by
  * order within a level), key windows and the single active app, and
  * the tiles that stand in for minimized windows (drawn by tile.c).
+ * Every change the Dock's window list shows calls dock_list_changed().
  */
 
 #include <errno.h>
@@ -183,6 +184,7 @@ set_key_window(struct ws_server *srv, struct ws_client *a, struct ws_window *w)
 	if (old == w)
 		return;
 	a->key_window = w;
+	dock_list_changed(srv);
 	if (srv->active != a)
 		return;
 	if (old != NULL)
@@ -203,7 +205,7 @@ app_activate(struct ws_server *srv, struct ws_client *c, struct ws_window *key)
 {
 	struct ws_client *old = srv->active;
 
-	if (c != NULL && (c->dead || (c->flags & WS_CONNECT_CONTROL)))
+	if (c != NULL && (c->dead || (c->flags & WS_CONNECT_TOOL)))
 		return;
 	if (old == c) {
 		if (c != NULL && key != NULL)
@@ -218,6 +220,7 @@ app_activate(struct ws_server *srv, struct ws_client *c, struct ws_window *key)
 		    c != NULL ? c->id : 0);
 	}
 	srv->active = c;
+	dock_list_changed(srv);
 	if (c == NULL) {
 		ws_debug("no active app");
 		keyboard_focus_update(srv);
@@ -251,7 +254,7 @@ app_deactivate(struct ws_server *srv, struct ws_client *c)
 		if (w->tile_for != NULL)
 			continue;	/* a minimized window's tile */
 		if (w->owner->app != c && !w->owner->dead &&
-		    (w->owner->flags & WS_CONNECT_CONTROL) == 0 &&
+		    (w->owner->flags & WS_CONNECT_TOOL) == 0 &&
 		    w->level >= WS_LEVEL_NORMAL && w->level <= WS_LEVEL_CLIENT_MAX) {
 			next = w->owner->app;
 			break;
@@ -260,6 +263,7 @@ app_deactivate(struct ws_server *srv, struct ws_client *c)
 	if (c->dead) {
 		/* no events to a dead client */
 		srv->active = NULL;
+		dock_list_changed(srv);
 		if (next != NULL)
 			app_activate(srv, next, NULL);
 		return;
@@ -310,7 +314,7 @@ window_make_key(struct ws_server *srv, struct ws_window *w)
 
 /* ---- create / destroy ---- */
 
-static void tile_remove(struct ws_server *srv, struct ws_window *w);
+static void window_unminimize(struct ws_server *srv, struct ws_window *w);
 
 static int32_t
 clamp_level(int32_t level)
@@ -344,6 +348,7 @@ window_create(struct ws_server *srv, struct ws_client *c, const ws_rect_t *frame
 	pixman_region32_init(&w->pending_damage);
 	w->next = srv->windows;
 	srv->windows = w;
+	dock_list_changed(srv);
 	ws_debug("window %u created for %s level %d (%d,%d %dx%d)", w->id,
 	    c->app_name, w->level, w->frame.x, w->frame.y, w->frame.width,
 	    w->frame.height);
@@ -373,7 +378,7 @@ window_destroy(struct ws_server *srv, struct ws_window *w)
 	struct ws_window **pp;
 	struct ws_client *c = w->owner;
 
-	tile_remove(srv, w);
+	window_unminimize(srv, w);
 	if (w->visible)
 		window_order(srv, w, WS_ORDER_OUT, NULL);
 	if (c->app->key_window == w)
@@ -391,6 +396,7 @@ window_destroy(struct ws_server *srv, struct ws_window *w)
 			*pp = w->next;
 			break;
 		}
+	dock_list_changed(srv);
 	ws_debug("window %u destroyed", w->id);
 	free(w);
 }
@@ -465,12 +471,13 @@ window_order(struct ws_server *srv, struct ws_window *w, int op,
 
 	/* Ordering a minimized window in restores it; ordering it out
 	 * (its app is hiding) just takes the tile away. */
-	tile_remove(srv, w);
+	window_unminimize(srv, w);
 	if (op == WS_ORDER_OUT) {
 		if (!w->visible)
 			return;
 		stack_unlink(srv, w);
 		w->visible = false;
+		dock_list_changed(srv);
 		damage_rect(srv, &w->frame);
 		if (c->app->key_window == w)
 			set_key_window(srv, c->app, NULL);
@@ -491,6 +498,7 @@ window_order(struct ws_server *srv, struct ws_window *w, int op,
 	stack_place(srv, w, op, rel);
 	damage_rect(srv, &w->frame);
 	pointer_recheck(srv);
+	dock_list_changed(srv);
 }
 
 /* Tell w's owner where the server put w (WS_EVENT_WINDOW_ORDERED). */
@@ -542,6 +550,7 @@ window_set_level(struct ws_server *srv, struct ws_window *w, int32_t level)
 	if (level == w->level)
 		return;
 	w->level = level;
+	dock_list_changed(srv);
 	if (w->visible) {
 		stack_unlink(srv, w);
 		stack_place(srv, w, WS_ORDER_ABOVE, NULL);
@@ -570,7 +579,8 @@ window_set_frame(struct ws_server *srv, struct ws_window *w,
 	if (w->tile != NULL) {
 		w->tile->tile_dirty = true;
 		damage_rect(srv, &w->tile->frame);
-	}
+	} else if (w->minimized)
+		dock_preview_changed(srv, w);
 }
 
 /* ---- buffers and commits ---- */
@@ -638,45 +648,72 @@ window_commit(struct ws_server *srv, struct ws_window *w, uint32_t flags)
 		/* The tile shows the new frame. */
 		w->tile->tile_dirty = true;
 		damage_rect(srv, &w->tile->frame);
-	}
+	} else if (w->minimized)
+		dock_preview_changed(srv, w);	/* the Dock's preview does */
 	pixman_region32_clear(&w->pending_damage);
 	if (flags & WS_COMMIT_FRAME_DONE)
 		w->frame_requested = true;
 }
 
-/* ---- window list (wsctl) ---- */
+/* ---- window list (wsctl, the Dock) ---- */
 
+static void
+list_one(struct ws_server *srv, struct ws_client *to, struct ws_window *lw,
+    uint32_t flags, uint32_t idx)
+{
+	ws_event_t ev;
+
+	event_init(srv, &ev, WS_EVENT_WINDOW_INFO, sizeof(ev.u.window_info),
+	    lw->id);
+	ev.u.window_info.client_id = lw->owner->id;
+	ev.u.window_info.pid = lw->owner->pid;
+	ev.u.window_info.level = lw->level;
+	if (lw->owner->app->key_window == lw)
+		flags |= WS_WINDOW_INFO_KEY;
+	if (srv->active == lw->owner->app)
+		flags |= WS_WINDOW_INFO_ACTIVE;
+	else if (to->flags & WS_CONNECT_CONTROL)
+		flags &= ~WS_WINDOW_INFO_KEY;	/* as wsctl always showed it */
+	ev.u.window_info.flags = flags;
+	ev.u.window_info.frame = lw->frame;
+	ev.u.window_info.stack_index = idx;
+	strlcpy(ev.u.window_info.app_name, lw->owner->app_name,
+	    sizeof(ev.u.window_info.app_name));
+	strlcpy(ev.u.window_info.title, lw->title,
+	    sizeof(ev.u.window_info.title));
+	ev.u.window_info.window = lw->id;
+	ev.u.window_info.app_id = lw->owner->app->id;
+	ev.u.window_info.window_flags = lw->flags;
+	client_send(srv, to, &ev, -1);
+}
+
+/*
+ * The stack, bottom to top, with each tile standing for its minimized
+ * window; then minimized windows the Dock shows (no tile), then, with
+ * WS_LIST_ORDERED_OUT, the windows that aren't shown.
+ */
 void
-list_windows(struct ws_server *srv, struct ws_client *to)
+list_windows(struct ws_server *srv, struct ws_client *to, uint32_t options)
 {
 	struct ws_window *w;
 	ws_event_t ev;
 	uint32_t idx = 0;
 
 	for (w = srv->stack_bottom; w != NULL; w = w->above, idx++) {
-		/* A tile is listed as the minimized window it stands for. */
-		struct ws_window *lw = w->tile_for != NULL ? w->tile_for : w;
-
-		event_init(srv, &ev, WS_EVENT_WINDOW_INFO,
-		    sizeof(ev.u.window_info), lw->id);
-		ev.u.window_info.client_id = lw->owner->id;
-		ev.u.window_info.pid = lw->owner->pid;
-		ev.u.window_info.level = lw->level;
-		ev.u.window_info.flags = w->tile_for != NULL ?
-		    WS_WINDOW_INFO_MINIMIZED : WS_WINDOW_INFO_VISIBLE;
-		if (srv->active == lw->owner->app) {
-			ev.u.window_info.flags |= WS_WINDOW_INFO_ACTIVE;
-			if (lw->owner->app->key_window == lw)
-				ev.u.window_info.flags |= WS_WINDOW_INFO_KEY;
-		}
-		ev.u.window_info.frame = lw->frame;
-		ev.u.window_info.stack_index = idx;
-		strlcpy(ev.u.window_info.app_name, lw->owner->app_name,
-		    sizeof(ev.u.window_info.app_name));
-		strlcpy(ev.u.window_info.title, lw->title,
-		    sizeof(ev.u.window_info.title));
-		client_send(srv, to, &ev, -1);
+		if (w->tile_for != NULL)
+			list_one(srv, to, w->tile_for, WS_WINDOW_INFO_MINIMIZED,
+			    idx);
+		else
+			list_one(srv, to, w, WS_WINDOW_INFO_VISIBLE, idx);
 	}
+	for (w = srv->windows; w != NULL; w = w->next)
+		if (w->minimized && w->tile == NULL)
+			list_one(srv, to, w, WS_WINDOW_INFO_MINIMIZED |
+			    WS_WINDOW_INFO_IN_DOCK, WS_STACK_INDEX_NONE);
+	if (options & WS_LIST_ORDERED_OUT)
+		for (w = srv->windows; w != NULL; w = w->next)
+			if (!w->visible && !w->minimized)
+				list_one(srv, to, w, 0, WS_STACK_INDEX_NONE);
 	event_init(srv, &ev, WS_EVENT_LIST_END, 0, 0);
 	client_send(srv, to, &ev, -1);
 }
@@ -684,19 +721,39 @@ list_windows(struct ws_server *srv, struct ws_client *to)
 /* ---- minimizing ---- */
 
 /*
- * Minimize w: order it out and put a tile in its place, at the icon
- * level, in the first free place along the bottom of the screen (the
- * same placement as app icons). The tile is the server's own: it is in
- * the stack but not in srv->windows, so clients can't name it, and
- * tile.c draws it from w's buffer.
+ * Minimize w: order it out and, unless the Dock shows minimized windows
+ * (MinimizeIntoDock, dock.c), put a tile in its place.
  */
 void
 window_minimize(struct ws_server *srv, struct ws_window *w)
 {
+	if (w->minimized)
+		return;
+	if (w->visible)
+		window_order(srv, w, WS_ORDER_OUT, NULL);
+	w->minimized = true;
+	dock_list_changed(srv);
+	if (dock_shows_minimized(srv)) {
+		ws_debug("window %u minimized into the Dock", w->id);
+		return;
+	}
+	window_tile_add(srv, w);
+}
+
+/*
+ * Give minimized window w its tile, at the icon level, in the first
+ * free place along the bottom of the screen (the same placement as app
+ * icons). The tile is the server's own: it is in the stack but not in
+ * srv->windows, so clients can't name it, and tile.c draws it from w's
+ * buffer.
+ */
+void
+window_tile_add(struct ws_server *srv, struct ws_window *w)
+{
 	struct ws_window *t;
 	int32_t size = srv->cfg.minimize_tile_size;
 
-	if (w->tile != NULL)
+	if (w->tile != NULL || !w->minimized)
 		return;
 	t = calloc(1, sizeof(*t));
 	if (t == NULL) {
@@ -713,8 +770,6 @@ window_minimize(struct ws_server *srv, struct ws_window *w)
 	t->frame.width = size;
 	t->frame.height = size;
 	pixman_region32_init(&t->pending_damage);
-	if (w->visible)
-		window_order(srv, w, WS_ORDER_OUT, NULL);
 	w->tile = t;
 	place_icon(srv, t);
 	t->visible = true;
@@ -722,13 +777,15 @@ window_minimize(struct ws_server *srv, struct ws_window *w)
 	stack_place(srv, t, WS_ORDER_ABOVE, NULL);
 	damage_rect(srv, &t->frame);
 	pointer_recheck(srv);
+	dock_list_changed(srv);
 	ws_debug("window %u minimized, tile at %d,%d", w->id, t->frame.x,
 	    t->frame.y);
 }
 
-/* Take w's tile away, if it has one (restored, hidden or destroyed). */
-static void
-tile_remove(struct ws_server *srv, struct ws_window *w)
+/* Take w's tile away, if it has one (restored, hidden, destroyed, or
+ * handed to the Dock). */
+void
+window_tile_remove(struct ws_server *srv, struct ws_window *w)
 {
 	struct ws_window *t = w->tile;
 
@@ -741,8 +798,38 @@ tile_remove(struct ws_server *srv, struct ws_window *w)
 	if (srv->tile_selected == t)
 		srv->tile_selected = NULL;
 	pointer_window_gone(srv, t);
+	dock_list_changed(srv);
 	ws_debug("window %u: tile removed", w->id);
 	tile_free(t);
+}
+
+/* w is no longer minimized: its owner ordered it in or out, or it's
+ * going away. */
+static void
+window_unminimize(struct ws_server *srv, struct ws_window *w)
+{
+	if (!w->minimized)
+		return;
+	w->minimized = false;
+	w->preview_dirty = false;
+	window_tile_remove(srv, w);
+	dock_list_changed(srv);
+}
+
+/*
+ * Ask the owner of minimized window w to restore it (a double-click on
+ * its tile, or the Dock): activate the app and send
+ * WS_EVENT_WINDOW_RESTORE. The window stays minimized until the owner
+ * orders it in.
+ */
+void
+window_request_restore(struct ws_server *srv, struct ws_window *w)
+{
+	ws_event_t ev;
+
+	app_activate(srv, w->owner->app, NULL);
+	event_init(srv, &ev, WS_EVENT_WINDOW_RESTORE, 0, w->id);
+	client_send(srv, w->owner, &ev, -1);
 }
 
 /* The user dragged tile t to x, y. */

@@ -87,10 +87,11 @@ fill_masked(pixman_image_t *dst, const pixman_color_t *color,
 /*
  * Draw sw x sh pixels of src scaled into dw x dh at dx, dy. Shrinking
  * uses a box filter over every source pixel, so a big window turns
- * into a clean thumbnail rather than a few sampled pixels.
+ * into a clean thumbnail rather than a few sampled pixels. (The Dock's
+ * previews use it too, dock.c.)
  */
-static void
-composite_scaled(pixman_image_t *src, pixman_image_t *dst, int dx, int dy,
+void
+tile_scale(pixman_image_t *src, pixman_image_t *dst, int dx, int dy,
     int dw, int dh, int sw, int sh)
 {
 	pixman_transform_t tr;
@@ -313,7 +314,7 @@ tile_render(struct ws_server *srv, struct ws_window *t)
 	    (size_t)pixman_image_get_stride(t->tile_image) * (size_t)s);
 
 	if (srv->tile_background != NULL)
-		composite_scaled(srv->tile_background, t->tile_image, 0, 0, s, s,
+		tile_scale(srv->tile_background, t->tile_image, 0, 0, s, s,
 		    pixman_image_get_width(srv->tile_background),
 		    pixman_image_get_height(srv->tile_background));
 	else {
@@ -352,7 +353,7 @@ tile_render(struct ws_server *srv, struct ws_window *t)
 		    (int)b->height, pixman_image_get_data(b->image),
 		    (int)b->stride);
 		if (src != NULL) {
-			composite_scaled(src, t->tile_image, (s - dw) / 2,
+			tile_scale(src, t->tile_image, (s - dw) / 2,
 			    (s - dh) / 2, dw, dh, cw, ch);
 			pixman_image_unref(src);
 		}
@@ -363,7 +364,7 @@ tile_render(struct ws_server *srv, struct ws_window *t)
 	    t->owner->app->app_icon;
 	if (icon != NULL) {
 		bs = s * 3 / 8;
-		composite_scaled(icon, t->tile_image, s - bs - 1, s - bs - 1,
+		tile_scale(icon, t->tile_image, s - bs - 1, s - bs - 1,
 		    bs, bs, pixman_image_get_width(icon),
 		    pixman_image_get_height(icon));
 	}
@@ -458,8 +459,6 @@ tile_press(struct ws_server *srv, struct ws_window *t, uint32_t button,
     uint32_t count)
 {
 	struct ws_window *w = t->tile_for;
-	struct ws_client *c = w->owner;
-	ws_event_t ev;
 
 	if (button != WS_BUTTON_LEFT)
 		return;
@@ -471,9 +470,7 @@ tile_press(struct ws_server *srv, struct ws_window *t, uint32_t button,
 	if (count != 2)
 		return;
 	ws_debug("window %u: tile double-clicked", w->id);
-	app_activate(srv, c->app, NULL);
-	event_init(srv, &ev, WS_EVENT_WINDOW_RESTORE, 0, w->id);
-	client_send(srv, c, &ev, -1);
+	window_request_restore(srv, w);
 }
 
 /* The pointer moved with the left button held on tile t. */

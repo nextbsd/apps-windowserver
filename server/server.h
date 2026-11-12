@@ -33,7 +33,10 @@ uint64_t ws_now_usec(void);
 /* Optional features this server has (WS_SERVER_* in hello and welcome). */
 #define WS_SERVER_FEATURES	(WS_SERVER_JOIN | WS_SERVER_XKB | \
 				 WS_SERVER_XRGB | WS_SERVER_ORDERED | \
-				 WS_SERVER_MINIMIZE)
+				 WS_SERVER_MINIMIZE | WS_SERVER_DOCK)
+
+/* Connections that aren't apps: wsctl and the Dock's window list. */
+#define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK)
 
 /* ---- configuration (config.c) ---- */
 
@@ -61,6 +64,8 @@ struct ws_config {
 	char	snapshot_path[256];	/* SIGUSR1 writes a PPM here */
 	int	minimize_tile_size;	/* minimized-window tiles, pixels */
 	char	minimize_tile_image[256]; /* "" = plain dark rounded tile */
+	bool	minimize_into_dock;	/* a connected Dock shows minimized
+					   windows instead of tiles */
 };
 
 void	config_defaults(struct ws_config *cfg);
@@ -103,7 +108,11 @@ struct ws_window {
 	bool		frame_requested;	/* commit asked for FRAME_DONE */
 	bool		frame_inflight;		/* composited, waiting for present */
 	/* minimizing (tile.c) */
-	struct ws_window *tile;		/* minimized: its tile in the stack */
+	bool		minimized;	/* WS_MSG_WINDOW_MINIMIZE, until the
+					   owner orders it in or out */
+	bool		preview_dirty;	/* minimized: tell the Dock (dock.c) */
+	struct ws_window *tile;		/* minimized: its tile in the stack,
+					   NULL while the Dock shows it */
 	struct ws_window *tile_for;	/* a tile: the window it shows. Tiles
 					   are only in the stack, never in
 					   srv->windows, and get no events. */
@@ -141,6 +150,7 @@ struct ws_client {
 	uint64_t	hello_usec;
 	bool		dead;
 	bool		doomed;		/* destroy at the end of this loop pass */
+	bool		dock_wants_minimized; /* WS_MSG_DOCK_SHOW_MINIMIZED */
 	struct ws_buffer *buffers;
 	struct ws_window *key_window;	/* app's key window (kept while
 					   inactive); set on c->app only, and
@@ -281,6 +291,10 @@ struct ws_server {
 	pixman_image_t	*tile_background; /* MinimizeTileImage, or NULL */
 	pixman_image_t	*tile_mask_outer; /* rounded tile shapes (a8) */
 	pixman_image_t	*tile_mask_inner;
+	/* the Dock (dock.c) */
+	struct ws_client *dock;		/* shows minimized windows, or NULL */
+	bool		dock_list_dirty;	/* send WINDOW_LIST_CHANGED */
+	bool		dock_previews_dirty;	/* some window->preview_dirty */
 
 	/* cursor */
 	pixman_image_t	*cursor_default;
@@ -383,8 +397,12 @@ void	app_deactivate(struct ws_server *srv, struct ws_client *c);
 void	app_member_gone(struct ws_server *srv, struct ws_client *c);
 void	damage_rect(struct ws_server *srv, const ws_rect_t *r);
 void	damage_all(struct ws_server *srv);
-void	list_windows(struct ws_server *srv, struct ws_client *to);
+void	list_windows(struct ws_server *srv, struct ws_client *to,
+	    uint32_t options);
 void	window_minimize(struct ws_server *srv, struct ws_window *w);
+void	window_tile_add(struct ws_server *srv, struct ws_window *w);
+void	window_tile_remove(struct ws_server *srv, struct ws_window *w);
+void	window_request_restore(struct ws_server *srv, struct ws_window *w);
 void	window_tile_move(struct ws_server *srv, struct ws_window *t,
 	    int32_t x, int32_t y);
 void	window_tile_raise(struct ws_server *srv, struct ws_window *t);
@@ -401,6 +419,27 @@ void	tile_press(struct ws_server *srv, struct ws_window *t, uint32_t button,
 void	tile_drag(struct ws_server *srv, struct ws_window *t);
 int	tile_set_app_icon(struct ws_server *srv, struct ws_client *c,
 	    struct ws_buffer *b);
+
+/* ---- dock.c ---- */
+bool	dock_may_list(struct ws_server *srv, uid_t uid);
+bool	dock_shows_minimized(struct ws_server *srv);
+void	dock_list_changed(struct ws_server *srv);
+void	dock_preview_changed(struct ws_server *srv, struct ws_window *w);
+void	dock_client_ready(struct ws_server *srv, struct ws_client *c);
+void	dock_client_gone(struct ws_server *srv, struct ws_client *c);
+void	dock_flush(struct ws_server *srv);
+void	dock_show_minimized(struct ws_server *srv, struct ws_client *c,
+	    bool on);
+void	dock_activate(struct ws_server *srv, struct ws_client *c,
+	    uint32_t window, uint32_t app);
+void	dock_restore(struct ws_server *srv, struct ws_client *c,
+	    uint32_t window);
+int	dock_preview_memfd(struct ws_server *srv, struct ws_window *w,
+	    int max, uint32_t *width, uint32_t *height, uint32_t *stride);
+
+/* ---- tile.c (previews) ---- */
+void	tile_scale(pixman_image_t *src, pixman_image_t *dst, int dx, int dy,
+	    int dw, int dh, int sw, int sh);
 
 /* ---- pointer.c ---- */
 void	pointer_motion(struct ws_server *srv, double x, double y);

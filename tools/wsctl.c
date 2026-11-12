@@ -4,13 +4,17 @@
  *
  * wsctl: inspect and drive WindowServer from the command line.
  * Snapshots and synthetic input are allowed when the server runs
- * headless, or for root and the server's own user.
+ * headless, or for root and the server's own user. `wsctl dock ...`
+ * connects as a Dock (WS_CONNECT_DOCK) to try the Dock's requests.
  */
 
 #include <errno.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <WindowServer/WindowServer.h>
 
@@ -27,7 +31,12 @@ usage(void)
 	    "       wsctl key NAME          (e.g. a, Return, shift+a, ctrl+q)\n"
 	    "       wsctl keydown|keyup NAME\n"
 	    "       wsctl scroll DX DY\n"
-	    "       wsctl sync\n");
+	    "       wsctl sync\n"
+	    "       wsctl dock list [-a]     (every window, with ids; -a: hidden too)\n"
+	    "       wsctl dock activate APP_ID [WINDOW]\n"
+	    "       wsctl dock restore WINDOW\n"
+	    "       wsctl dock preview WINDOW SIZE FILE.ppm\n"
+	    "       wsctl dock watch [SECONDS] (stay the Dock, print notices)\n");
 	exit(2);
 }
 
@@ -51,6 +60,21 @@ print_window(const ws_event_window_info_t *w, void *ctx)
 	    w->stack_index, w->app_name, w->pid, w->level, w->frame.x,
 	    w->frame.y, w->frame.width, w->frame.height,
 	    (w->flags & WS_WINDOW_INFO_MINIMIZED) ? " minimized" : "",
+	    (w->flags & WS_WINDOW_INFO_ACTIVE) ? " active" : "",
+	    (w->flags & WS_WINDOW_INFO_KEY) ? " key" : "", w->title);
+}
+
+static void
+print_dock_window(const ws_event_window_info_t *w, void *ctx)
+{
+	printf("%sid=%u app=%u pid=%d %s level=%d frame=%d,%d,%dx%d%s%s%s%s%s "
+	    "\"%s\"\n", ctx != NULL ? (const char *)ctx : "", w->window,
+	    w->app_id,
+	    w->pid, w->app_name, w->level, w->frame.x, w->frame.y,
+	    w->frame.width, w->frame.height,
+	    (w->flags & WS_WINDOW_INFO_VISIBLE) ? " visible" : "",
+	    (w->flags & WS_WINDOW_INFO_MINIMIZED) ? " minimized" : "",
+	    (w->flags & WS_WINDOW_INFO_IN_DOCK) ? " in-dock" : "",
 	    (w->flags & WS_WINDOW_INFO_ACTIVE) ? " active" : "",
 	    (w->flags & WS_WINDOW_INFO_KEY) ? " key" : "", w->title);
 }
@@ -86,6 +110,142 @@ write_ppm(const ws_snapshot_t *s, const char *path)
 	return fclose(f);
 }
 
+static volatile sig_atomic_t stop;
+
+static void
+on_signal(int sig)
+{
+	(void)sig;
+	stop = 1;
+}
+
+static void
+print_dock_event(const ws_event_t *ev)
+{
+	switch (ev->hdr.type) {
+	case WS_EVENT_DOCK_STATE:
+		printf("state flags=0x%x%s\n", ev->u.dock_state.flags,
+		    (ev->u.dock_state.flags & WS_DOCK_MINIMIZED_WINDOWS) ?
+		    " minimized-windows" : "");
+		break;
+	case WS_EVENT_PREVIEW_CHANGED:
+		printf("preview-changed window=%u\n", ev->hdr.window);
+		break;
+	case WS_EVENT_ERROR:
+		printf("error request=0x%x code=%d %s\n", ev->u.error.request,
+		    ev->u.error.code, ev->u.error.message);
+		break;
+	default:
+		break;
+	}
+}
+
+/* wsctl dock watch: stay connected as the Dock and print what comes. */
+static int
+dock_watch(ws_connection_t *c, int seconds)
+{
+	time_t end = seconds > 0 ? time(NULL) + seconds : 0;
+	struct pollfd pfd;
+	ws_event_t ev;
+	int changed, r;
+
+	signal(SIGTERM, on_signal);
+	signal(SIGINT, on_signal);
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	if (ws_dock_show_minimized(c, 1) < 0)
+		return -1;
+	printf("watching as client %u\n", ws_client_id(c));
+	while (!stop && (end == 0 || time(NULL) < end)) {
+		changed = 0;
+		while ((r = ws_next_event(c, &ev, 0)) > 0) {
+			if (ev.hdr.type == WS_EVENT_WINDOW_LIST_CHANGED)
+				changed = 1;
+			else
+				print_dock_event(&ev);
+		}
+		if (r < 0) {
+			printf("server closed the connection\n");
+			return -1;
+		}
+		if (changed) {
+			printf("list-changed\n");
+			if (ws_list_windows_flags(c, 0, print_dock_window,
+			    "  ") < 0)
+				printf("list failed: %s\n", strerror(errno));
+			printf("end\n");
+			continue;	/* the list may have queued events */
+		}
+		pfd.fd = ws_connection_fd(c);
+		pfd.events = POLLIN;
+		pfd.revents = 0;
+		(void)poll(&pfd, 1, 200);
+	}
+	return 0;
+}
+
+static int
+dock_main(int argc, char **argv)
+{
+	ws_connection_t *c;
+	ws_snapshot_t snap;
+	const char *cmd;
+	ws_event_t ev;
+	int r = -1;
+
+	if (argc < 2)
+		usage();
+	cmd = argv[1];
+	c = ws_connect("wsctl-dock", WS_CONNECT_DOCK);
+	if (c == NULL) {
+		fprintf(stderr, "wsctl: can't connect as the Dock: %s\n",
+		    strerror(errno));
+		return 1;
+	}
+	if ((ws_server_flags(c) & WS_SERVER_DOCK) == 0) {
+		fprintf(stderr, "wsctl: this server has no Dock role\n");
+		ws_disconnect(c);
+		return 1;
+	}
+	if (strcmp(cmd, "list") == 0 && argc <= 3) {
+		r = ws_list_windows_flags(c, argc == 3 &&
+		    strcmp(argv[2], "-a") == 0 ? WS_LIST_ORDERED_OUT : 0,
+		    print_dock_window, NULL);
+	} else if (strcmp(cmd, "activate") == 0 && (argc == 3 || argc == 4)) {
+		r = ws_dock_activate(c, (uint32_t)strtoul(argv[2], NULL, 0),
+		    argc == 4 ? (uint32_t)strtoul(argv[3], NULL, 0) : 0);
+		if (r == 0)
+			r = ws_sync(c);
+	} else if (strcmp(cmd, "restore") == 0 && argc == 3) {
+		r = ws_dock_restore(c, (uint32_t)strtoul(argv[2], NULL, 0));
+		if (r == 0)
+			r = ws_sync(c);
+	} else if (strcmp(cmd, "preview") == 0 && argc == 5) {
+		r = ws_dock_preview(c, (uint32_t)strtoul(argv[2], NULL, 0),
+		    (uint32_t)strtoul(argv[3], NULL, 0), &snap);
+		if (r == 0) {
+			/* premultiplied: as it looks on black */
+			r = write_ppm(&snap, argv[4]);
+			printf("%s: %ux%u\n", argv[4], snap.width, snap.height);
+			ws_snapshot_free(&snap);
+		}
+	} else if (strcmp(cmd, "watch") == 0 && argc <= 3) {
+		r = dock_watch(c, argc == 3 ? atoi(argv[2]) : 0);
+	} else {
+		ws_disconnect(c);
+		usage();
+	}
+	if (r != 0)
+		fprintf(stderr, "wsctl dock %s: %s\n", cmd, strerror(errno));
+	while (ws_next_event(c, &ev, 0) > 0)
+		if (ev.hdr.type == WS_EVENT_ERROR) {
+			fprintf(stderr, "wsctl: server: %s\n",
+			    ev.u.error.message);
+			r = -1;
+		}
+	ws_disconnect(c);
+	return r == 0 ? 0 : 1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -97,6 +257,8 @@ main(int argc, char **argv)
 	if (argc < 2)
 		usage();
 	cmd = argv[1];
+	if (strcmp(cmd, "dock") == 0)
+		return dock_main(argc - 1, argv + 1);
 	c = ws_connect("wsctl", WS_CONNECT_CONTROL);
 	if (c == NULL) {
 		fprintf(stderr, "wsctl: can't connect to WindowServer: %s\n",

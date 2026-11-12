@@ -117,6 +117,10 @@ extern "C" {
 #define WS_CONNECT_XKB		0x0004	/* also send WS_EVENT_KEYMAP,
 					   WS_EVENT_MODIFIERS and
 					   WS_EVENT_KEYS_HELD */
+#define WS_CONNECT_DOCK		0x0008	/* the Dock: every app's windows,
+					   change notices, previews (see
+					   "The Dock" in WSProtocol.h);
+					   not an app */
 
 /* Server flags in WS_EVENT_WELCOME. */
 #define WS_SERVER_HEADLESS	0x0001
@@ -129,6 +133,7 @@ extern "C" {
 					   WS_MSG_WINDOW_MINIMIZE,
 					   WS_MSG_SET_APP_ICON and
 					   WS_EVENT_WINDOW_RESTORE */
+#define WS_SERVER_DOCK		0x0080	/* accepts WS_CONNECT_DOCK */
 
 /* Synthetic input kinds (wsctl, headless testing). */
 #define WS_INJECT_MOTION	1	/* absolute: x, y */
@@ -189,6 +194,11 @@ enum {
 	WS_EVENT_KEYS_HELD,		/* WS_CONNECT_XKB only */
 	WS_EVENT_WINDOW_ORDERED,
 	WS_EVENT_WINDOW_RESTORE,	/* WS_SERVER_MINIMIZE; no payload */
+	/* WS_CONNECT_DOCK only (WS_SERVER_DOCK) */
+	WS_EVENT_DOCK_STATE,		/* ws_event_dock_state_t */
+	WS_EVENT_WINDOW_LIST_CHANGED,	/* no payload: list again */
+	WS_EVENT_PREVIEW_CHANGED,	/* about hdr.window; no payload */
+	WS_EVENT_PREVIEW,		/* ws_event_snapshot_t, with a memfd */
 	WS_EVENT_MAX
 };
 
@@ -360,14 +370,23 @@ typedef struct ws_event_ordered {
  */
 
 /*
- * Window list entry (wsctl list). A minimized window is listed where
- * its tile is in the stack, with WS_WINDOW_INFO_MINIMIZED instead of
- * WS_WINDOW_INFO_VISIBLE, and the frame of the window itself.
+ * Window list entry (wsctl list, the Dock). A minimized window is listed where its tile is in the stack, with
+ * WS_WINDOW_INFO_MINIMIZED instead of WS_WINDOW_INFO_VISIBLE, and the
+ * frame of the window itself. A minimized window the Dock shows has no
+ * tile (WS_WINDOW_INFO_IN_DOCK) and is listed after the stack, and so
+ * are ordered-out windows when the list asked for them
+ * (WS_LIST_ORDERED_OUT); those have neither VISIBLE nor MINIMIZED, and
+ * stack_index WS_STACK_INDEX_NONE.
  */
 #define WS_WINDOW_INFO_VISIBLE	0x0001
-#define WS_WINDOW_INFO_KEY	0x0002	/* key window of the active app */
+#define WS_WINDOW_INFO_KEY	0x0002	/* key window of the app; with
+					   ACTIVE, the key window on screen */
 #define WS_WINDOW_INFO_ACTIVE	0x0004	/* owner is the active app */
-#define WS_WINDOW_INFO_MINIMIZED 0x0008	/* shown as a tile */
+#define WS_WINDOW_INFO_MINIMIZED 0x0008	/* minimized */
+#define WS_WINDOW_INFO_IN_DOCK	0x0010	/* minimized, and the Dock shows it
+					   instead of a tile */
+
+#define WS_STACK_INDEX_NONE	0xffffffffu
 
 typedef struct ws_event_window_info {
 	uint32_t	client_id;
@@ -379,7 +398,31 @@ typedef struct ws_event_window_info {
 	uint32_t	reserved;
 	char		app_name[32];
 	char		title[64];
+	/* added after protocol 1 shipped (WS_SERVER_DOCK); older servers
+	   send the event without them, and they read as 0 */
+	uint32_t	window;		/* its id, as in hdr.window */
+	uint32_t	app_id;		/* client id of the owner's app */
+	uint32_t	window_flags;	/* WS_WINDOW_* the owner set */
+	uint32_t	reserved2;
 } ws_event_window_info_t;
+
+/* Options for the window list (ws_list_windows_flags). */
+#define WS_LIST_ORDERED_OUT	0x0001	/* also windows that aren't shown */
+
+/*
+ * WS_EVENT_DOCK_STATE: sent to a WS_CONNECT_DOCK connection right after
+ * the welcome, and again when it changes. With
+ * WS_DOCK_MINIMIZED_WINDOWS the server draws no tiles: this connection
+ * shows the minimized windows (WS_WINDOW_INFO_IN_DOCK), with previews
+ * from WS_MSG_DOCK_PREVIEW. Only one Dock connection, one that sent
+ * WS_MSG_DOCK_SHOW_MINIMIZED, has it at a time.
+ */
+#define WS_DOCK_MINIMIZED_WINDOWS 0x0001
+
+typedef struct ws_event_dock_state {
+	uint32_t	flags;		/* WS_DOCK_* */
+	uint32_t	reserved;
+} ws_event_dock_state_t;
 
 typedef struct ws_event {
 	ws_event_header_t hdr;
@@ -400,6 +443,8 @@ typedef struct ws_event {
 		ws_event_modifiers_t	modifiers;
 		ws_event_keys_held_t	keys_held;
 		ws_event_ordered_t	ordered;
+		ws_event_dock_state_t	dock_state;
+		ws_event_snapshot_t	preview;	/* WS_EVENT_PREVIEW */
 		uint8_t			raw[232];
 	} u;
 } ws_event_t;

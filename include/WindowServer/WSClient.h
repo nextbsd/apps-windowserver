@@ -189,8 +189,15 @@ typedef struct ws_snapshot {
 
 int		 ws_snapshot(ws_connection_t *conn, ws_snapshot_t *out);
 void		 ws_snapshot_free(ws_snapshot_t *snap);
-/* Calls fn once per window, bottom to top, then returns. */
+/*
+ * Calls fn once per window, bottom to top, then returns. Only
+ * WS_CONNECT_CONTROL and WS_CONNECT_DOCK connections may list (EPERM
+ * otherwise). ws_list_windows_flags takes WS_LIST_* options
+ * (WS_LIST_ORDERED_OUT: windows that aren't shown too).
+ */
 int		 ws_list_windows(ws_connection_t *conn,
+    void (*fn)(const ws_event_window_info_t *info, void *ctx), void *ctx);
+int		 ws_list_windows_flags(ws_connection_t *conn, uint32_t options,
     void (*fn)(const ws_event_window_info_t *info, void *ctx), void *ctx);
 int		 ws_inject_motion(ws_connection_t *conn, double x, double y);
 int		 ws_inject_button(ws_connection_t *conn, uint32_t button,
@@ -199,6 +206,31 @@ int		 ws_inject_key(ws_connection_t *conn, const char *key_name,
     int pressed);
 int		 ws_inject_key_tap(ws_connection_t *conn, const char *key_name);
 int		 ws_inject_scroll(ws_connection_t *conn, double dx, double dy);
+
+/*
+ * The Dock (WS_CONNECT_DOCK on servers with WS_SERVER_DOCK; see "The
+ * Dock" in WSProtocol.h). A Dock connection lists every app's windows
+ * (ws_list_windows_flags), gets WS_EVENT_WINDOW_LIST_CHANGED when that
+ * list changes and WS_EVENT_DOCK_STATE, and may:
+ *   ws_dock_activate	activate app `app_id` (window 0), or the app of
+ *			`window` with that window key and in front; a
+ *			minimized window is restored instead
+ *   ws_dock_restore	ask the owner of a minimized window to restore it
+ *   ws_dock_preview	a scaled picture of a window, at most max_size
+ *			pixels on its longer side, premultiplied
+ *			ARGB8888; release it with ws_snapshot_free
+ *   ws_dock_show_minimized
+ *			say this Dock can show minimized windows; with
+ *			MinimizeIntoDock on, WindowServer then hands them
+ *			over (WS_DOCK_MINIMIZED_WINDOWS) instead of drawing
+ *			tiles
+ */
+int		 ws_dock_activate(ws_connection_t *conn, uint32_t app_id,
+    uint32_t window);
+int		 ws_dock_restore(ws_connection_t *conn, uint32_t window);
+int		 ws_dock_show_minimized(ws_connection_t *conn, int on);
+int		 ws_dock_preview(ws_connection_t *conn, uint32_t window,
+    uint32_t max_size, ws_snapshot_t *out);
 
 /* Names for event types and helpers, for logging. */
 const char	*ws_event_name(uint16_t type);

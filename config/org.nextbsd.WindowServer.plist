@@ -53,6 +53,11 @@
 	<integer>64</integer>
 	<key>MinimizeTileImage</key>
 	<string></string>
+	<!-- "Minimize into the Dock": while the Dock is connected, it shows
+	     minimized windows (live previews from WindowServer) and
+	     WindowServer draws no tiles. Off for now. -->
+	<key>MinimizeIntoDock</key>
+	<false/>
 	<!-- empty: the first /dev/dri/card* with a connected display -->
 	<key>DRMDevice</key>
 	<string></string>
