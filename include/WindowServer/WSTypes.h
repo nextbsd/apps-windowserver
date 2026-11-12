@@ -156,6 +156,8 @@ extern "C" {
 					   scrolling (WS_SCROLL_PHASE_*) */
 #define WS_SERVER_OVERVIEW	0x0200	/* the window overview (Exposé),
 					   WS_MSG_OVERVIEW */
+#define WS_SERVER_DOCK_EDGE	0x0400	/* the Dock's edge: WS_MSG_DOCK_SET_EDGE
+					   and the edge in WS_EVENT_DOCK_STATE */
 
 /* Synthetic input kinds (wsctl, headless testing). */
 #define WS_INJECT_MOTION	1	/* absolute: x, y */
@@ -464,9 +466,27 @@ typedef struct ws_event_window_info {
  */
 #define WS_DOCK_MINIMIZED_WINDOWS 0x0001
 
+/*
+ * The screen edge the Dock keeps (servers with WS_SERVER_DOCK_EDGE):
+ * a Dock connection reports it with WS_MSG_DOCK_SET_EDGE, and every
+ * Dock connection gets it in WS_EVENT_DOCK_STATE, after the welcome and
+ * whenever it changes. Window tiling keeps that strip of the screen free.
+ */
+#define WS_DOCK_EDGE_NONE	0	/* no Dock has said */
+#define WS_DOCK_EDGE_LEFT	1
+#define WS_DOCK_EDGE_RIGHT	2
+#define WS_DOCK_EDGE_TOP	3
+#define WS_DOCK_EDGE_BOTTOM	4
+
 typedef struct ws_event_dock_state {
 	uint32_t	flags;		/* WS_DOCK_* */
 	uint32_t	reserved;
+	/* added after protocol 1 shipped (WS_SERVER_DOCK_EDGE); older
+	   servers send the event without them, and they read as 0 */
+	uint32_t	edge;		/* WS_DOCK_EDGE_* */
+	uint32_t	thickness;	/* pixels the Dock takes from that edge */
+	uint32_t	edge_client;	/* the Dock connection that said so */
+	uint32_t	reserved2;
 } ws_event_dock_state_t;
 
 /*

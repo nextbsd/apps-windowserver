@@ -1136,6 +1136,17 @@ ws_dock_show_minimized(ws_connection_t *c, int on)
 }
 
 WS_API int
+ws_dock_set_edge(ws_connection_t *c, uint32_t edge, uint32_t thickness)
+{
+	ws_req_dock_edge_t m;
+
+	req_init(c, &m.hdr, WS_MSG_DOCK_SET_EDGE, sizeof(m), 0);
+	m.edge = edge;
+	m.thickness = thickness;
+	return send_oneway(c, &m.hdr);
+}
+
+WS_API int
 ws_dock_restore(ws_connection_t *c, uint32_t window)
 {
 	ws_req_header_t h;

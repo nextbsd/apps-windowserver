@@ -35,7 +35,8 @@ uint64_t ws_now_usec(void);
 #define WS_SERVER_FEATURES	(WS_SERVER_JOIN | WS_SERVER_XKB | \
 				 WS_SERVER_XRGB | WS_SERVER_ORDERED | \
 				 WS_SERVER_MINIMIZE | WS_SERVER_DOCK | \
-				 WS_SERVER_SCROLL_PHASES | WS_SERVER_OVERVIEW)
+				 WS_SERVER_SCROLL_PHASES | WS_SERVER_OVERVIEW | \
+				 WS_SERVER_DOCK_EDGE)
 
 /* Connections that aren't apps: wsctl and the Dock's window list. */
 #define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK)
@@ -162,6 +163,9 @@ struct ws_client {
 	bool		dead;
 	bool		doomed;		/* destroy at the end of this loop pass */
 	bool		dock_wants_minimized; /* WS_MSG_DOCK_SHOW_MINIMIZED */
+	uint32_t	dock_edge;	/* WS_MSG_DOCK_SET_EDGE: WS_DOCK_EDGE_* */
+	uint32_t	dock_thickness;
+	uint64_t	dock_edge_serial; /* when it said so (newest wins) */
 	struct ws_buffer *buffers;
 	struct ws_window *key_window;	/* app's key window (kept while
 					   inactive); set on c->app only, and
@@ -365,6 +369,15 @@ struct ws_server {
 	struct ws_client *dock;		/* shows minimized windows, or NULL */
 	bool		dock_list_dirty;	/* send WINDOW_LIST_CHANGED */
 	bool		dock_previews_dirty;	/* some window->preview_dirty */
+	/*
+	 * The screen edge the Dock keeps (WS_MSG_DOCK_SET_EDGE): the newest
+	 * report of a Dock connection still connected. Window tiling
+	 * (apps-windowserver#20) keeps this strip of the screen free.
+	 */
+	uint32_t	dock_edge;		/* WS_DOCK_EDGE_* */
+	uint32_t	dock_thickness;		/* pixels from that edge */
+	uint32_t	dock_edge_client;	/* client id, 0 = none */
+	uint64_t	dock_edge_serial;
 
 	/* cursor */
 	pixman_image_t	*cursor_default;
@@ -511,6 +524,8 @@ void	dock_client_gone(struct ws_server *srv, struct ws_client *c);
 void	dock_flush(struct ws_server *srv);
 void	dock_show_minimized(struct ws_server *srv, struct ws_client *c,
 	    bool on);
+int	dock_set_edge(struct ws_server *srv, struct ws_client *c,
+	    uint32_t edge, uint32_t thickness);
 void	dock_activate(struct ws_server *srv, struct ws_client *c,
 	    uint32_t window, uint32_t app);
 void	dock_restore(struct ws_server *srv, struct ws_client *c,
