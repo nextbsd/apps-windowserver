@@ -237,6 +237,10 @@ value_ok(const struct ws_config *cfg, const char *key)
 		return cfg->tiling_border >= 0 && cfg->tiling_border <= 16;
 	if (strcmp(key, "TilingModifier") == 0)
 		return tiling_modifier_parse(cfg->tiling_modifier, NULL);
+	if (strcmp(key, "TilingNewWindowSplits") == 0)
+		return strcasecmp(cfg->tiling_new_window_splits, "largest") == 0 ||
+		    strcasecmp(cfg->tiling_new_window_splits, "pointer") == 0 ||
+		    strcasecmp(cfg->tiling_new_window_splits, "focused") == 0;
 	return true;
 }
 

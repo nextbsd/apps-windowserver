@@ -9,8 +9,14 @@
 # insists on a larger frame (cut to its tile), the keys (focus, swap, resize, float), dragging a split and
 # dragging a window onto another tile, windows hidden, minimized and
 # closed, a screen change, and every window's frame given back when
-# tiling goes off. Runs wstiling (two apps, see tools/wstiling.c) and
-# drives it with wsctl.
+# tiling goes off. Then, with windows opened one by one (wstiling -e):
+# where new windows go (TilingNewWindowSplits: the largest tile, so the
+# screen fills evenly, or the tile under the pointer), focus following
+# the pointer (TilingFocusFollowsMouse) and when it doesn't (a button
+# held, a popup's pointer grab, over a panel), and a closed window's
+# tile given to its sibling, the focus to the tile under the pointer.
+# Runs wstiling (two apps, see tools/wstiling.c) and drives it with
+# wsctl.
 #
 #   sh tests/tiling-test.sh [BUILD_DIR]
 #
@@ -186,6 +192,20 @@ expect_status '^mode=stacking layout=dwindle tiled=0 .*gaps=8,8 border=2 modifie
     "windows stack by default; dwindle, 8-pixel gaps, Command+Option"
 [ "$(frame T1)" = "100,100,400x300" ] && pass "T1 is where its app put it" ||
     fail "T1 at $(frame T1)"
+[ "$("$B/wsctl" settings get TilingNewWindowSplits)" = largest ] &&
+    pass "new windows split the largest tile by default" ||
+    fail "TilingNewWindowSplits is $("$B/wsctl" settings get TilingNewWindowSplits)"
+"$B/wsctl" settings get TilingFocusFollowsMouse | grep -q -i -E '^(true|yes|1)$' &&
+    pass "focus follows the mouse by default" ||
+    fail "TilingFocusFollowsMouse is $("$B/wsctl" settings get TilingFocusFollowsMouse)"
+"$B/wsctl" settings set TilingNewWindowSplits spiral 2>/dev/null &&
+    fail "TilingNewWindowSplits spiral accepted" ||
+    pass "TilingNewWindowSplits spiral refused"
+# Up to "tiling off": classic dwindle, each window splitting the focused
+# one, and focus only by click or key.
+"$B/wsctl" settings set TilingNewWindowSplits focused \
+    TilingFocusFollowsMouse false >/dev/null ||
+    fail "settings set TilingNewWindowSplits focused"
 mark
 P0=$M
 "$B/wsctl" key cmd+alt+Right
@@ -412,6 +432,9 @@ grep -q '^tile 0 .* tile=0,0,704x800 ' "$LOG/status" &&
 settle
 
 # ---- windows come and go ----
+# New windows split the largest tile from here on (the default), so
+# there is room for those that keep their own size.
+"$B/wsctl" settings set TilingNewWindowSplits largest >/dev/null
 click_on T3
 "$B/wsctl" key h
 settle
@@ -454,9 +477,10 @@ SF=$(frame S1)
     fail "S1 at $SF, tile $ST"
 grep -q "keeps taking 1000x700.*cut to its tile" "$LOG/server.log" &&
     pass "...and the server says why" || fail "no log line about S1"
-check "S1's app heard 1000x700 at its tile's corner" 0 \
+# (1000x700 itself only if its tile's corner isn't where it put it)
+check "S1's app heard its tile's corner" 0 \
     "$(wc -l <"$LOG/wstiling.log")" \
-    "win=S1 frame=$(echo "$ST" | cut -d, -f1,2),1000x700 tiled\$"
+    "win=S1 frame=$(echo "$ST" | cut -d, -f1,2),[0-9]+x[0-9]+ tiled\$"
 click_on S1
 "$B/wsctl" key x
 click_on M1
@@ -517,6 +541,203 @@ check_not "no frame given back is marked as a tile" "$POFF" "$P6" \
 check_not "no errors" 0 "$P6" 'type=error'
 "$B/wsctl" tiling focus left 2>/dev/null &&
     fail "focus while stacking" || pass "tiling requests fail while stacking"
+
+# ---- windows opened one by one: where they go, and the focus ----
+# A user opening Terminal windows (apps-windowserver: "i opened 4
+# terminals, the left window never offered to take one").
+kill "$TPID"
+wait "$TPID" 2>/dev/null
+"$B/wsctl" settings unset TilingNewWindowSplits TilingFocusFollowsMouse \
+    >/dev/null || fail "settings unset"
+mv "$LOG/wstiling.log" "$LOG/wstiling-1.log"
+"$B/wstiling" -e >"$LOG/wstiling.log" 2>&1 &
+TPID=$!
+wait_for "$LOG/wstiling.log" "^ready" 10 || { fail "wstiling -e didn't get ready"; cat "$LOG/wstiling.log"; exit 1; }
+"$B/wsctl" tiling on >/dev/null
+"$B/wsctl" move 200 200
+settle
+
+# open: a key typed into the key window opens the next one, which is
+# made key; wait for it to be tiled.
+open() {
+	"$B/wsctl" key "${2:-w}"
+	i=0
+	while [ $i -lt 30 ]; do
+		status
+		[ -n "$(tile "$1")" ] && break
+		sleep 0.1
+		i=$((i + 1))
+	done
+	settle
+}
+
+# focused_is NAME WHAT
+focused_is() {
+	expect_status "^mode=tiling .*focused=$(id "$1") " "$2"
+}
+
+# center NAME: the middle of NAME's tile.
+center() {
+	tile "$1" | awk -F'[,x]' '{ printf "%d %d\n", $1 + $3 / 2, $2 + $4 / 2 }'
+}
+
+expect_tile W1 8,8,1264x784 "largest: W1 alone takes the area"
+open W2
+expect_tile W1 8,8,628x784 "W2: side by side, W1 on the left"
+expect_tile W2 644,8,628x784 "...W2 on the right"
+focused_is W2 "the new window has the focus, the pointer not moved"
+set -- $(center W1)
+"$B/wsctl" move "$1" "$2"
+settle
+focused_is W1 "the pointer onto W1: W1 has the focus"
+open W3
+expect_tile W1 8,8,628x388 "W3 splits the left tile, top and bottom"
+expect_tile W3 8,404,628x388 "...W3 below W1"
+expect_tile W2 644,8,628x784 "...the right one untouched"
+open W4
+expect_tile W2 644,8,628x388 "W4 splits the right tile: a 2x2 grid"
+expect_tile W4 644,404,628x388 ""
+expect_tile W1 8,8,628x388 "...the left column untouched"
+"$B/wsctl" snapshot "$LOG/tiling-ffm-grid.ppm" >/dev/null
+open W5
+expect_tile W1 8,8,310x388 "W5 splits the top left tile, side by side"
+expect_tile W5 326,8,310x388 ""
+open W6
+expect_tile W3 8,404,310x388 "W6 splits the bottom left tile"
+expect_tile W6 326,404,310x388 ""
+expect_tile W2 644,8,628x388 "...the right column untouched"
+
+# Focus follows the pointer.
+mark
+F0=$M
+set -- $(center W2)
+"$B/wsctl" move "$1" "$2"
+settle
+focused_is W2 "the pointer onto W2: W2 has the focus"
+mark
+check "W2's app heard it is key" "$F0" "$M" 'type=key-window-gained win=W2'
+set -- $(center W4)
+"$B/wsctl" move "$1" "$2"
+settle
+focused_is W4 "onto W4: W4"
+expect_pixel 643 600 4a7fc0 "the border follows"
+"$B/wsctl" move 640 600
+settle
+focused_is W4 "over the gap: W4 keeps it"
+open V1 v
+focused_is V1 "V1 in the other app opens with the focus"
+mark
+F0=$M
+set -- $(center W4)
+"$B/wsctl" move "$1" "$2"
+settle
+focused_is W4 "the pointer onto W4: W4's app is active again"
+mark
+check "Tiler was activated" "$F0" "$M" 'app=Tiler type=app-activated'
+check "Other was deactivated" "$F0" "$M" 'app=Other type=app-deactivated'
+set -- $(center V1)
+"$B/wsctl" move "$1" "$2"
+settle
+focused_is V1 "onto V1: the other app"
+"$B/wsctl" snapshot "$LOG/tiling-ffm-follow.ppm" >/dev/null
+
+# No focus change while a button is held, nor with a popup's grab.
+set -- $(center W2)
+"$B/wsctl" down right
+"$B/wsctl" move "$1" "$2"
+settle
+focused_is V1 "the right button held: V1 keeps the focus over W2"
+"$B/wsctl" up right
+settle
+set -- $(center V1)
+"$B/wsctl" move "$1" "$2"
+settle
+"$B/wsctl" key g
+settle
+grep -q "^grab app=Other 0" "$LOG/wstiling.log" && pass "Other grabbed the pointer" ||
+    fail "no grab"
+set -- $(center W2)
+"$B/wsctl" move "$1" "$2"
+settle
+focused_is V1 "a popup's pointer grab: V1 keeps the focus over W2"
+set -- $(center V1)
+"$B/wsctl" move "$1" "$2"
+"$B/wsctl" key G
+settle
+set -- $(center W2)
+"$B/wsctl" move "$1" "$2"
+settle
+focused_is W2 "the grab ended: the pointer gives W2 the focus"
+# A panel that floats over the tiles.
+"$B/wsctl" key p
+settle
+"$B/wsctl" move 640 360
+settle
+focused_is W2 "over the panel Q1: W2 keeps the focus"
+"$B/wsctl" settings set TilingFocusFollowsMouse false >/dev/null
+set -- $(center W4)
+"$B/wsctl" move "$1" "$2"
+settle
+focused_is W2 "TilingFocusFollowsMouse off: W2 keeps it over W4"
+"$B/wsctl" settings unset TilingFocusFollowsMouse >/dev/null
+
+# Closing: the sibling takes the space, the pointer's tile the focus.
+set -- $(center W2)
+"$B/wsctl" move "$1" "$2"
+settle
+focused_is W2 "W2 focused again"
+"$B/wsctl" key x
+settle
+expect_tile V1 644,8,628x388 "W2 closed: V1, its sibling, takes its space"
+expect_tile W4 644,404,628x388 "...W4 stays"
+focused_is V1 "...and V1, under the pointer now, the focus"
+
+# TilingNewWindowSplits pointer: the tile under the pointer (Hyprland).
+kill "$TPID"
+wait "$TPID" 2>/dev/null
+"$B/wsctl" settings set TilingNewWindowSplits pointer >/dev/null ||
+    fail "TilingNewWindowSplits pointer"
+mv "$LOG/wstiling.log" "$LOG/wstiling-2.log"
+"$B/wstiling" -e >"$LOG/wstiling.log" 2>&1 &
+TPID=$!
+wait_for "$LOG/wstiling.log" "^ready" 10 || { fail "wstiling -e didn't get ready"; exit 1; }
+"$B/wsctl" move 200 200
+settle
+open W2
+expect_tile W2 644,8,628x784 "pointer: W2 splits W1, under the pointer"
+"$B/wsctl" move 200 200
+settle
+focused_is W1 "the pointer over the left tile: W1"
+open W3
+expect_tile W1 8,8,628x388 "W3 splits the left tile, under the pointer"
+expect_tile W3 8,404,628x388 ""
+"$B/wsctl" move 200 200
+settle
+open W4
+expect_tile W1 8,8,310x388 "W4 splits the left tile again (W1, under the pointer)"
+expect_tile W4 326,8,310x388 ""
+expect_tile W2 644,8,628x784 "...the right one untouched"
+"$B/wsctl" snapshot "$LOG/tiling-ffm-pointer.ppm" >/dev/null
+"$B/wsctl" key p
+settle
+"$B/wsctl" move 640 360
+settle
+open W5
+expect_tile W4 326,8,310x190 "over the panel: W5 splits the focused tile (W4)"
+expect_tile W5 326,206,310x190 ""
+
+# ---- stacking: click to focus as before ----
+"$B/wsctl" tiling off >/dev/null
+settle
+mark
+F0=$M
+"$B/wsctl" move 200 200
+"$B/wsctl" move 900 500
+settle
+mark
+check_not "stacking: the pointer gives no window the focus" "$F0" "$M" \
+    'type=key-window-gained'
+"$B/wsctl" settings unset TilingNewWindowSplits >/dev/null
 
 kill "$TPID"
 wait "$TPID" 2>/dev/null
