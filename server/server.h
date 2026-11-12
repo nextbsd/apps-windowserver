@@ -198,7 +198,9 @@ struct ws_window {
 	bool		tiled;		/* laid out by tiling: below the
 					   windows that float on its level */
 	bool		tiling_float;	/* the user floated it */
-	bool		tiling_refused;	/* too big for its tile: it floats */
+	bool		tiling_clipped;	/* its owner keeps asking for a frame
+					   larger than its tile: cut to it */
+	ws_rect_t	tiling_asked;	/* that frame, at the tile's corner */
 	unsigned	tiling_insist;	/* owner's other frames in a row */
 	unsigned	tiling_drawn;	/* commits in a row of a buffer
 					   another size than the frame */

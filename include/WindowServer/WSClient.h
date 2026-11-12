@@ -132,9 +132,10 @@ int		 ws_window_set_flags(ws_connection_t *conn, uint32_t window,
 int		 ws_window_make_key(ws_connection_t *conn, uint32_t window);
 /*
  * The smallest and largest frame the window takes (NSWindow's minSize
- * and maxSize), 0 for no limit: window tiling floats a window whose
- * minimum doesn't fit its tile. Servers with WS_SERVER_TILING (others
- * fail with ENOTSUP).
+ * and maxSize), 0 for no limit: window tiling centres a window whose
+ * maximum is smaller than its tile, and doesn't let the user shrink a
+ * tile below the minimum (a layout may). Servers with WS_SERVER_TILING
+ * (others fail with ENOTSUP).
  */
 int		 ws_window_set_size_limits(ws_connection_t *conn,
     uint32_t window, uint32_t min_width, uint32_t min_height,

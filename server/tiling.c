@@ -9,9 +9,12 @@
  * Dock's strip and the menu bar strip free. Their owners hear the new
  * frames as WS_EVENT_WINDOW_FRAME, as for any frame the server sets.
  * Everything else (menus, panels, alerts, desktop windows, app icons,
- * the Dock, windows the user floated or that don't fit) floats above
- * the tiled windows: window.c sorts tiled windows below the floating
- * ones on their level (w->tiled).
+ * the Dock, windows that can't be resized and windows the user floated)
+ * floats above the tiled windows: window.c sorts tiled windows below the
+ * floating ones on their level (w->tiled). As on Hyprland, a window's
+ * minimum size doesn't keep it from tiling: it gets its tile all the
+ * same, and one whose owner keeps answering with a larger frame is cut
+ * to its tile.
  *
  * The windows tiled are kept in a tiling space: an ordered list of
  * slots, each with the ratio or weight of the split it makes, so that
@@ -133,18 +136,28 @@ tileable(struct ws_server *srv, const struct ws_window *w)
 
 	return w->visible && !w->minimized && w->tile_for == NULL &&
 	    w->level == WS_LEVEL_NORMAL && (w->flags & FLOATING_FLAGS) == 0 &&
-	    !w->tiling_float && !w->tiling_refused &&
+	    !w->tiling_float &&
 	    w->frame.width > 0 && w->frame.height > 0 &&
 	    !c->dead && !c->doomed && (c->flags & WS_CONNECT_TOOL) == 0 &&
 	    !dock_owns_app(srv, c->app);
 }
 
-/* Does w fit `tile` (its minimum size)? */
-static bool
-fits(const struct ws_window *w, const ws_rect_t *tile)
+/*
+ * w's frame cut to its tile: the frame its owner keeps asking for
+ * (w->tiling_asked) at the tile's corner, no larger than the tile.
+ */
+static ws_rect_t
+clipped(const struct ws_window *w)
 {
-	return (int64_t)w->min_width <= tile->width &&
-	    (int64_t)w->min_height <= tile->height;
+	const ws_rect_t *g = &w->tiling_given;
+	ws_rect_t r = { g->x, g->y, w->tiling_asked.width,
+	    w->tiling_asked.height };
+
+	if (r.width > g->width)
+		r.width = g->width;
+	if (r.height > g->height)
+		r.height = g->height;
+	return r;
 }
 
 /* ---- slots ---- */
@@ -224,6 +237,7 @@ enter(struct ws_server *srv, struct ws_window *w, unsigned at)
 	w->tiling_drawn = 0;
 	w->tiling_own_size = false;
 	w->tiling_short = false;
+	w->tiling_clipped = false;
 	memset(&w->tiling_given, 0, sizeof(w->tiling_given));
 	window_restack(srv, w);
 	ws_debug("tiling: window %u (%s) tiled", w->id, w->owner->app_name);
@@ -241,6 +255,7 @@ leave(struct ws_server *srv, unsigned i, bool restore)
 
 	slot_remove(sp, i);
 	w->tiled = false;
+	w->tiling_clipped = false;
 	window_restack(srv, w);
 	if (srv->tiling.moving == w)
 		srv->tiling.moving = NULL;
@@ -449,16 +464,46 @@ compute(struct ws_server *srv)
 	}
 }
 
-/* Does every tiled window fit its tile? */
-static bool
-all_fit(struct ws_tiling_space *sp)
+/* The tiles as they are, for squeezed() after a split moves (NULL if
+   there's no memory: then nothing stops the split). */
+static ws_rect_t *
+tiles_take(const struct ws_tiling_space *sp)
 {
+	ws_rect_t *old;
 	unsigned i;
 
+	if (sp->nslots == 0 ||
+	    (old = calloc(sp->nslots, sizeof(*old))) == NULL)
+		return NULL;
 	for (i = 0; i < sp->nslots; i++)
-		if (!fits(sp->slots[i].w, &sp->slots[i].tile))
-			return false;
-	return true;
+		old[i] = sp->slots[i].tile;
+	return old;
+}
+
+/*
+ * Did the tiles shrink a window below its minimum size, or one already
+ * below it further? Layouts don't keep windows to their minimum size,
+ * but the user's resizing stops there.
+ */
+static bool
+squeezed(const struct ws_tiling_space *sp, const ws_rect_t *old)
+{
+	const ws_rect_t *t;
+	const struct ws_window *w;
+	unsigned i;
+
+	if (old == NULL)
+		return false;
+	for (i = 0; i < sp->nslots; i++) {
+		t = &sp->slots[i].tile;
+		w = sp->slots[i].w;
+		if ((t->width < old[i].width &&
+		    (int64_t)t->width < w->min_width) ||
+		    (t->height < old[i].height &&
+		    (int64_t)t->height < w->min_height))
+			return true;
+	}
+	return false;
 }
 
 /*
@@ -484,17 +529,25 @@ place(struct ws_server *srv, struct ws_window *w, const ws_rect_t *tile)
 		w->tiling_given = f;
 		w->tiling_given_usec = ws_now_usec();
 		w->tiling_short = false;
+		w->tiling_clipped = false;
 		w->tiling_insist = 0;
 	}
+	if (w->tiling_clipped) {
+		/* it keeps asking for a larger frame: cut to its tile */
+		f = clipped(w);
+		if (srv->tiling.moving != w && !rect_eq(&f, &w->frame))
+			window_set_frame(srv, w, &f);
+		return;
+	}
 	if (w->tiling_own_size && w->buffer != NULL && w->buffer->scale > 0) {
-		/* an owner that only moves its windows: the size it draws */
+		/* an owner that only moves its windows: the size it draws,
+		   cut to the tile */
 		f.width = (int32_t)(w->buffer->width / w->buffer->scale);
 		f.height = (int32_t)(w->buffer->height / w->buffer->scale);
-		if (f.width > tile->width || f.height > tile->height) {
-			w->tiling_refused = true;
-			srv->tiling.dirty = true;
-			return;
-		}
+		if (f.width > tile->width)
+			f.width = tile->width;
+		if (f.height > tile->height)
+			f.height = tile->height;
 	} else if (w->tiling_short && w->frame.width <= f.width &&
 	    w->frame.height <= f.height) {
 		f.width = w->frame.width;
@@ -506,9 +559,9 @@ place(struct ws_server *srv, struct ws_window *w, const ws_rect_t *tile)
 }
 
 /*
- * Lay the tiled windows out in the usable area. One whose minimum size
- * is larger than its tile floats instead, and the rest are laid out
- * again without it.
+ * Lay the tiled windows out in the usable area. Every one gets its tile,
+ * whatever its minimum size (as on Hyprland): two windows always sit
+ * side by side.
  */
 static void
 layout(struct ws_server *srv)
@@ -517,7 +570,6 @@ layout(struct ws_server *srv)
 	struct ws_tiling *t = &srv->tiling;
 	int go = gap_outer(srv);
 	unsigned i;
-	bool again;
 
 	sp->area = srv->usable;
 	if (sp->area.width > 4 * go && sp->area.height > 4 * go) {
@@ -526,24 +578,7 @@ layout(struct ws_server *srv)
 		sp->area.width -= 2 * go;
 		sp->area.height -= 2 * go;
 	}
-	do {
-		again = false;
-		compute(srv);
-		for (i = 0; i < sp->nslots; i++) {
-			if (fits(sp->slots[i].w, &sp->slots[i].tile))
-				continue;
-			ws_info("tiling: window %u (%s) is %ux%u at least, "
-			    "larger than its %dx%d tile: it floats",
-			    sp->slots[i].w->id, sp->slots[i].w->owner->app_name,
-			    sp->slots[i].w->min_width,
-			    sp->slots[i].w->min_height,
-			    sp->slots[i].tile.width, sp->slots[i].tile.height);
-			sp->slots[i].w->tiling_refused = true;
-			leave(srv, i, true);
-			again = true;
-			break;
-		}
-	} while (again);
+	compute(srv);
 	for (i = 0; i < sp->nslots; i++)
 		place(srv, sp->slots[i].w, &sp->slots[i].tile);
 	if (t->hover_split >= (int)sp->nsplits)
@@ -671,12 +706,35 @@ tiling_window_gone(struct ws_server *srv, struct ws_window *w)
 }
 
 /*
+ * w keeps asking for a frame larger than its tile (an NSWindow's
+ * -setFrame: keeps to its minSize): it stays in its tile, cut to it. Its
+ * owner hears the size it asked for at the tile's corner, so what it
+ * draws lines up with the tile, and draws all of it; the screen and the
+ * pointer only show the part in the tile.
+ */
+static void
+cut_to_tile(struct ws_server *srv, struct ws_window *w)
+{
+	const ws_rect_t *g = &w->tiling_given;
+	ws_rect_t f = w->frame, c;
+
+	if (f.x != g->x || f.y != g->y) {
+		f.x = g->x;
+		f.y = g->y;
+		window_server_frame(srv, w, &f);
+	}
+	w->tiling_asked = f;
+	c = clipped(w);
+	window_set_frame(srv, w, &c);
+}
+
+/*
  * w's owner gave it a frame (WS_MSG_WINDOW_SET_FRAME or a commit with
  * one). While the user drags it by a button pressed in it, it follows
  * (tiling_grab_end puts it in place). Otherwise the frame it was given
  * wins, except that a smaller one stays (an owner that sizes in steps,
- * a terminal's character cells) and an owner that keeps asking for a
- * larger one gets its way: the window floats.
+ * a terminal's character cells) and one that keeps asking for a larger
+ * one is cut to its tile.
  */
 void
 tiling_client_frame(struct ws_server *srv, struct ws_window *w)
@@ -698,7 +756,15 @@ tiling_client_frame(struct ws_server *srv, struct ws_window *w)
 	if (rect_eq(&w->frame, g)) {
 		w->tiling_fresh = false;
 		w->tiling_insist = 0;
+		w->tiling_clipped = false;
 		return;
+	}
+	if (w->tiling_clipped) {
+		if (w->frame.width > g->width || w->frame.height > g->height) {
+			cut_to_tile(srv, w);	/* still larger */
+			return;
+		}
+		w->tiling_clipped = false;	/* it fits now */
 	}
 	/* A window shown just now still settling its frame (a GNUstep
 	   window adds its title bar): that is the frame it floats with. */
@@ -728,11 +794,11 @@ tiling_client_frame(struct ws_server *srv, struct ws_window *w)
 		return;
 	}
 	ws_info("tiling: window %u (%s) keeps taking %dx%d, larger than its "
-	    "%dx%d tile: it floats", w->id, w->owner->app_name, w->frame.width,
-	    w->frame.height, g->width, g->height);
-	w->tiling_refused = true;
-	w->has_saved_frame = false;	/* it stays where it is */
-	t->dirty = true;
+	    "%dx%d tile: it is cut to its tile", w->id, w->owner->app_name,
+	    w->frame.width, w->frame.height, g->width, g->height);
+	w->tiling_clipped = true;
+	w->tiling_insist = 0;
+	cut_to_tile(srv, w);
 }
 
 /*
@@ -740,8 +806,7 @@ tiling_client_frame(struct ws_server *srv, struct ws_window *w)
  * moves the window keeps drawing at its old size (an X server, which
  * moves its windows when WindowServer does but leaves their size to X
  * clients): after a few such commits the window takes the size it
- * draws, at its tile's corner, or floats if that is larger than the
- * tile.
+ * draws, at its tile's corner, cut to the tile if that is larger.
  */
 void
 tiling_committed(struct ws_server *srv, struct ws_window *w)
@@ -750,18 +815,22 @@ tiling_committed(struct ws_server *srv, struct ws_window *w)
 	struct ws_buffer *b = w->buffer;
 	const ws_rect_t *g = &w->tiling_given;
 	ws_rect_t r;
-	int32_t bw, bh;
+	int32_t bw, bh, cw, ch;
 
-	if (!t->on || !w->tiled || b == NULL || b->scale == 0 ||
-	    t->moving == w || g->width <= 0)
+	if (!t->on || !w->tiled || w->tiling_clipped || b == NULL ||
+	    b->scale == 0 || t->moving == w || g->width <= 0)
 		return;
 	bw = (int32_t)(b->width / b->scale);
 	bh = (int32_t)(b->height / b->scale);
+	cw = bw > g->width ? g->width : bw;
+	ch = bh > g->height ? g->height : bh;
 	if (bw == g->width && bh == g->height) {
 		w->tiling_follows = true;
 		w->tiling_own_size = false;
 	}
-	if (bw == w->frame.width && bh == w->frame.height) {
+	if ((bw == w->frame.width && bh == w->frame.height) ||
+	    (w->tiling_own_size && cw == w->frame.width &&
+	    ch == w->frame.height)) {
 		w->tiling_drawn = 0;
 		return;
 	}
@@ -785,9 +854,13 @@ tiling_committed(struct ws_server *srv, struct ws_window *w)
 		return;
 	}
 	ws_info("tiling: window %u (%s) draws %dx%d, larger than its %dx%d "
-	    "tile: it floats", w->id, w->owner->app_name, bw, bh, g->width,
-	    g->height);
-	w->tiling_refused = true;
+	    "tile: it is cut to its tile", w->id, w->owner->app_name, bw, bh,
+	    g->width, g->height);
+	w->tiling_own_size = true;
+	r = w->frame;
+	r.width = cw;
+	r.height = ch;
+	window_server_frame(srv, w, &r);
 }
 
 /* WS_MSG_WINDOW_SET_SIZE_LIMITS. */
@@ -804,10 +877,7 @@ tiling_set_size_limits(struct ws_server *srv, struct ws_window *w,
 	w->max_height = m->max_height;
 	ws_debug("window %u: %ux%u at least, %ux%u at most (0: no limit)",
 	    w->id, w->min_width, w->min_height, w->max_width, w->max_height);
-	/* Try again: a window too big for its tile may fit now. */
-	if (w->tiling_refused && !w->tiled)
-		w->tiling_refused = false;
-	srv->tiling.dirty = true;
+	srv->tiling.dirty = true;	/* a maximum size centres it */
 }
 
 /* ---- the user's actions ---- */
@@ -927,7 +997,7 @@ op_swap(struct ws_server *srv, int dir)
 
 /*
  * The values a split's move may change, to put back when the result
- * doesn't fit a window's minimum size.
+ * squeezes a window below its minimum size.
  */
 struct split_backup {
 	double	master_ratio;
@@ -1016,6 +1086,7 @@ op_resize(struct ws_server *srv, int step)
 	double d = step > 0 ? RESIZE_STEP : -RESIZE_STEP;
 	struct split_backup b;
 	struct ws_tiling_slot *s;
+	ws_rect_t *old;
 
 	if (i < 0 || n < 2 || step == 0)
 		return ENOENT;
@@ -1034,11 +1105,13 @@ op_resize(struct ws_server *srv, int step)
 		s->weight = clampd(s->weight * (step > 0 ? 1.25 : 0.8),
 		    WEIGHT_MIN, WEIGHT_MAX);
 	}
+	old = tiles_take(sp);
 	compute(srv);
-	if (!all_fit(sp)) {
+	if (squeezed(sp, old)) {
 		backup_put(sp, &b);
 		compute(srv);
 	}
+	free(old);
 	srv->tiling.dirty = true;
 	return 0;
 }
@@ -1060,10 +1133,9 @@ op_float(struct ws_server *srv, struct ws_window *w, int how)
 		leave(srv, (unsigned)i, true);
 		window_order_by_server(srv, w, WS_ORDER_ABOVE, NULL);
 	} else {
-		if (!w->tiling_float && !w->tiling_refused)
+		if (!w->tiling_float)
 			return w->tiled ? 0 : EINVAL;	/* it can't tile */
 		w->tiling_float = false;
-		w->tiling_refused = false;
 		w->tiling_insist = 0;
 	}
 	srv->tiling.dirty = true;
@@ -1196,19 +1268,23 @@ split_drag(struct ws_server *srv)
 	struct ws_tiling *t = &srv->tiling;
 	struct ws_tiling_split s = sp->splits[t->drag_split];
 	struct split_backup b;
+	ws_rect_t *old;
 	int32_t pos;
 
 	pos = (int32_t)lround((s.vertical ? srv->ptr_x : srv->ptr_y) -
 	    gap_inner(srv) / 2.0);
 	backup_take(sp, s.slot, &b);
 	split_move(srv, &s, pos);
+	old = tiles_take(sp);
 	compute(srv);
-	if (!all_fit(sp)) {
+	if (squeezed(sp, old)) {
 		/* a window's minimum size stops it here */
 		backup_put(sp, &b);
 		compute(srv);
+		free(old);
 		return;
 	}
+	free(old);
 	t->dirty = true;
 }
 
@@ -1363,7 +1439,7 @@ tiling_off(struct ws_server *srv)
 				window_server_frame(srv, w, &w->saved_frame);
 		}
 		w->tiling_float = false;
-		w->tiling_refused = false;
+		w->tiling_clipped = false;
 		w->tiling_insist = 0;
 		w->tiling_short = false;
 	}
@@ -1470,17 +1546,14 @@ report(struct ws_server *srv, struct ws_client *to)
 	ev.u.tiling.modifier = t->modifier;
 	client_send(srv, to, &ev, -1);
 	for (i = 0; i < sp->nslots; i++)
-		report_item(srv, to, sp->slots[i].w, WS_TILING_ITEM_TILED, i,
-		    &sp->slots[i].tile);
+		report_item(srv, to, sp->slots[i].w, WS_TILING_ITEM_TILED |
+		    (sp->slots[i].w->tiling_clipped ? WS_TILING_ITEM_CUT : 0),
+		    i, &sp->slots[i].tile);
 	if (t->on)
 		for (w = srv->windows; w != NULL; w = w->next)
-			if (!w->tiled && w->visible &&
-			    (w->tiling_float || w->tiling_refused))
+			if (!w->tiled && w->visible && w->tiling_float)
 				report_item(srv, to, w,
-				    (w->tiling_float ? WS_TILING_ITEM_FLOATED :
-				    0) | (w->tiling_refused ?
-				    WS_TILING_ITEM_REFUSED : 0), UINT32_MAX,
-				    NULL);
+				    WS_TILING_ITEM_FLOATED, UINT32_MAX, NULL);
 	event_init(srv, &ev, WS_EVENT_LIST_END, 0, 0);
 	client_send(srv, to, &ev, -1);
 }

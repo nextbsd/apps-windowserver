@@ -4,9 +4,9 @@
 #
 # Headless test of window tiling (apps-windowserver#20): WindowMode
 # switched live, the dwindle and master layouts, gaps, the Dock's strip,
-# the active-window border, windows that float (panels, NO_TILE, a
-# minimum size larger than the tile, an owner that insists on a larger
-# frame), the keys (focus, swap, resize, float), dragging a split and
+# the active-window border, windows that float (panels, NO_TILE), a
+# minimum size larger than the tile (tiled all the same), an owner that
+# insists on a larger frame (cut to its tile), the keys (focus, swap, resize, float), dragging a split and
 # dragging a window onto another tile, windows hidden, minimized and
 # closed, a screen change, and every window's frame given back when
 # tiling goes off. Runs wstiling (two apps, see tools/wstiling.c) and
@@ -434,19 +434,35 @@ click_on T1
 settle
 expect_status '^mode=tiling .*tiled=3 ' "a window closed: three"
 
-# Windows that don't fit float.
+# Windows larger than their tiles tile all the same (as on Hyprland).
 "$B/wsctl" key b
 settle
-expect_status "^float window=$(id M1) .* too-big" "M1 (900x700 at least) floats"
-[ "$(frame M1)" = "200,50,900x700" ] && pass "...where its app put it" ||
-    fail "M1 at $(frame M1)"
-expect_status '^mode=tiling .*tiled=3 ' "the others stay tiled"
+expect_status '^mode=tiling .*tiled=4 ' "M1 (900x700 at least) tiles all the same"
+MT=$(tile M1)
+[ -n "$MT" ] && [ "$(frame M1)" = "$MT" ] && pass "...at its tile ($MT)" ||
+    fail "M1 at $(frame M1), tile $MT"
+"$B/wsctl" tiling status | grep -q '^float ' && fail "something floats" ||
+    pass "nothing floats"
 "$B/wsctl" key k
 sleep 1
 settle
-expect_status "^float window=$(id S1) .* too-big" "S1, which keeps taking 1000x700, floats"
-grep -q "keeps taking 1000x700" "$LOG/server.log" && pass "...and the server says why" ||
-    fail "no log line about S1"
+expect_status '^mode=tiling .*tiled=5 ' "S1, which keeps taking 1000x700, tiles"
+expect_status "^tile [0-9]* window=$(id S1) .* cut" "...cut to its tile"
+ST=$(tile S1)
+SF=$(frame S1)
+[ -n "$ST" ] && [ "$SF" = "$ST" ] && pass "...its frame is its tile ($SF)" ||
+    fail "S1 at $SF, tile $ST"
+grep -q "keeps taking 1000x700.*cut to its tile" "$LOG/server.log" &&
+    pass "...and the server says why" || fail "no log line about S1"
+check "S1's app heard 1000x700 at its tile's corner" 0 \
+    "$(wc -l <"$LOG/wstiling.log")" \
+    "win=S1 frame=$(echo "$ST" | cut -d, -f1,2),1000x700 tiled\$"
+click_on S1
+"$B/wsctl" key x
+click_on M1
+"$B/wsctl" key x
+settle
+expect_status '^mode=tiling .*tiled=3 ' "S1 and M1 closed: three"
 "$B/wsctl" key c
 settle
 status
