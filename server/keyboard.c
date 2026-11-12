@@ -289,11 +289,62 @@ keyboard_focus_update(struct ws_server *srv)
 	send_modifiers(srv, to, w != NULL ? w->id : 0);
 }
 
+static bool
+is_modifier_keysym(xkb_keysym_t sym)
+{
+	return (sym >= XKB_KEY_Shift_L && sym <= XKB_KEY_Hyper_R) ||
+	    (sym >= XKB_KEY_ISO_Lock && sym <= XKB_KEY_ISO_Level5_Lock) ||
+	    sym == XKB_KEY_Mode_switch || sym == XKB_KEY_Num_Lock;
+}
+
+static int
+equiv_key_index(struct ws_server *srv, xkb_keycode_t kc)
+{
+	unsigned i;
+
+	for (i = 0; i < srv->nequiv_keys; i++)
+		if (srv->equiv_keys[i] == kc)
+			return (int)i;
+	return -1;
+}
+
+/*
+ * Command shortcuts belong to the app's menus. When the key window is a
+ * joined connection's (an xterm's frame, owned by the X server XLibre.app
+ * started), a key pressed with Command held goes to the app's own
+ * connection, without a window, so its main menu sees it; the key's
+ * repeats and release follow it there. Command with a modifier key
+ * alone (Command-Shift) still goes to the key window's owner.
+ */
+static struct ws_client *
+equiv_target(struct ws_server *srv, struct ws_client *c, xkb_keycode_t kc,
+    bool pressed, bool repeat, xkb_keysym_t sym)
+{
+	struct ws_client *a = srv->active;
+	int i = equiv_key_index(srv, kc);
+
+	if (i >= 0) {
+		if (!pressed) {
+			srv->nequiv_keys--;
+			memmove(&srv->equiv_keys[i], &srv->equiv_keys[i + 1],
+			    (srv->nequiv_keys - (unsigned)i) *
+			    sizeof(srv->equiv_keys[0]));
+		}
+		return a != NULL && !a->dead ? a : NULL;
+	}
+	if (!pressed || repeat || a == NULL || c == a || c->app != a ||
+	    (srv->modifiers & WS_MOD_COMMAND) == 0 || is_modifier_keysym(sym) ||
+	    srv->nequiv_keys >= WS_MAX_KEYS_HELD)
+		return NULL;
+	srv->equiv_keys[srv->nequiv_keys++] = kc;
+	return a;
+}
+
 static void
 deliver_key(struct ws_server *srv, uint32_t code, bool pressed, bool repeat,
     xkb_keysym_t sym)
 {
-	struct ws_client *c;
+	struct ws_client *c, *a;
 	struct ws_window *w;
 	const xkb_keysym_t *syms;
 	xkb_keycode_t kc = code + XKB_OFFSET;
@@ -304,6 +355,10 @@ deliver_key(struct ws_server *srv, uint32_t code, bool pressed, bool repeat,
 	c = key_target(srv, &w);
 	if (c == NULL)
 		return;
+	if ((a = equiv_target(srv, c, kc, pressed, repeat, sym)) != NULL) {
+		c = a;
+		w = NULL;
+	}
 	event_init(srv, &ev, pressed ? WS_EVENT_KEY_DOWN : WS_EVENT_KEY_UP,
 	    sizeof(ev.u.key), w != NULL ? w->id : 0);
 	ev.u.key.keycode = kc;

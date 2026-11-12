@@ -305,6 +305,13 @@ struct ws_server {
 	uint32_t	keys_held[WS_MAX_KEYS_HELD];	/* XKB keycodes */
 	unsigned	nkeys_held;
 	struct ws_client *kbd_focus;	/* gets key events (not ref'd) */
+	/*
+	 * Keys whose press, with Command held, went to the active app's own
+	 * connection instead of a joined connection's key window: their
+	 * repeats and releases go there too.
+	 */
+	uint32_t	equiv_keys[WS_MAX_KEYS_HELD];	/* XKB keycodes */
+	unsigned	nequiv_keys;
 
 	/* input (input.c) */
 	struct libinput	*libinput;
