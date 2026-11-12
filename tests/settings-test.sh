@@ -10,8 +10,9 @@
 # following the active layout, switching layouts with a request and
 # with the KeyboardLayoutShortcut keys, WS_EVENT_KEYBOARD_LAYOUT and
 # WS_EVENT_SETTINGS_CHANGED to tools, a setting read on every event
-# (NaturalScrolling), key repeat values, the input device list, and
-# SIGHUP reading the system's settings again instead of stopping.
+# (NaturalScrolling), key repeat values, Command shortcuts resolved
+# against a Latin layout while Greek is active, the input device list,
+# and SIGHUP reading the system's settings again instead of stopping.
 #
 # It runs against a headless server that is already running, started
 # by ws-session so its Mach service stays registered:
@@ -207,6 +208,26 @@ grep "app=Beta type=key-down" "$LOG/wstest.log" | grep -q 'keysym=0x7e1 ' &&
     fail "keysym: no Greek_alpha key-down for Beta"
 refused "Invalid argument" "layout 5" -- layout set 5
 
+# ---- Command shortcuts use the Latin layout (WS_SERVER_LATIN_SHORTCUTS) ----
+t=$(key_text cmd+c)
+[ "$t" = "c" ] && pass "gr: Command+C types \"c\" (us, the Latin layout)" ||
+    fail "gr: Command+C typed \"$t\""
+grep "app=Beta type=key-down" "$LOG/wstest.log" | tail -1 |
+    grep -q 'keysym=0x63 .*unmod="c"' &&
+    pass "gr: Command+C has keysym c and unmodified text \"c\"" ||
+    fail "Command+C: $(grep 'app=Beta type=key-down' "$LOG/wstest.log" | tail -1)"
+t=$(key_text cmd+shift+z)
+[ "$t" = "Z" ] && pass "gr: Command+Shift+Z types \"Z\"" ||
+    fail "gr: Command+Shift+Z typed \"$t\""
+t=$(key_text c)
+[ "$t" = "ψ" ] && pass "gr: c without Command still types \"ψ\"" ||
+    fail "gr: c typed \"$t\""
+t=$(key_text ctrl+c)
+grep "app=Beta type=key-down" "$LOG/wstest.log" | tail -1 |
+    grep -q 'keysym=0x7f8 ' &&
+    pass "gr: Control+C keeps the Greek keysym" ||
+    fail "Control+C: $(grep 'app=Beta type=key-down' "$LOG/wstest.log" | tail -1)"
+
 # The XKB connection gets keys: click its window (Gamma's W4 at 900,100).
 "$B/wsctl" click 1000 150
 "$B/wsctl" sync
@@ -215,6 +236,20 @@ awk '$3 == "app=Gamma" && $4 == "type=modifiers" { l = $0 } END { print l }' \
     "$LOG/wstest.log" | grep -q 'group=1' &&
     pass "the XKB connection's state says group 1" ||
     fail "XKB modifiers: $(grep 'app=Gamma type=modifiers' "$LOG/wstest.log" | tail -1)"
+# Command+C goes to Alpha, the app Gamma joined (its menus), as "c";
+# a plain c reaches Gamma, the X server, with the Greek keysym.
+"$B/wsctl" key cmd+c
+"$B/wsctl" key c
+"$B/wsctl" sync
+sleep 0.3
+grep "app=Alpha type=key-down" "$LOG/wstest.log" | tail -1 |
+    grep -q 'keysym=0x63 text="c"' &&
+    pass "Command+C over the joined X window: the app gets \"c\"" ||
+    fail "joined Command+C: $(grep 'app=Alpha type=key-down' "$LOG/wstest.log" | tail -1)"
+grep "app=Gamma type=key-down" "$LOG/wstest.log" | tail -1 |
+    grep -q 'keysym=0x7f8 ' &&
+    pass "the XKB connection's c is still Greek_psi" ||
+    fail "XKB c: $(grep 'app=Gamma type=key-down' "$LOG/wstest.log" | tail -1)"
 "$B/wsctl" layout set 0
 "$B/wsctl" sync
 sleep 0.3
@@ -329,6 +364,14 @@ expect_setting MouseAccelProfile adaptive "reload replaced the earlier session v
 # only on the German one.
 t=$(key_text adiaeresis)
 [ "$t" = "ä" ] && pass "de: the ä key types \"ä\"" || fail "de: ä typed \"$t\""
+# With no Latin layout in the list, Command shortcuts use us.
+"$B/wsctl" settings set KeyboardLayout gr || fail "KeyboardLayout gr"
+t=$(key_text cmd+Greek_psi)
+[ "$t" = "c" ] && pass "gr alone: Command+C types \"c\" (us)" ||
+    fail "gr alone: Command+C typed \"$t\""
+t=$(key_text Greek_psi)
+[ "$t" = "ψ" ] && pass "gr alone: C types \"ψ\"" ||
+    fail "gr alone: C typed \"$t\""
 "$B/wsctl" settings reload "$LOG/no-such-file.plist" &&
     expect_setting KeyboardLayout "$SYS_LAYOUT" "a missing file is an empty set" ||
     fail "reload of a missing file"
