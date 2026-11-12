@@ -221,6 +221,15 @@ extern "C" {
 					   app's menu bar strip along the top
 					   comes off the usable area ("The
 					   menu bar strip" in WSProtocol.h) */
+#define WS_SERVER_ACTIVATE_RAISE 0x00800000 /* WS_MSG_ACTIVATE with
+					   WS_ACTIVATE_RAISE brings the app's
+					   windows forward ("Activation" in
+					   WSProtocol.h) */
+
+/* WS_MSG_ACTIVATE flags (ws_activate_flags). */
+#define WS_ACTIVATE_RAISE	0x0001	/* also bring the app's windows,
+					   joined connections' included, to
+					   the front */
 
 /* Where a minimized window goes ("Minimizing" in WSProtocol.h). */
 #define WS_MINIMIZE_DEFAULT	0	/* the server's MinimizeIntoDock */

@@ -260,8 +260,11 @@ int		 ws_warp_pointer(ws_connection_t *conn, uint32_t window,
 int		 ws_query_pointer(ws_connection_t *conn, ws_pointer_info_t *info);
 int		 ws_pointer_track(ws_connection_t *conn, int on);
 
-/* Activation: make this app the active app, or give it up. */
+/* Activation: make this app the active app, or give it up.
+ * ws_activate_flags takes WS_ACTIVATE_* (WS_ACTIVATE_RAISE: servers with
+ * WS_SERVER_ACTIVATE_RAISE; older ones just activate). */
 int		 ws_activate(ws_connection_t *conn);
+int		 ws_activate_flags(ws_connection_t *conn, uint32_t flags);
 int		 ws_deactivate(ws_connection_t *conn);
 
 /*

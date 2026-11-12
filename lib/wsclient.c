@@ -1268,6 +1268,12 @@ ws_activate(ws_connection_t *c)
 }
 
 WS_API int
+ws_activate_flags(ws_connection_t *c, uint32_t flags)
+{
+	return send_int(c, WS_MSG_ACTIVATE, 0, (int32_t)flags);
+}
+
+WS_API int
 ws_set_menu_bar(ws_connection_t *c, uint32_t height)
 {
 	return send_int(c, WS_MSG_SET_MENU_BAR, 0, height);

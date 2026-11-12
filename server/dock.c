@@ -369,9 +369,10 @@ dock_flush(struct ws_server *srv)
 /*
  * Bring app a's windows on normal and higher levels to the front of
  * their levels, keeping their order, as activating an app from the
- * Dock does on macOS. Its owners hear about it (WS_EVENT_WINDOW_ORDERED).
+ * Dock does on macOS, or an app that activates itself with
+ * WS_ACTIVATE_RAISE. Its owners hear about it (WS_EVENT_WINDOW_ORDERED).
  */
-static void
+void
 raise_app(struct ws_server *srv, struct ws_client *a)
 {
 	struct ws_window *w, **list;
