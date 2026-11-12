@@ -82,6 +82,14 @@ uint64_t	 ws_client_token(ws_connection_t *conn);
 uint32_t	 ws_app_id(ws_connection_t *conn);
 uint32_t	 ws_server_flags(ws_connection_t *conn);
 const ws_screen_info_t *ws_main_screen(ws_connection_t *conn);
+/*
+ * The main screen's usable area (see "The screen and its usable area"
+ * in WSProtocol.h): the screen minus the Dock's strip, as of the last
+ * event dispatched. Both follow WS_EVENT_SCREEN_CHANGED and
+ * WS_EVENT_USABLE_AREA. Servers without WS_SERVER_USABLE_AREA: fills
+ * in the whole screen and fails with ENOTSUP.
+ */
+int		 ws_usable_area(ws_connection_t *conn, ws_rect_t *area);
 
 /*
  * Read and dispatch all available events without blocking. Returns
@@ -227,6 +235,10 @@ int		 ws_inject_hold(ws_connection_t *conn, int down);
 /* A touchpad swipe step (WS_GESTURE_*), on servers with WS_SERVER_OVERVIEW. */
 int		 ws_inject_swipe(ws_connection_t *conn, uint32_t fingers,
     int phase, double dx, double dy);
+/* Headless servers with WS_SERVER_SCREEN_CHANGES: the screen becomes
+ * width x height, as a mode change would make it (tests). */
+int		 ws_inject_screen_size(ws_connection_t *conn, uint32_t width,
+    uint32_t height);
 
 /*
  * The window overview (servers with WS_SERVER_OVERVIEW; tool and Dock

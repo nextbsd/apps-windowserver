@@ -34,6 +34,28 @@ compositor_init(struct ws_server *srv)
 	return 0;
 }
 
+/* The screen is now width x height: a new shadow image, all damaged. */
+int
+compositor_resize(struct ws_server *srv, uint32_t width, uint32_t height)
+{
+	pixman_image_t *img;
+
+	img = pixman_image_create_bits(PIXMAN_x8r8g8b8, (int)width,
+	    (int)height, NULL, 0);
+	if (img == NULL) {
+		ws_err("can't allocate a %ux%u shadow image", width, height);
+		return -1;
+	}
+	if (srv->shadow != NULL)
+		pixman_image_unref(srv->shadow);
+	srv->shadow = img;
+	srv->width = width;
+	srv->height = height;
+	pixman_region32_clear(&srv->damage);
+	damage_all(srv);
+	return 0;
+}
+
 void
 compositor_fini(struct ws_server *srv)
 {

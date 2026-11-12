@@ -198,6 +198,21 @@ print_event(ws_connection_t *conn, const ws_event_t *ev, void *ctx)
 
 	(void)conn;
 	switch (ev->hdr.type) {
+	case WS_EVENT_SCREEN_CHANGED:
+		snprintf(detail, sizeof(detail), "size=%ux%u",
+		    ev->u.screen.width, ev->u.screen.height);
+		break;
+	case WS_EVENT_USABLE_AREA:
+		snprintf(detail, sizeof(detail), "area=%d,%d,%dx%d",
+		    ev->u.usable_area.usable.x, ev->u.usable_area.usable.y,
+		    ev->u.usable_area.usable.width,
+		    ev->u.usable_area.usable.height);
+		break;
+	case WS_EVENT_WINDOW_FRAME:
+		snprintf(detail, sizeof(detail), "frame=%d,%d,%dx%d",
+		    ev->u.frame.frame.x, ev->u.frame.frame.y,
+		    ev->u.frame.frame.width, ev->u.frame.frame.height);
+		break;
 	case WS_EVENT_APP_ACTIVATED:
 	case WS_EVENT_APP_DEACTIVATED:
 		snprintf(detail, sizeof(detail), "other=%u",
@@ -352,10 +367,17 @@ main(int argc, char **argv)
 			    strerror(errno));
 			return 1;
 		}
-		printf("connected app=%s client=%u screen=%ux%u\n", apps[i].name,
-		    ws_client_id(apps[i].conn),
-		    ws_main_screen(apps[i].conn)->width,
-		    ws_main_screen(apps[i].conn)->height);
+		{
+			ws_rect_t u;
+
+			(void)ws_usable_area(apps[i].conn, &u);
+			printf("connected app=%s client=%u screen=%ux%u "
+			    "usable=%d,%d,%dx%d\n", apps[i].name,
+			    ws_client_id(apps[i].conn),
+			    ws_main_screen(apps[i].conn)->width,
+			    ws_main_screen(apps[i].conn)->height,
+			    u.x, u.y, u.width, u.height);
+		}
 	}
 
 	/* Joining needs the right token. */

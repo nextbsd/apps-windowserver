@@ -35,6 +35,10 @@ usage(void)
 	    "       wsctl hold              (fingers rest on the touchpad)\n"
 	    "       wsctl swipe FINGERS DX DY [STEPS]  (touchpad swipe)\n"
 	    "       wsctl overview [all|app|close|status]\n"
+	    "       wsctl screen            (size and usable area)\n"
+	    "       wsctl screen size WxH   (headless: change the screen size)\n"
+	    "       wsctl screen watch [SECONDS] (print screen and usable-area\n"
+	    "                                changes)\n"
 	    "       wsctl sync\n"
 	    "       wsctl dock list [-a]     (every window, with ids; -a: hidden too)\n"
 	    "       wsctl dock activate APP_ID [WINDOW]\n"
@@ -180,11 +184,119 @@ overview_cmd(ws_connection_t *c, const char *what)
 
 static volatile sig_atomic_t stop;
 
+
 static void
 on_signal(int sig)
 {
 	(void)sig;
 	stop = 1;
+}
+
+/* ---- wsctl screen ---- */
+
+static void
+print_usable(const ws_rect_t *r)
+{
+	printf("usable %d,%d %dx%d\n", r->x, r->y, r->width, r->height);
+}
+
+static void
+print_screen_event(const ws_event_t *ev)
+{
+	switch (ev->hdr.type) {
+	case WS_EVENT_SCREEN_CHANGED:
+		printf("screen-changed %ux%u\n", ev->u.screen.width,
+		    ev->u.screen.height);
+		break;
+	case WS_EVENT_USABLE_AREA:
+		printf("usable-area ");
+		print_usable(&ev->u.usable_area.usable);
+		break;
+	case WS_EVENT_ERROR:
+		fprintf(stderr, "wsctl: server: %s\n", ev->u.error.message);
+		break;
+	default:
+		break;
+	}
+}
+
+/*
+ * wsctl screen: the screen and its usable area. With "size WxH" the
+ * (headless) screen changes size first, and this waits for the
+ * screen-changed and usable-area events that confirm it. With "watch",
+ * stays connected printing those events.
+ */
+static int
+screen_cmd(ws_connection_t *c, int argc, char **argv)
+{
+	const ws_screen_info_t *s;
+	unsigned w, h;
+	time_t end;
+	ws_event_t ev;
+	ws_rect_t u;
+	int r, got = 0;
+
+	if ((ws_server_flags(c) & WS_SERVER_USABLE_AREA) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	if (argc == 2) {
+		s = ws_main_screen(c);
+		(void)ws_usable_area(c, &u);
+		printf("screen %ux%u\n", s->width, s->height);
+		print_usable(&u);
+		return 0;
+	}
+	if (strcmp(argv[2], "size") == 0 && argc == 4) {
+		if (sscanf(argv[3], "%ux%u", &w, &h) != 2)
+			usage();
+		if (ws_inject_screen_size(c, w, h) < 0 || ws_sync(c) < 0)
+			return -1;
+		s = ws_main_screen(c);
+		if (s->width == w && s->height == h)
+			got = 2;	/* already that size: nothing comes */
+		end = time(NULL) + 3;
+		while (got < 2 && time(NULL) <= end) {
+			r = ws_next_event(c, &ev, 200);
+			if (r < 0)
+				return -1;
+			if (r == 0)
+				continue;
+			if (ev.hdr.type == WS_EVENT_ERROR) {
+				print_screen_event(&ev);
+				errno = ev.u.error.code ? ev.u.error.code : EIO;
+				return -1;
+			}
+			print_screen_event(&ev);
+			if (ev.hdr.type == WS_EVENT_SCREEN_CHANGED ||
+			    (got == 1 && ev.hdr.type == WS_EVENT_USABLE_AREA))
+				got++;
+		}
+		if (got < 2) {
+			errno = ETIMEDOUT;
+			return -1;
+		}
+		return 0;
+	}
+	if (strcmp(argv[2], "watch") == 0 && argc <= 4) {
+		end = argc == 4 ? time(NULL) + atoi(argv[3]) : 0;
+		signal(SIGTERM, on_signal);
+		signal(SIGINT, on_signal);
+		setvbuf(stdout, NULL, _IOLBF, 0);
+		(void)ws_usable_area(c, &u);
+		printf("watching ");
+		print_usable(&u);
+		while (!stop && (end == 0 || time(NULL) < end)) {
+			r = ws_next_event(c, &ev, 200);
+			if (r < 0)
+				return -1;
+			if (r > 0)
+				print_screen_event(&ev);
+		}
+		return 0;
+	}
+	usage();
+	return -1;
 }
 
 static const char *const dock_edges[] = { "none", "left", "right", "top",
@@ -512,6 +624,8 @@ main(int argc, char **argv)
 		}
 		if (r == 0)
 			r = ws_inject_swipe(c, fingers, WS_GESTURE_END, 0, 0);
+	} else if (strcmp(cmd, "screen") == 0) {
+		r = screen_cmd(c, argc, argv);
 	} else if (strcmp(cmd, "overview") == 0 && argc <= 3) {
 		r = overview_cmd(c, argc == 3 ? argv[2] : NULL);
 	} else if (strcmp(cmd, "hold") == 0 && argc == 2) {

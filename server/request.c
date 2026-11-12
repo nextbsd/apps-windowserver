@@ -193,6 +193,16 @@ handle_inject(struct ws_server *srv, struct ws_client *c,
 	case WS_INJECT_SWIPE:
 		overview_swipe(srv, (int)m->pressed, m->button, m->dx, m->dy);
 		break;
+	case WS_INJECT_SCREEN_SIZE:
+		if (m->x < 0 || m->y < 0 || m->x > 65535 || m->y > 65535)
+			err = EINVAL;
+		else
+			err = screen_resize(srv, (uint32_t)m->x, (uint32_t)m->y);
+		if (err != 0)
+			client_error(srv, c, WS_MSG_INJECT, 0, err,
+			    err == ENOTSUP ? "only a headless screen can "
+			    "change size" : "bad screen size");
+		break;
 	default:
 		client_error(srv, c, WS_MSG_INJECT, 0, EINVAL,
 		    "unknown inject kind");
