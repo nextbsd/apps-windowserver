@@ -34,6 +34,7 @@ struct ws_connection {
 	mach_port_t	reply;
 	uint32_t	client_id;
 	uint64_t	token;
+	uint32_t	app_id;		/* from the hello reply, 0 if unknown */
 	uint32_t	seq;
 	uint32_t	server_flags;
 	int		sock;
@@ -410,8 +411,9 @@ sock_send(ws_connection_t *c, const void *data, size_t len, int fd)
 
 /* ---- connection ---- */
 
-WS_API ws_connection_t *
-ws_connect_service(const char *service, const char *app_name, uint32_t flags)
+static ws_connection_t *
+connect_impl(const char *service, const char *app_name, uint32_t flags,
+    uint32_t join_client, uint64_t join_token)
 {
 	ws_connection_t *c;
 	ws_req_hello_t hello;
@@ -452,11 +454,25 @@ ws_connect_service(const char *service, const char *app_name, uint32_t flags)
 	memset(hello.bundle_id, 0, sizeof(hello.bundle_id));
 	if (app_name != NULL)
 		strlcpy(hello.app_name, app_name, sizeof(hello.app_name));
+	hello.join_client = join_client;
+	hello.reserved2 = 0;
+	hello.join_token = join_token;
 	if (send_rpc(c, &hello.hdr, &reply) < 0)
 		goto fail;
 	c->client_id = reply.u.hello.client_id;
 	c->token = reply.u.hello.token;
 	c->server_flags = reply.u.hello.server_flags;
+	c->app_id = reply.u.hello.app_id;
+	if ((flags & WS_CONNECT_JOIN) && c->app_id == 0) {
+		/* An older server ignored the join: this would be an app
+		 * of its own. Say goodbye rather than pretend. */
+		ws_req_header_t h;
+
+		req_init(c, &h, WS_MSG_GOODBYE, sizeof(h), 0);
+		(void)send_oneway(c, &h);
+		errno = ENOTSUP;
+		goto fail;
+	}
 
 	c->sock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (c->sock < 0)
@@ -493,14 +509,38 @@ fail:
 	return NULL;
 }
 
-WS_API ws_connection_t *
-ws_connect(const char *app_name, uint32_t flags)
+static const char *
+default_service(void)
 {
 	const char *service = getenv(WS_SERVICE_NAME_ENV);
 
 	if (service == NULL || *service == '\0')
 		service = WS_SERVICE_NAME;
-	return ws_connect_service(service, app_name, flags);
+	return service;
+}
+
+WS_API ws_connection_t *
+ws_connect_service(const char *service, const char *app_name, uint32_t flags)
+{
+	return connect_impl(service, app_name, flags & ~WS_CONNECT_JOIN, 0, 0);
+}
+
+WS_API ws_connection_t *
+ws_connect(const char *app_name, uint32_t flags)
+{
+	return ws_connect_service(default_service(), app_name, flags);
+}
+
+WS_API ws_connection_t *
+ws_connect_join(const char *app_name, uint32_t flags, uint32_t app_client_id,
+    uint64_t app_token)
+{
+	if (app_client_id == 0 || (flags & WS_CONNECT_CONTROL)) {
+		errno = EINVAL;
+		return NULL;
+	}
+	return connect_impl(default_service(), app_name,
+	    flags | WS_CONNECT_JOIN, app_client_id, app_token);
 }
 
 WS_API void
@@ -538,6 +578,18 @@ WS_API uint32_t
 ws_client_id(ws_connection_t *c)
 {
 	return c->client_id;
+}
+
+WS_API uint64_t
+ws_client_token(ws_connection_t *c)
+{
+	return c->token;
+}
+
+WS_API uint32_t
+ws_app_id(ws_connection_t *c)
+{
+	return c->app_id;
 }
 
 WS_API uint32_t

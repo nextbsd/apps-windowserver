@@ -51,9 +51,31 @@ ws_connection_t *ws_connect_service(const char *service, const char *app_name,
     uint32_t flags);
 void		 ws_disconnect(ws_connection_t *conn);
 
+/*
+ * Connect as part of another connection's app (WS_CONNECT_JOIN in
+ * WSProtocol.h): WindowServer then activates both together, and they
+ * share one key window. app_client_id and app_token are that
+ * connection's ws_client_id() and ws_client_token(), handed to this
+ * process by the app (XLibre.app passes them to the X server it
+ * starts). Fails with EPERM if they're wrong, and with ENOTSUP if the
+ * server can't join apps.
+ */
+ws_connection_t *ws_connect_join(const char *app_name, uint32_t flags,
+    uint32_t app_client_id, uint64_t app_token);
+
 /* File descriptor to poll for POLLIN; events are read by ws_dispatch. */
 int		 ws_connection_fd(ws_connection_t *conn);
 uint32_t	 ws_client_id(ws_connection_t *conn);
+/*
+ * The connection's secret token. Anyone holding it with the client id
+ * can join this connection's app (ws_connect_join), so hand it only to
+ * a helper process of your own, never on a command line other users
+ * can read.
+ */
+uint64_t	 ws_client_token(ws_connection_t *conn);
+/* Client id of the app this connection belongs to: its own id, or the
+ * app it joined. 0 if the server predates joining. */
+uint32_t	 ws_app_id(ws_connection_t *conn);
 uint32_t	 ws_server_flags(ws_connection_t *conn);
 const ws_screen_info_t *ws_main_screen(ws_connection_t *conn);
 

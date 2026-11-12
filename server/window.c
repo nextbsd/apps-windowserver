@@ -157,27 +157,43 @@ send_simple(struct ws_server *srv, struct ws_client *c, uint16_t type,
 	client_send(srv, c, &ev, -1);
 }
 
-/* Set an app's key window. Focus events go out only for the active app. */
+/* Send an app event to every connection of app `a`. */
 static void
-set_key_window(struct ws_server *srv, struct ws_client *c, struct ws_window *w)
+send_app(struct ws_server *srv, struct ws_client *a, uint16_t type,
+    uint32_t other)
 {
-	struct ws_window *old = c->key_window;
+	struct ws_client *m;
 
-	if (old == w)
-		return;
-	c->key_window = w;
-	if (srv->active != c)
-		return;
-	if (old != NULL)
-		send_simple(srv, c, WS_EVENT_KEY_WINDOW_LOST, old->id, 0);
-	if (w != NULL)
-		send_simple(srv, c, WS_EVENT_KEY_WINDOW_GAINED, w->id, 0);
+	for (m = srv->clients; m != NULL; m = m->next)
+		if (!m->dead && m->app == a)
+			send_simple(srv, m, type, 0, other);
 }
 
 /*
- * Make c the active app. The old app first loses its key window and is
- * told it was deactivated; then c is activated and gets `key` (or its
- * remembered key window) as key window.
+ * Set app a's key window (a window of any of its connections). Focus
+ * events go out only for the active app, each to the window's owner.
+ */
+static void
+set_key_window(struct ws_server *srv, struct ws_client *a, struct ws_window *w)
+{
+	struct ws_window *old = a->key_window;
+
+	if (old == w)
+		return;
+	a->key_window = w;
+	if (srv->active != a)
+		return;
+	if (old != NULL)
+		send_simple(srv, old->owner, WS_EVENT_KEY_WINDOW_LOST, old->id, 0);
+	if (w != NULL)
+		send_simple(srv, w->owner, WS_EVENT_KEY_WINDOW_GAINED, w->id, 0);
+}
+
+/*
+ * Make app c (a client->app) the active app. The old app first loses
+ * its key window and all its connections are told it was deactivated;
+ * then all of c's connections are told it was activated and `key` (or
+ * the remembered key window) becomes key.
  */
 void
 app_activate(struct ws_server *srv, struct ws_client *c, struct ws_window *key)
@@ -193,9 +209,9 @@ app_activate(struct ws_server *srv, struct ws_client *c, struct ws_window *key)
 	}
 	if (old != NULL) {
 		if (old->key_window != NULL)
-			send_simple(srv, old, WS_EVENT_KEY_WINDOW_LOST,
-			    old->key_window->id, 0);
-		send_simple(srv, old, WS_EVENT_APP_DEACTIVATED, 0,
+			send_simple(srv, old->key_window->owner,
+			    WS_EVENT_KEY_WINDOW_LOST, old->key_window->id, 0);
+		send_app(srv, old, WS_EVENT_APP_DEACTIVATED,
 		    c != NULL ? c->id : 0);
 	}
 	srv->active = c;
@@ -208,15 +224,15 @@ app_activate(struct ws_server *srv, struct ws_client *c, struct ws_window *key)
 	if (c->key_window != NULL && !can_be_key(c->key_window))
 		c->key_window = NULL;
 	ws_debug("active app: %u (%s)", c->id, c->app_name);
-	send_simple(srv, c, WS_EVENT_APP_ACTIVATED, 0, old != NULL ? old->id : 0);
+	send_app(srv, c, WS_EVENT_APP_ACTIVATED, old != NULL ? old->id : 0);
 	if (c->key_window != NULL)
-		send_simple(srv, c, WS_EVENT_KEY_WINDOW_GAINED,
-		    c->key_window->id, 0);
+		send_simple(srv, c->key_window->owner,
+		    WS_EVENT_KEY_WINDOW_GAINED, c->key_window->id, 0);
 }
 
 /*
- * c gives up being active (it asked, quit, or crashed). The owner of
- * the topmost normal-or-higher window of another app takes over.
+ * App c gives up being active (it asked, quit, or crashed). The app
+ * owning the topmost normal-or-higher window of another app takes over.
  */
 void
 app_deactivate(struct ws_server *srv, struct ws_client *c)
@@ -227,10 +243,10 @@ app_deactivate(struct ws_server *srv, struct ws_client *c)
 	if (srv->active != c)
 		return;
 	for (w = srv->stack_top; w != NULL; w = w->below) {
-		if (w->owner != c && w->owner != NULL && !w->owner->dead &&
+		if (w->owner->app != c && !w->owner->dead &&
 		    (w->owner->flags & WS_CONNECT_CONTROL) == 0 &&
 		    w->level >= WS_LEVEL_NORMAL && w->level <= WS_LEVEL_CLIENT_MAX) {
-			next = w->owner;
+			next = w->owner->app;
 			break;
 		}
 	}
@@ -245,12 +261,44 @@ app_deactivate(struct ws_server *srv, struct ws_client *c)
 	app_activate(srv, next, NULL);
 }
 
+/*
+ * Connection c is going away and its windows are gone. If it joined an
+ * app, it just leaves it. If other connections joined c's app, the
+ * oldest of them carries the app on, with its key window and its place
+ * as the active app, so the app doesn't deactivate.
+ */
+void
+app_member_gone(struct ws_server *srv, struct ws_client *c)
+{
+	struct ws_client *m, *heir = NULL;
+
+	if (c->app != c) {
+		c->app = c;
+		return;
+	}
+	/* srv->clients is newest first: the last match is the oldest. */
+	for (m = srv->clients; m != NULL; m = m->next)
+		if (m != c && !m->dead && m->app == c)
+			heir = m;
+	if (heir == NULL)
+		return;
+	for (m = srv->clients; m != NULL; m = m->next)
+		if (m != c && !m->dead && m->app == c)
+			m->app = heir;
+	heir->key_window = c->key_window;
+	c->key_window = NULL;
+	if (srv->active == c)
+		srv->active = heir;
+	ws_info("client %u (%s) carries on app %u", heir->id, heir->app_name,
+	    c->id);
+}
+
 void
 window_make_key(struct ws_server *srv, struct ws_window *w)
 {
 	if (w->flags & WS_WINDOW_NO_KEY)
 		return;
-	set_key_window(srv, w->owner, w);
+	set_key_window(srv, w->owner->app, w);
 }
 
 /* ---- create / destroy ---- */
@@ -318,8 +366,8 @@ window_destroy(struct ws_server *srv, struct ws_window *w)
 
 	if (w->visible)
 		window_order(srv, w, WS_ORDER_OUT, NULL);
-	if (c->key_window == w)
-		set_key_window(srv, c, NULL);
+	if (c->app->key_window == w)
+		set_key_window(srv, c->app, NULL);
 	pointer_window_gone(srv, w);
 	if (w->pending_attach)
 		buffer_unref(srv, w->pending);
@@ -409,8 +457,8 @@ window_order(struct ws_server *srv, struct ws_window *w, int op,
 		stack_unlink(srv, w);
 		w->visible = false;
 		damage_rect(srv, &w->frame);
-		if (c->key_window == w)
-			set_key_window(srv, c, NULL);
+		if (c->app->key_window == w)
+			set_key_window(srv, c->app, NULL);
 		pointer_window_gone(srv, w);
 		return;
 	}
@@ -546,9 +594,9 @@ list_windows(struct ws_server *srv, struct ws_client *to)
 		ev.u.window_info.pid = w->owner->pid;
 		ev.u.window_info.level = w->level;
 		ev.u.window_info.flags = WS_WINDOW_INFO_VISIBLE;
-		if (srv->active == w->owner) {
+		if (srv->active == w->owner->app) {
 			ev.u.window_info.flags |= WS_WINDOW_INFO_ACTIVE;
-			if (w->owner->key_window == w)
+			if (w->owner->app->key_window == w)
 				ev.u.window_info.flags |= WS_WINDOW_INFO_KEY;
 		}
 		ev.u.window_info.frame = w->frame;

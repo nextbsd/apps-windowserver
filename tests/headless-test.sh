@@ -57,15 +57,34 @@ expect_pixel() {
 	fi
 }
 
-# serial APP TYPE [WIN]: serial of the last matching event (wstest
-# also logs the activations it did itself while starting up)
+# serial APP TYPE [WIN]: serial of the last matching event in lines
+# FROM+1..TO of wstest's log (wstest also logs the activations it did
+# itself while starting up).
+FROM=0
+TO=999999
 serial() {
-	awk -v app="app=$1" -v type="type=$2" -v win="${3:+win=$3}" '
-		$1 == "event" && $3 == app && $4 == type &&
-		    (win == "" || $5 == win) {
+	awk -v app="app=$1" -v type="type=$2" -v win="${3:+win=$3}" \
+	    -v from="$FROM" -v to="$TO" '
+		NR > from && NR <= to && $1 == "event" && $3 == app &&
+		    $4 == type && (win == "" || $5 == win) {
 			sub("serial=", "", $2); s = $2
 		}
 		END { print s }' "$LOG/wstest.log"
+}
+
+# mark: wait for wstest to print what the server sent so far; MARKS is
+# then the number of lines in its log.
+MARKS=0
+mark() {
+	"$B/wsctl" sync
+	sleep 0.5
+	MARKS=$(wc -l <"$LOG/wstest.log")
+}
+
+# in_part FROM TO PATTERN: PATTERN (ERE) in lines FROM+1..TO.
+in_part() {
+	awk -v from="$1" -v to="$2" 'NR > from && NR <= to' "$LOG/wstest.log" |
+	    grep -q -E -- "$3"
 }
 
 "$B/WindowServer" --headless 1280x800 --socket "$SOCK" --config /dev/null -v \
@@ -77,8 +96,12 @@ pass "server started (pid $SPID, service $WS_SERVICE_NAME)"
 "$B/wstest" >"$LOG/wstest.log" 2>&1 &
 TPID=$!
 wait_for "$LOG/wstest.log" "^ready" 10 || { fail "wstest didn't get ready"; cat "$LOG/wstest.log"; exit 1; }
-pass "wstest connected two apps and created three windows"
+pass "wstest connected two apps and a joined connection, and created four windows"
 "$B/wsctl" list
+grep -q 'join refused app=Mallory EPERM' "$LOG/wstest.log" &&
+    pass "join with a wrong token refused (EPERM)" || fail "join with a wrong token"
+grep -q 'connected app=Gamma client=3 app=1$' "$LOG/wstest.log" &&
+    pass "Gamma (client 3) joined Alpha's app (client 1)" || fail "Gamma didn't join Alpha"
 
 # Stacking: W2 (Alpha, main-menu level) over everything; W3 (Beta,
 # created last) over W1 (Alpha) within the normal level.
@@ -103,13 +126,33 @@ expect_pixel 350 300 c03030 "W1 raised above W3 by the click"
 kill -USR1 "$SPID"
 wait_for "$LOG/server.log" "snapshot written" 5 &&
     [ -s "$WS_SnapshotPath" ] && pass "SIGUSR1 snapshot" || fail "SIGUSR1 snapshot"
+mark
+P1=$MARKS
 
-sleep 0.5
+# Joined app: a click in Gamma's W4 while Alpha is active only moves the
+# key window (Alpha and Gamma are one app), and keys follow it.
+"$B/wsctl" click 1000 200 || fail "wsctl click W4"
+"$B/wsctl" key a || fail "wsctl key a (W4)"
+"$B/wsctl" key cmd+q || fail "wsctl key cmd+q"
+mark
+P2=$MARKS
+# Beta takes over, then a click in W4 brings the whole app back.
+"$B/wsctl" click 700 600 || fail "wsctl click W3"
+mark
+P3=$MARKS
+"$B/wsctl" click 1000 200 || fail "wsctl click W4 again"
+"$B/wsctl" list >"$LOG/list3.txt"
+cat "$LOG/list3.txt"
+mark
+P4=$MARKS
+
 kill "$TPID"
 wait "$TPID" 2>/dev/null
 TPID=
 
 # Event order across the two apps (serials are server-wide).
+TO=$P1
+gamma_act=$(serial Gamma app-activated)
 lost=$(serial Beta key-window-lost W3)
 deact=$(serial Beta app-deactivated)
 act=$(serial Alpha app-activated)
@@ -124,6 +167,12 @@ if [ -n "$lost" ] && [ -n "$up" ] && [ "$lost" -lt "$deact" ] &&
 else
 	fail "activation order"
 fi
+if [ -n "$gamma_act" ] && [ "$deact" -lt "$gamma_act" ]; then
+	pass "the joined connection (Gamma) was activated with Alpha"
+else
+	fail "Gamma wasn't activated with Alpha"
+fi
+TO=999999
 grep -q 'app=Alpha type=mouse-down win=W1 x=50 y=350 button=0 clicks=1' "$LOG/wstest.log" &&
     pass "click delivered with window-local coordinates" || fail "mouse-down coordinates"
 grep -q 'app=Alpha type=key-down win=W1 keycode=38 keysym=0x61 text="a"' "$LOG/wstest.log" &&
@@ -144,6 +193,35 @@ grep -q 'app=Beta type=frame-done win=W3' "$LOG/wstest.log" &&
 if grep -q 'type=error' "$LOG/wstest.log"; then
 	fail "server reported errors to wstest"
 fi
+
+# Joined app (P1..P2): the key window moved within the app, no
+# activation change, and keys (Command too) went to W4's connection.
+in_part "$P1" "$P2" 'app=Alpha type=key-window-lost win=W1' &&
+    in_part "$P1" "$P2" 'app=Gamma type=key-window-gained win=W4' &&
+    pass "click in the joined connection's window moved the key window" ||
+    fail "key window didn't move to W4"
+in_part "$P1" "$P2" 'type=app-(de)?activated' &&
+    fail "click in W4 re-activated a connection of the same app" ||
+    pass "click in W4 didn't make Gamma a separate app"
+in_part "$P1" "$P2" 'app=Gamma type=key-down win=W4 keycode=38 ' &&
+    pass "key a went to W4's connection (Gamma)" || fail "key a not delivered to W4"
+in_part "$P1" "$P2" 'app=Gamma type=key-down win=W4 keycode=24 .*mods=0x8' &&
+    pass "Command+q went to the key window's connection" || fail "Command+q not delivered to W4"
+in_part "$P1" "$P2" 'app=Alpha type=key-(down|up)' &&
+    fail "Alpha got keys while W4 was key" || pass "Alpha got no keys while W4 was key"
+# P2..P3: Beta's click deactivated both connections of the app.
+in_part "$P2" "$P3" 'app=Alpha type=app-deactivated' &&
+    in_part "$P2" "$P3" 'app=Gamma type=app-deactivated' &&
+    in_part "$P2" "$P3" 'app=Gamma type=key-window-lost win=W4' &&
+    pass "Beta's activation deactivated Alpha and Gamma" || fail "app deactivation with a joined connection"
+# P3..P4: a click in W4 activated the app (both connections) with W4 key.
+in_part "$P3" "$P4" 'app=Alpha type=app-activated' &&
+    in_part "$P3" "$P4" 'app=Gamma type=app-activated' &&
+    in_part "$P3" "$P4" 'app=Gamma type=key-window-gained win=W4' &&
+    pass "click in W4 activated Alpha's app with W4 as key window" || fail "activation through the joined connection"
+grep -q '"W4"$' "$LOG/list3.txt" && grep '"W4"$' "$LOG/list3.txt" | grep -q ' active key ' &&
+    grep '"W1"$' "$LOG/list3.txt" | grep -q ' active ' &&
+    pass "wsctl list: W4 key, W1 active (one app)" || fail "wsctl list after the join"
 
 kill "$SPID"
 wait "$SPID" 2>/dev/null

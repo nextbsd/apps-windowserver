@@ -44,6 +44,7 @@
 #ifndef _WINDOWSERVER_WSPROTOCOL_H_
 #define _WINDOWSERVER_WSPROTOCOL_H_
 
+#include <stddef.h>
 #include <stdint.h>
 #include <mach/message.h>
 #include <WindowServer/WSTypes.h>
@@ -94,13 +95,37 @@ typedef struct ws_req_header {
 	uint32_t	window;		/* target window, if any */
 } ws_req_header_t;
 
+/*
+ * Joining an app (WS_CONNECT_JOIN). Normally every connection is an app
+ * of its own. A connection that sets WS_CONNECT_JOIN and names another
+ * connection's client id and token in join_client and join_token
+ * becomes part of that connection's app instead (a helper process such
+ * as an X server started by XLibre.app). All connections of an app are
+ * activated and deactivated together and share one key window, which
+ * may belong to any of them; key events go to the connection that owns
+ * the key window. Only a process that was given the token can join.
+ * A wrong id or token fails the hello with EPERM. If the app's first
+ * connection goes away, the oldest remaining one carries the app on.
+ *
+ * join_client and join_token were added after protocol 1 shipped:
+ * older clients send a hello without them, which servers accept, and
+ * older servers ignore them and leave the reply's app_id 0, which the
+ * client library reports as ENOTSUP.
+ */
 typedef struct ws_req_hello {
 	ws_req_header_t	hdr;
 	uint32_t	flags;		/* WS_CONNECT_* */
 	uint32_t	reserved;
 	char		app_name[WS_MAX_APP_NAME];
 	char		bundle_id[128];
+	/* optional tail */
+	uint32_t	join_client;	/* WS_CONNECT_JOIN: client id */
+	uint32_t	reserved2;
+	uint64_t	join_token;	/* WS_CONNECT_JOIN: its token */
 } ws_req_hello_t;
+
+/* A hello from before the optional tail. */
+#define WS_HELLO_MIN_SIZE	offsetof(ws_req_hello_t, join_client)
 
 typedef struct ws_req_window_create {
 	ws_req_header_t	hdr;
@@ -180,6 +205,10 @@ typedef struct ws_reply {
 			uint32_t server_flags;
 			uint64_t token;
 			char	 socket_path[WS_MAX_SOCKET_PATH];
+			uint32_t app_id;	/* client id of the app's first
+						   connection; 0 from servers
+						   without WS_SERVER_JOIN */
+			uint32_t reserved;
 		} hello;
 		struct {
 			uint32_t window;
