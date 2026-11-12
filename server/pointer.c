@@ -283,6 +283,8 @@ pointer_motion(struct ws_server *srv, double x, double y)
 		return;
 	}
 	pointer_recheck(srv);
+	/* Tiling: the tile under the pointer may take the focus. */
+	tiling_pointer_moved(srv);
 	if (srv->hover != NULL)
 		send_pointer(srv, srv->hover, WS_EVENT_MOUSE_MOVED, 0, 0);
 	send_tracking(srv, srv->hover);

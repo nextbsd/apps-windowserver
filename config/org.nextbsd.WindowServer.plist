@@ -130,6 +130,18 @@
 	     combination ("Command+Option"); never Shift -->
 	<key>TilingModifier</key>
 	<string>Command+Option</string>
+	<!-- the tile a new window splits (dwindle), along its longer side:
+	     "largest" (the largest tile, the leftmost then topmost of equal
+	     ones: windows fill the screen evenly), "pointer" (the tile under
+	     the pointer, else the focused one, as on Hyprland) or "focused" -->
+	<key>TilingNewWindowSplits</key>
+	<string>largest</string>
+	<!-- while tiling, the tile under the pointer has the focus: moving
+	     the pointer onto a tiled window makes it key and its app active
+	     (not while a button is held, a drag or a menu lasts, nor over
+	     the Dock or a window that floats) -->
+	<key>TilingFocusFollowsMouse</key>
+	<true/>
 	<!-- empty: the first /dev/dri/card* with a connected display -->
 	<key>DRMDevice</key>
 	<string></string>

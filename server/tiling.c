@@ -17,9 +17,14 @@
  * to its tile.
  *
  * The windows tiled are kept in a tiling space: an ordered list of
- * slots, each with the ratio or weight of the split it makes, so that
- * swapping two windows swaps only the windows. There is one space, for
- * the screen. Workspaces (apps-windowserver#13) will give each one its
+ * slots (master: each with its weight in the stack) and, for dwindle, a
+ * binary tree whose leaves are the slots' windows and whose other nodes
+ * each split their area in two, along its longer side, so that swapping
+ * two windows swaps only the windows. A new window splits one tile
+ * (TilingNewWindowSplits: the largest, the one under the pointer or the
+ * focused one); a window that goes gives its tile back to its sibling,
+ * as on Hyprland. With TilingFocusFollowsMouse the tile under the
+ * pointer has the focus. There is one space, for the screen. Workspaces (apps-windowserver#13) will give each one its
  * own: everything here takes the space from tiling_space(), the one
  * place that would pick the workspace's.
  *
@@ -45,6 +50,9 @@
 #define INSIST_LIMIT	3	/* larger frames in a row: it floats */
 #define DRAWN_WAIT_USEC	1000000	/* how long an owner has to draw at the
 				   size of its new tile */
+#define OPENED_USEC	300000	/* a window that just joined keeps the
+				   focus this long, whatever the pointer
+				   does */
 
 /* Window flags that make a window float in tiling mode. */
 #define FLOATING_FLAGS	(WS_WINDOW_NO_TILE | WS_WINDOW_FIXED_SIZE | \
@@ -160,6 +168,94 @@ clipped(const struct ws_window *w)
 	return r;
 }
 
+/* ---- dwindle's tree ---- */
+
+/* The leaf of w under n, or NULL. */
+static struct ws_tiling_node *
+node_leaf(struct ws_tiling_node *n, const struct ws_window *w)
+{
+	struct ws_tiling_node *l;
+
+	if (n == NULL || w == NULL)
+		return NULL;
+	if (n->child[0] == NULL)
+		return n->w == w ? n : NULL;
+	if ((l = node_leaf(n->child[0], w)) != NULL)
+		return l;
+	return node_leaf(n->child[1], w);
+}
+
+static void
+node_free(struct ws_tiling_node *n)
+{
+	if (n == NULL)
+		return;
+	node_free(n->child[0]);
+	node_free(n->child[1]);
+	free(n);
+}
+
+/*
+ * w joins the tree: it splits leaf `at` (its tile), taking the second
+ * side, right or below. With no `at`, it splits the last leaf, or takes
+ * the whole area if it is the first.
+ */
+static int
+tree_insert(struct ws_tiling_space *sp, struct ws_tiling_node *at,
+    struct ws_window *w)
+{
+	struct ws_tiling_node *leaf, *n;
+
+	if ((leaf = calloc(1, sizeof(*leaf))) == NULL)
+		return -1;
+	leaf->w = w;
+	if (sp->root == NULL) {
+		sp->root = leaf;
+		return 0;
+	}
+	if (at == NULL)
+		for (at = sp->root; at->child[1] != NULL; at = at->child[1])
+			;
+	if ((n = calloc(1, sizeof(*n))) == NULL) {
+		free(leaf);
+		return -1;
+	}
+	n->parent = at->parent;
+	if (at->parent == NULL)
+		sp->root = n;
+	else
+		at->parent->child[at->parent->child[1] == at] = n;
+	n->child[0] = at;
+	n->child[1] = leaf;
+	n->ratio = 0.5;
+	at->parent = leaf->parent = n;
+	return 0;
+}
+
+/* w leaves the tree: its sibling takes the area they shared. */
+static void
+tree_remove(struct ws_tiling_space *sp, const struct ws_window *w)
+{
+	struct ws_tiling_node *leaf = node_leaf(sp->root, w), *p, *sib;
+
+	if (leaf == NULL)
+		return;
+	p = leaf->parent;
+	if (p == NULL) {
+		sp->root = NULL;
+		free(leaf);
+		return;
+	}
+	sib = p->child[p->child[0] == leaf];
+	sib->parent = p->parent;
+	if (p->parent == NULL)
+		sp->root = sib;
+	else
+		p->parent->child[p->parent->child[1] == p] = sib;
+	free(leaf);
+	free(p);
+}
+
 /* ---- slots ---- */
 
 static int
@@ -200,7 +296,6 @@ slot_insert(struct ws_tiling_space *sp, unsigned at, struct ws_window *w)
 	    (sp->nslots - at) * sizeof(sp->slots[0]));
 	memset(&sp->slots[at], 0, sizeof(sp->slots[at]));
 	sp->slots[at].w = w;
-	sp->slots[at].ratio = 0.5;
 	sp->slots[at].weight = 1.0;
 	sp->nslots++;
 	return 0;
@@ -209,17 +304,26 @@ slot_insert(struct ws_tiling_space *sp, unsigned at, struct ws_window *w)
 static void
 slot_remove(struct ws_tiling_space *sp, unsigned i)
 {
+	tree_remove(sp, sp->slots[i].w);
 	memmove(&sp->slots[i], &sp->slots[i + 1],
 	    (sp->nslots - i - 1) * sizeof(sp->slots[0]));
 	sp->nslots--;
 	sp->nsplits = 0;	/* stale until the next layout */
 }
 
-/* w joins the layout at slot `at`: it remembers the frame it had. */
+/*
+ * w joins the layout at the end of the slots, splitting leaf `split` in
+ * dwindle's tree: it remembers the frame it had.
+ */
 static void
-enter(struct ws_server *srv, struct ws_window *w, unsigned at)
+enter(struct ws_server *srv, struct ws_window *w, struct ws_tiling_node *split)
 {
-	if (slot_insert(tiling_space(srv), at, w) < 0) {
+	struct ws_tiling_space *sp = tiling_space(srv);
+
+	if (slot_insert(sp, sp->nslots, w) < 0 ||
+	    tree_insert(sp, split, w) < 0) {
+		if (slot_of(sp, w) >= 0)
+			slot_remove(sp, (unsigned)slot_of(sp, w));
 		ws_warn("tiling: no memory for window %u", w->id);
 		return;
 	}
@@ -233,6 +337,8 @@ enter(struct ws_server *srv, struct ws_window *w, unsigned at)
 	   gets back, whatever its owner does on hearing of the tile (a
 	   GNUstep app also changing its menu style for tiling). */
 	w->tiling_fresh = !srv->tiling.starting;
+	if (w->tiling_fresh)
+		srv->tiling.opened_usec = ws_now_usec();
 	w->tiling_insist = 0;
 	w->tiling_drawn = 0;
 	w->tiling_own_size = false;
@@ -284,27 +390,138 @@ focused_slot(struct ws_server *srv)
 	return i >= 0 ? i : slot_of(sp, srv->tiling.focus);
 }
 
+static void split_two(const ws_rect_t *r, bool vertical, int gap,
+    double ratio, ws_rect_t *first, ws_rect_t *second, int32_t *pos);
+
+/* Leaf l's tile, if it is under n with area r, as compute() lays it out. */
+static bool
+leaf_rect(struct ws_server *srv, const struct ws_tiling_node *n,
+    const ws_rect_t *r, const struct ws_tiling_node *l, ws_rect_t *out)
+{
+	ws_rect_t a, b;
+	int32_t pos;
+
+	if (n->child[0] == NULL) {
+		if (n != l)
+			return false;
+		*out = *r;
+		return true;
+	}
+	split_two(r, r->width >= r->height, gap_inner(srv),
+	    clampd(n->ratio, RATIO_MIN, RATIO_MAX), &a, &b, &pos);
+	return leaf_rect(srv, n->child[0], &a, l, out) ||
+	    leaf_rect(srv, n->child[1], &b, l, out);
+}
+
+/*
+ * The leaf a new window splits, for TilingNewWindowSplits "largest":
+ * the largest tile (within 2%), the leftmost, then topmost, of equal
+ * ones. Two windows sit side by side, the third splits the left one,
+ * the fourth the right one, and so on: the screen fills evenly.
+ */
+static struct ws_tiling_node *
+largest_leaf(struct ws_server *srv)
+{
+	struct ws_tiling_space *sp = tiling_space(srv);
+	struct ws_tiling_node *l, *best = NULL;
+	ws_rect_t r, br = { 0, 0, 0, 0 };
+	int64_t a, ba = 0, big;
+	unsigned i;
+
+	for (i = 0; i < sp->nslots; i++) {
+		if ((l = node_leaf(sp->root, sp->slots[i].w)) == NULL)
+			continue;
+		if (!leaf_rect(srv, sp->root, &sp->area, l, &r))
+			continue;
+		a = (int64_t)r.width * r.height;
+		big = a > ba ? a : ba;
+		if (best == NULL || (a - ba) * 50 > big ||
+		    ((ba - a) * 50 <= big && (r.x < br.x ||
+		    (r.x == br.x && r.y < br.y)))) {
+			best = l;
+			br = r;
+			ba = a;
+		}
+	}
+	return best;
+}
+
+/* The tiled window under the pointer, or NULL (a gap, the Dock, a
+   window that floats). */
+static struct ws_window *
+tiled_at_pointer(struct ws_server *srv)
+{
+	struct ws_window *w = window_at(srv, srv->ptr_x, srv->ptr_y);
+
+	return w != NULL && w->tiled && w->tile_for == NULL ? w : NULL;
+}
+
+/*
+ * The leaf the next new window splits (dwindle's tree; master keeps it
+ * too, for when the layout changes). `prev` is the window that joined
+ * just before it in this pass, if any.
+ */
+static struct ws_tiling_node *
+split_target(struct ws_server *srv, struct ws_window *prev)
+{
+	struct ws_tiling_space *sp = tiling_space(srv);
+	struct ws_tiling *t = &srv->tiling;
+	struct ws_window *w, *k = key_window(srv);
+	struct ws_tiling_node *l;
+	unsigned i;
+
+	switch (t->splits) {
+	case SPLITS_POINTER:
+		/* the tile under the pointer, if it is over one (not over
+		   the Dock, a panel, a menu) */
+		w = window_at(srv, srv->ptr_x, srv->ptr_y);
+		if (w != NULL && w->tiled &&
+		    (l = node_leaf(sp->root, w)) != NULL)
+			return l;
+		if (w == NULL || (!w->tiled && tileable(srv, w)))
+			for (i = 0; i < sp->nslots; i++)
+				if (in_rect(&sp->slots[i].tile, srv->ptr_x,
+				    srv->ptr_y))
+					return node_leaf(sp->root,
+					    sp->slots[i].w);
+		/* FALLTHROUGH */
+	case SPLITS_FOCUSED:
+		/* the focused tile; windows that join together split the
+		   one before them, the way they would one by one */
+		if ((l = node_leaf(sp->root, prev)) != NULL ||
+		    (l = node_leaf(sp->root, t->focus)) != NULL ||
+		    (k != NULL && (l = node_leaf(sp->root, k)) != NULL))
+			return l;
+		return NULL;
+	default:
+		return largest_leaf(srv);
+	}
+}
+
 /*
  * Work out which windows tile: those that no longer may leave (floating
- * again where they were, if they're still shown), new ones join. New
- * windows come after the focused one (dwindle: they split its tile) or
- * at the end (master: the stack), the frontmost first, the key window
- * before all.
+ * again where they were, if they're still shown), new ones join, the
+ * key window first, then the frontmost. Each new one splits a tile
+ * (split_target) and comes at the end of the slots (master: the end of
+ * the stack).
  */
 static void
 sync_windows(struct ws_server *srv)
 {
 	struct ws_tiling_space *sp = tiling_space(srv);
-	struct ws_window *w, *key = key_window(srv), **add;
+	struct ws_window *w, *key = key_window(srv), **add, *prev = NULL;
 	unsigned i, n = 0, nadd = 0;
-	int anchor;
 
 	for (i = sp->nslots; i-- > 0;) {
 		w = sp->slots[i].w;
 		if (tileable(srv, w))
 			continue;
 		if (!w->visible || w->minimized) {
-			/* hidden, minimized: it comes back when shown */
+			/* hidden, minimized: it comes back when shown; if
+			   it had the focus, the tile under the pointer
+			   takes it */
+			if (w == srv->tiling.focus)
+				srv->tiling.refocus = true;
 			slot_remove(sp, i);
 			w->tiled = false;
 			continue;
@@ -320,13 +537,9 @@ sync_windows(struct ws_server *srv)
 	for (w = srv->stack_top; w != NULL; w = w->below)
 		if (w != key && !w->tiled && tileable(srv, w))
 			add[nadd++] = w;
-	anchor = slot_of(sp, srv->tiling.focus);
 	for (i = 0; i < nadd; i++) {
-		if (srv->tiling.layout == WS_TILING_MASTER || anchor < 0)
-			anchor = (int)sp->nslots;
-		else
-			anchor++;
-		enter(srv, add[i], (unsigned)anchor);
+		enter(srv, add[i], split_target(srv, prev));
+		prev = add[i];
 	}
 	free(add);
 }
@@ -370,8 +583,8 @@ split_two(const ws_rect_t *r, bool vertical, int gap, double ratio,
 }
 
 static void
-add_split(struct ws_server *srv, int kind, unsigned slot, bool vertical,
-    const ws_rect_t *area, int32_t pos)
+add_split(struct ws_server *srv, int kind, struct ws_tiling_node *node,
+    unsigned slot, bool vertical, const ws_rect_t *area, int32_t pos)
 {
 	struct ws_tiling_space *sp = tiling_space(srv);
 	struct ws_tiling_split *s;
@@ -382,6 +595,7 @@ add_split(struct ws_server *srv, int kind, unsigned slot, bool vertical,
 		return;
 	s = &sp->splits[sp->nsplits++];
 	s->kind = kind;
+	s->node = node;
 	s->slot = slot;
 	s->vertical = vertical;
 	s->area = *area;
@@ -397,6 +611,40 @@ add_split(struct ws_server *srv, int kind, unsigned slot, bool vertical,
 		s->handle.width = area->width;
 		s->handle.height = wide;
 	}
+}
+
+/*
+ * Dwindle: lay out node n in r. Each leaf's slot moves to *next, so the
+ * slots end up in the tree's order (left or top first).
+ */
+static void
+compute_node(struct ws_server *srv, struct ws_tiling_node *n,
+    const ws_rect_t *r, unsigned *next)
+{
+	struct ws_tiling_space *sp = tiling_space(srv);
+	struct ws_tiling_slot tmp;
+	ws_rect_t a, b;
+	int32_t pos;
+	bool vertical;
+	int i;
+
+	if (n->child[0] == NULL) {
+		if ((i = slot_of(sp, n->w)) < 0)
+			return;
+		if ((unsigned)i != *next) {
+			tmp = sp->slots[i];
+			sp->slots[i] = sp->slots[*next];
+			sp->slots[*next] = tmp;
+		}
+		sp->slots[(*next)++].tile = *r;
+		return;
+	}
+	vertical = r->width >= r->height;
+	split_two(r, vertical, gap_inner(srv), clampd(n->ratio, RATIO_MIN,
+	    RATIO_MAX), &a, &b, &pos);
+	add_split(srv, SPLIT_RATIO, n, 0, vertical, r, pos);
+	compute_node(srv, n->child[0], &a, next);
+	compute_node(srv, n->child[1], &b, next);
 }
 
 /* Work out every slot's tile and the splits between them. */
@@ -419,15 +667,9 @@ compute(struct ws_server *srv)
 		return;
 	}
 	if (srv->tiling.layout == WS_TILING_DWINDLE) {
-		for (i = 0; i < n - 1; i++) {
-			vertical = r.width >= r.height;
-			split_two(&r, vertical, gap, clampd(sp->slots[i].ratio,
-			    RATIO_MIN, RATIO_MAX), &first, &rest, &pos);
-			sp->slots[i].tile = first;
-			add_split(srv, SPLIT_RATIO, i, vertical, &r, pos);
-			r = rest;
-		}
-		sp->slots[n - 1].tile = r;
+		i = 0;
+		if (sp->root != NULL)
+			compute_node(srv, sp->root, &r, &i);
 		return;
 	}
 	/* master and stack: the master beside (or above) the stack */
@@ -435,7 +677,7 @@ compute(struct ws_server *srv)
 	split_two(&r, vertical, gap, clampd(sp->master_ratio, RATIO_MIN,
 	    RATIO_MAX), &first, &rest, &pos);
 	sp->slots[0].tile = first;
-	add_split(srv, SPLIT_MASTER, 0, vertical, &r, pos);
+	add_split(srv, SPLIT_MASTER, NULL, 0, vertical, &r, pos);
 	/* the stack runs the other way */
 	start = vertical ? rest.y : rest.x;
 	len = (vertical ? rest.height : rest.width) - gap * (int32_t)(n - 2);
@@ -459,7 +701,8 @@ compute(struct ws_server *srv)
 		}
 		sp->slots[i].tile = first;
 		if (i < n - 1)
-			add_split(srv, SPLIT_STACK, i, !vertical, &rest, at + l);
+			add_split(srv, SPLIT_STACK, NULL, i, !vertical, &rest,
+			    at + l);
 		at += l + gap;
 	}
 }
@@ -568,16 +811,8 @@ layout(struct ws_server *srv)
 {
 	struct ws_tiling_space *sp = tiling_space(srv);
 	struct ws_tiling *t = &srv->tiling;
-	int go = gap_outer(srv);
 	unsigned i;
 
-	sp->area = srv->usable;
-	if (sp->area.width > 4 * go && sp->area.height > 4 * go) {
-		sp->area.x += go;
-		sp->area.y += go;
-		sp->area.width -= 2 * go;
-		sp->area.height -= 2 * go;
-	}
 	compute(srv);
 	for (i = 0; i < sp->nslots; i++)
 		place(srv, sp->slots[i].w, &sp->slots[i].tile);
@@ -653,6 +888,22 @@ tiling_changed(struct ws_server *srv)
 	srv->tiling.dirty = true;
 }
 
+/* The area tiles go in: the usable area less the outer gaps. */
+static void
+area_update(struct ws_server *srv)
+{
+	struct ws_tiling_space *sp = tiling_space(srv);
+	int go = gap_outer(srv);
+
+	sp->area = srv->usable;
+	if (sp->area.width > 4 * go && sp->area.height > 4 * go) {
+		sp->area.x += go;
+		sp->area.y += go;
+		sp->area.width -= 2 * go;
+		sp->area.height -= 2 * go;
+	}
+}
+
 /* If the layout is dirty, work it out now. */
 static void
 settle(struct ws_server *srv)
@@ -664,9 +915,63 @@ settle(struct ws_server *srv)
 	t->dirty = false;
 	if (!t->on)
 		return;
+	area_update(srv);
 	sync_windows(srv);
 	t->starting = false;
 	layout(srv);
+}
+
+/*
+ * May the pointer move the focus now (TilingFocusFollowsMouse)? Not
+ * while a button is held (a click, a window or a split dragged), a drag
+ * and drop lasts, a menu or popup holds the pointer grab, or the
+ * overview is open, nor away from a panel or alert of the active app
+ * that has the focus (floating, often over the tiles).
+ */
+static bool
+follows_mouse(struct ws_server *srv)
+{
+	struct ws_tiling *t = &srv->tiling;
+	struct ws_window *k = key_window(srv);
+
+	return t->on && srv->cfg.tiling_focus_follows_mouse &&
+	    srv->buttons == 0 && srv->grab == NULL && srv->pgrab == NULL &&
+	    !drag_active(srv) && !overview_active(srv) && t->drag_split < 0 &&
+	    t->moving == NULL && (k == NULL || k->tiled || !k->visible ||
+	    ((k->flags & WS_WINDOW_PANEL) == 0 && k->level <= WS_LEVEL_NORMAL));
+}
+
+/* Tiled window w takes the focus from the pointer: its app is made
+   active with w key. Tiles don't overlap: it isn't raised. */
+static void
+pointer_focus(struct ws_server *srv, struct ws_window *w)
+{
+	struct ws_client *a = w->owner->app;
+
+	srv->tiling.focus = w;
+	if (srv->active == a && srv->dock_front == NULL && a->key_window == w)
+		return;
+	ws_debug("tiling: window %u under the pointer takes the focus", w->id);
+	app_activate(srv, a, w);
+}
+
+/*
+ * The pointer moved (pointer.c), with no button held: the tiled window
+ * under it takes the focus, as on Hyprland (follow_mouse = 1). Over the
+ * Dock, a window that floats or a gap, the focus stays. A window that
+ * just joined keeps the focus a moment, so it doesn't lose it to the
+ * pointer the user hasn't moved yet.
+ */
+void
+tiling_pointer_moved(struct ws_server *srv)
+{
+	struct ws_window *w;
+
+	if (!follows_mouse(srv) ||
+	    ws_now_usec() - srv->tiling.opened_usec < OPENED_USEC)
+		return;
+	if ((w = tiled_at_pointer(srv)) != NULL)
+		pointer_focus(srv, w);
 }
 
 void
@@ -676,6 +981,17 @@ tiling_flush(struct ws_server *srv)
 	struct ws_window *k;
 
 	settle(srv);
+	/* The focused tile went: the one under the pointer takes the
+	   focus (its sibling, which took its space, if the pointer was
+	   over it). */
+	if (t->refocus) {
+		t->refocus = false;
+		if (follows_mouse(srv)) {
+			pointer_recheck(srv);
+			if ((k = tiled_at_pointer(srv)) != NULL)
+				pointer_focus(srv, k);
+		}
+	}
 	k = key_window(srv);
 	if (k != NULL && k->tiled)
 		t->focus = k;
@@ -695,8 +1011,10 @@ tiling_window_gone(struct ws_server *srv, struct ws_window *w)
 		w->tiled = false;
 		t->dirty = true;
 	}
-	if (t->focus == w)
+	if (t->focus == w) {
 		t->focus = NULL;
+		t->refocus = i >= 0;
+	}
 	if (t->moving == w)
 		t->moving = NULL;
 	if (t->border == w) {
@@ -974,7 +1292,13 @@ swap_slots(struct ws_server *srv, unsigned i, unsigned j)
 {
 	struct ws_tiling_space *sp = tiling_space(srv);
 	struct ws_window *w = sp->slots[i].w;
+	struct ws_tiling_node *a = node_leaf(sp->root, w),
+	    *b = node_leaf(sp->root, sp->slots[j].w);
 
+	if (a != NULL && b != NULL) {
+		a->w = sp->slots[j].w;
+		b->w = w;
+	}
 	sp->slots[i].w = sp->slots[j].w;
 	sp->slots[j].w = w;
 	srv->tiling.dirty = true;
@@ -1001,24 +1325,25 @@ op_swap(struct ws_server *srv, int dir)
  */
 struct split_backup {
 	double	master_ratio;
-	double	ratio[2];
 	double	weight[2];
 	unsigned slot;
+	struct ws_tiling_node *node;	/* dwindle: the node split */
+	double	ratio;
 };
 
 static void
-backup_take(struct ws_tiling_space *sp, unsigned slot, struct split_backup *b)
+backup_take(struct ws_tiling_space *sp, unsigned slot,
+    struct ws_tiling_node *node, struct split_backup *b)
 {
 	unsigned k;
 
 	b->master_ratio = sp->master_ratio;
 	b->slot = slot;
-	for (k = 0; k < 2; k++) {
-		b->ratio[k] = slot + k < sp->nslots ? sp->slots[slot + k].ratio :
-		    0.5;
+	b->node = node;
+	b->ratio = node != NULL ? node->ratio : 0.5;
+	for (k = 0; k < 2; k++)
 		b->weight[k] = slot + k < sp->nslots ?
 		    sp->slots[slot + k].weight : 1.0;
-	}
 }
 
 static void
@@ -1027,11 +1352,11 @@ backup_put(struct ws_tiling_space *sp, const struct split_backup *b)
 	unsigned k;
 
 	sp->master_ratio = b->master_ratio;
+	if (b->node != NULL)
+		b->node->ratio = b->ratio;
 	for (k = 0; k < 2; k++)
-		if (b->slot + k < sp->nslots) {
-			sp->slots[b->slot + k].ratio = b->ratio[k];
+		if (b->slot + k < sp->nslots)
 			sp->slots[b->slot + k].weight = b->weight[k];
-		}
 }
 
 /* Move split s (as it was laid out) so its first side ends at pos. */
@@ -1054,8 +1379,8 @@ split_move(struct ws_server *srv, const struct ws_tiling_split *s,
 		r = clampd((double)(pos - start) / len, RATIO_MIN, RATIO_MAX);
 		if (s->kind == SPLIT_MASTER)
 			sp->master_ratio = r;
-		else if (s->slot < sp->nslots)
-			sp->slots[s->slot].ratio = r;
+		else if (s->node != NULL)
+			s->node->ratio = r;
 		break;
 	case SPLIT_STACK:
 		if (s->slot + 1 >= sp->nslots)
@@ -1086,24 +1411,29 @@ op_resize(struct ws_server *srv, int step)
 	double d = step > 0 ? RESIZE_STEP : -RESIZE_STEP;
 	struct split_backup b;
 	struct ws_tiling_slot *s;
+	struct ws_tiling_node *l, *p;
 	ws_rect_t *old;
 
 	if (i < 0 || n < 2 || step == 0)
 		return ENOENT;
-	backup_take(sp, i > 0 ? (unsigned)i - 1 : 0, &b);
 	if (srv->tiling.layout == WS_TILING_DWINDLE) {
-		/* the split this tile makes; the last one shares the one
-		   before it */
-		s = &sp->slots[i < n - 1 ? i : n - 2];
-		s->ratio = clampd(s->ratio + (i < n - 1 ? d : -d), RATIO_MIN,
-		    RATIO_MAX);
-	} else if (i == 0 || n == 2) {
-		sp->master_ratio = clampd(sp->master_ratio + (i == 0 ? d : -d),
+		/* the split that makes this tile: its side grows */
+		l = node_leaf(sp->root, sp->slots[i].w);
+		if (l == NULL || (p = l->parent) == NULL)
+			return ENOENT;
+		backup_take(sp, 0, p, &b);
+		p->ratio = clampd(p->ratio + (p->child[0] == l ? d : -d),
 		    RATIO_MIN, RATIO_MAX);
 	} else {
-		s = &sp->slots[i];
-		s->weight = clampd(s->weight * (step > 0 ? 1.25 : 0.8),
-		    WEIGHT_MIN, WEIGHT_MAX);
+		backup_take(sp, i > 0 ? (unsigned)i - 1 : 0, NULL, &b);
+		if (i == 0 || n == 2) {
+			sp->master_ratio = clampd(sp->master_ratio +
+			    (i == 0 ? d : -d), RATIO_MIN, RATIO_MAX);
+		} else {
+			s = &sp->slots[i];
+			s->weight = clampd(s->weight * (step > 0 ? 1.25 : 0.8),
+			    WEIGHT_MIN, WEIGHT_MAX);
+		}
 	}
 	old = tiles_take(sp);
 	compute(srv);
@@ -1273,7 +1603,7 @@ split_drag(struct ws_server *srv)
 
 	pos = (int32_t)lround((s.vertical ? srv->ptr_x : srv->ptr_y) -
 	    gap_inner(srv) / 2.0);
-	backup_take(sp, s.slot, &b);
+	backup_take(sp, s.slot, s.node, &b);
 	split_move(srv, &s, pos);
 	old = tiles_take(sp);
 	compute(srv);
@@ -1413,6 +1743,10 @@ read_config(struct ws_server *srv)
 	    WS_TILING_MASTER : WS_TILING_DWINDLE;
 	if (!tiling_modifier_parse(srv->cfg.tiling_modifier, &t->modifier))
 		t->modifier = WS_MOD_COMMAND | WS_MOD_ALT;
+	t->splits = strcasecmp(srv->cfg.tiling_new_window_splits,
+	    "pointer") == 0 ? SPLITS_POINTER :
+	    strcasecmp(srv->cfg.tiling_new_window_splits, "focused") == 0 ?
+	    SPLITS_FOCUSED : SPLITS_LARGEST;
 }
 
 static bool
@@ -1446,6 +1780,7 @@ tiling_off(struct ws_server *srv)
 	t->drag_split = t->hover_split = -1;
 	t->moving = NULL;
 	t->focus = NULL;
+	t->refocus = false;
 	cursor_update(srv);
 }
 
@@ -1495,6 +1830,8 @@ tiling_fini(struct ws_server *srv)
 {
 	struct ws_tiling_space *sp = tiling_space(srv);
 
+	node_free(sp->root);
+	sp->root = NULL;
 	free(sp->slots);
 	free(sp->splits);
 	sp->slots = NULL;

@@ -29,6 +29,17 @@
  *      windows do; it draws again every 200 ms
  *
  * On WS_EVENT_WINDOW_RESTORE it orders the window in again.
+ *
+ * wstiling -e starts with one window, W1 in Tiler, as a user opening
+ * Terminal windows one by one, and takes these keys in either app:
+ *
+ *   w  a new window in Tiler, W2 to W8 (made key, as a new window is)
+ *   v  a new window in Other, V1 to V3 (Other activates itself)
+ *   p  a panel, Q1 (yellow), shown but not made key
+ *   x  close the key window
+ *   g  grab the pointer for outside presses (a popup menu)
+ *   G  end the grab
+ *
  * tests/tiling-test.sh drives it with wsctl.
  */
 
@@ -72,6 +83,7 @@ enum { TILER, OTHER, NAPPS };
 static struct app apps[NAPPS] = { { "Tiler", NULL, 0 }, { "Other", NULL, 0 } };
 static struct win wins[MAXWINS];
 static int nwins;
+static int empty;		/* -e */
 static volatile sig_atomic_t quit;
 
 static struct win *
@@ -221,6 +233,53 @@ tiler_key(const char *text)
 		    0xffffffff, MOVER, 0));
 }
 
+/* -e: the next of names[] not shown yet, as a new window of app. */
+static void
+open_next(struct app *app, const char *const *names, int n, uint32_t color)
+{
+	int i;
+
+	for (i = 0; i < n; i++)
+		if (win_by_name(names[i]) == NULL) {
+			show(make_window(app, names[i], 150 + 30 * i,
+			    120 + 20 * i, 500, 350, 0, color + 0x101010 * i,
+			    PLAIN, 0));
+			return;
+		}
+}
+
+/* -e: a key typed into either app. */
+static void
+empty_key(struct app *app, const char *text)
+{
+	static const char *const tnames[] = { "W2", "W3", "W4", "W5", "W6",
+	    "W7", "W8" };
+	static const char *const onames[] = { "V1", "V2", "V3" };
+	struct win *w = win_by_id(app->key);
+
+	if (strcmp(text, "w") == 0)
+		open_next(&apps[TILER], tnames, 7, 0xff304060);
+	else if (strcmp(text, "v") == 0) {
+		/* the other app opens a window, as the user asked it to */
+		ws_activate(apps[OTHER].conn);
+		open_next(&apps[OTHER], onames, 3, 0xff603040);
+	}
+	else if (strcmp(text, "p") == 0 && win_by_name("Q1") == NULL)
+		make_window(app, "Q1", 560, 300, 160, 120, WS_WINDOW_PANEL,
+		    0xffc0c030, PLAIN, 1);
+	else if (strcmp(text, "x") == 0 && w != NULL) {
+		printf("closed %s\n", w->name);
+		ws_window_destroy(app->conn, w->id);
+		w->id = 0;
+		app->key = 0;
+	} else if (strcmp(text, "g") == 0)
+		printf("grab app=%s %d\n", app->name,
+		    ws_pointer_grab(app->conn, WS_GRAB_OUTSIDE));
+	else if (strcmp(text, "G") == 0)
+		printf("ungrab app=%s %d\n", app->name,
+		    ws_pointer_ungrab(app->conn));
+}
+
 /* WindowServer gave w a frame: draw it at that size, as GNUstep does. */
 static void
 new_frame(struct win *w, const ws_rect_t *f)
@@ -323,7 +382,9 @@ print_event(ws_connection_t *conn, const ws_event_t *ev, void *ctx)
 			w->dragging = 0;
 		break;
 	case WS_EVENT_KEY_DOWN:
-		if (app == &apps[TILER])
+		if (empty)
+			empty_key(app, ev->u.key.text);
+		else if (app == &apps[TILER])
 			tiler_key(ev->u.key.text);
 		break;
 	default:
@@ -339,11 +400,12 @@ on_signal(int sig)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
 	struct pollfd pfd[NAPPS];
 	int i, n;
 
+	empty = argc == 2 && strcmp(argv[1], "-e") == 0;
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
@@ -363,8 +425,14 @@ main(void)
 		    ws_server_flags(apps[TILER].conn));
 		return 1;
 	}
-	if (make_window(&apps[OTHER], "O1", 500, 400, 400, 300, 0, 0xff30c0c0,
-	    PLAIN, 1) == NULL ||
+	if (empty) {
+		if (make_window(&apps[TILER], "W1", 120, 100, 500, 350, 0,
+		    0xff304060, PLAIN, 1) == NULL)
+			return 1;
+		ws_activate(apps[TILER].conn);
+		ws_window_make_key(apps[TILER].conn, win_by_name("W1")->id);
+	} else if (make_window(&apps[OTHER], "O1", 500, 400, 400, 300, 0,
+	    0xff30c0c0, PLAIN, 1) == NULL ||
 	    make_window(&apps[OTHER], "N1", 950, 550, 250, 200,
 	    WS_WINDOW_NO_TILE, 0xffe08020, PLAIN, 1) == NULL ||
 	    make_window(&apps[TILER], "T1", 100, 100, 400, 300, 0, 0xffc03030,
@@ -376,8 +444,10 @@ main(void)
 	    make_window(&apps[TILER], "P1", 900, 60, 200, 150, WS_WINDOW_PANEL,
 	    0xffc0c030, PLAIN, 1) == NULL)
 		return 1;
-	ws_activate(apps[TILER].conn);
-	ws_window_make_key(apps[TILER].conn, win_by_name("T3")->id);
+	if (!empty) {
+		ws_activate(apps[TILER].conn);
+		ws_window_make_key(apps[TILER].conn, win_by_name("T3")->id);
+	}
 	for (i = 0; i < NAPPS; i++)
 		ws_sync(apps[i].conn);
 	printf("ready\n");

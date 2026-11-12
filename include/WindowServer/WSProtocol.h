@@ -650,12 +650,26 @@ typedef struct ws_req_cursor {
  * frame it had before it was tiled, without WS_FRAME_TILED, so an owner
  * that saves window frames can tell tiles from the frames to keep.
  *
- * Layouts (TilingLayout): "dwindle" gives the first window part of the
- * area and the next one part of what is left, splitting the longer side
- * each time; "master" gives the first window the master area (left, or
- * top on a tall screen) and stacks the others beside it. New windows
- * come after the window that had the focus (dwindle) or at the end of
- * the stack (master).
+ * Layouts (TilingLayout): "dwindle" splits tiles in two: a new window
+ * splits one tile along its longer side and takes the right or bottom
+ * half, and a window that goes gives its tile back to the window it
+ * shared it with. TilingNewWindowSplits picks the tile: "largest" (the
+ * largest, the leftmost then topmost of equal ones, so the screen fills
+ * evenly), "pointer" (the tile under the pointer, else the focused one)
+ * or "focused". "master" gives the first window the master area (left,
+ * or top on a tall screen) and stacks the others beside it; new windows
+ * go at the end of the stack.
+ *
+ * Focus follows the mouse (TilingFocusFollowsMouse, on by default):
+ * pointer motion onto a tiled window activates its app with that window
+ * key, as a click would (WS_EVENT_APP_ACTIVATED, then
+ * WS_EVENT_KEY_WINDOW_GAINED), without raising it. Not while a button
+ * is held, a drag lasts, a connection holds a pointer grab (a menu or
+ * popup), or a panel of the active app (WS_WINDOW_PANEL, or above the
+ * normal level) is key; not over a window that floats, the Dock or a
+ * gap; not within a moment of a window joining the layout. When the
+ * focused tiled window closes, hides or is minimized, the tiled window
+ * under the pointer takes the focus. Stacking mode is click to focus.
  *
  * What tiles: visible windows on the normal level, of app connections
  * (not the Dock's app), that take pointer events and can be key, with
@@ -904,7 +918,8 @@ typedef struct ws_req_drag_status {	/* DRAG_STATUS */
  *     get WS_EVENT_KEYMAP again, which carries them.
  *   - WindowMode, TilingLayout, TilingGapsInner, TilingGapsOuter,
  *     TilingMasterRatio, TilingBorder, TilingBorderColor,
- *     TilingModifier (servers with WS_SERVER_TILING): the windows are
+ *     TilingModifier, TilingNewWindowSplits, TilingFocusFollowsMouse
+ *     (servers with WS_SERVER_TILING): the windows are
  *     tiled, laid out again, or given back their frames from before
  *     tiling (see "Window tiling").
  * Tool and Dock connections get WS_EVENT_SETTINGS_CHANGED after any

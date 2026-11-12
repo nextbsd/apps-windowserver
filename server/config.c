@@ -98,6 +98,8 @@ static const struct ckey keys[] = {
 	{ "TilingBorderColor", C_COLOR, offsetof(struct ws_config,
 	  tiling_border_color), sizeof(uint32_t), CONFIG_TILING },
 	S("TilingModifier", tiling_modifier, CONFIG_TILING),
+	S("TilingNewWindowSplits", tiling_new_window_splits, CONFIG_TILING),
+	B("TilingFocusFollowsMouse", tiling_focus_follows_mouse, CONFIG_TILING),
 };
 
 #define NKEYS	(sizeof(keys) / sizeof(keys[0]))
@@ -155,6 +157,9 @@ config_defaults(struct ws_config *cfg)
 	cfg->tiling_border_color = 0x4a7fc0;
 	strlcpy(cfg->tiling_modifier, "Command+Option",
 	    sizeof(cfg->tiling_modifier));
+	strlcpy(cfg->tiling_new_window_splits, "largest",
+	    sizeof(cfg->tiling_new_window_splits));
+	cfg->tiling_focus_follows_mouse = true;
 }
 
 static int

@@ -105,6 +105,9 @@ struct ws_config {
 	int	tiling_border;		/* active-window border, 0 = none */
 	uint32_t tiling_border_color;	/* 0xRRGGBB */
 	char	tiling_modifier[48];	/* "Command+Option" */
+	char	tiling_new_window_splits[16]; /* largest, pointer or focused */
+	bool	tiling_focus_follows_mouse; /* the tile under the pointer
+					   has the focus */
 };
 
 /* What a live change to a key needs (config.c's key table). */
@@ -344,18 +347,30 @@ struct ws_overview {
 /* Window tiling (tiling.c). */
 struct ws_tiling_slot {
 	struct ws_window *w;
-	double		ratio;		/* dwindle: share of the area left
-					   that this slot takes */
 	double		weight;		/* master: share of the stack */
 	ws_rect_t	tile;		/* where it goes, gaps left out */
 };
 
+/*
+ * Dwindle's tree: a leaf holds a window, any other node splits its area
+ * in two, `ratio` of it to child[0], along its longer side.
+ */
+struct ws_tiling_node {
+	struct ws_tiling_node *parent;
+	struct ws_tiling_node *child[2]; /* both NULL: a leaf */
+	struct ws_window *w;		/* a leaf's window */
+	double		ratio;
+};
+
 enum { SPLIT_RATIO, SPLIT_MASTER, SPLIT_STACK };
+
+/* TilingNewWindowSplits: the tile a new window splits (dwindle). */
+enum { SPLITS_LARGEST, SPLITS_POINTER, SPLITS_FOCUSED };
 
 struct ws_tiling_split {
 	int		kind;		/* SPLIT_* */
-	unsigned	slot;		/* RATIO: the slot whose ratio it is;
-					   STACK: the slot before the line */
+	struct ws_tiling_node *node;	/* RATIO: the node it splits */
+	unsigned	slot;		/* STACK: the slot before the line */
 	bool		vertical;	/* a vertical line: sides left, right */
 	ws_rect_t	area;		/* both sides and the gap */
 	int32_t		pos;		/* where the first side ends */
@@ -369,6 +384,7 @@ struct ws_tiling_split {
 struct ws_tiling_space {
 	struct ws_tiling_slot *slots;	/* in layout order */
 	unsigned	nslots;
+	struct ws_tiling_node *root;	/* dwindle's tree of the slots */
 	unsigned	cap;
 	struct ws_tiling_split *splits;	/* cap of them */
 	unsigned	nsplits;
@@ -390,6 +406,12 @@ struct ws_tiling {
 	int		drag_split;	/* split being dragged, -1 = none */
 	int		hover_split;	/* split under the pointer, -1 = none */
 	struct ws_window *moving;	/* tiled window the user drags */
+	int		splits;		/* SPLITS_* (TilingNewWindowSplits) */
+	uint64_t	opened_usec;	/* when a window last joined: the
+					   pointer doesn't take its focus
+					   right away */
+	bool		refocus;	/* the focused tile went: the one
+					   under the pointer takes the focus */
 };
 
 /* A drag and drop under way (drag.c). */
@@ -790,6 +812,7 @@ bool	tiling_key(struct ws_server *srv, xkb_keysym_t sym);
 bool	tiling_press(struct ws_server *srv, uint32_t button);
 bool	tiling_release(struct ws_server *srv, uint32_t button);
 bool	tiling_motion(struct ws_server *srv);
+void	tiling_pointer_moved(struct ws_server *srv);
 void	tiling_grab_end(struct ws_server *srv, struct ws_window *w);
 int	tiling_cursor(struct ws_server *srv);
 void	tiling_draw_border(struct ws_server *srv, struct ws_window *w);
