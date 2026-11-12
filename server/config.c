@@ -58,6 +58,7 @@ static const struct ckey keys[] = {
 	S("SnapshotPath", snapshot_path),
 	I("MinimizeTileSize", minimize_tile_size),
 	S("MinimizeTileImage", minimize_tile_image),
+	B("MinimizeIntoDock", minimize_into_dock),
 };
 
 void

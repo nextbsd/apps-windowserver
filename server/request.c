@@ -64,6 +64,21 @@ handle_hello(struct ws_server *srv, struct ws_mach_item *item)
 		reply_status(item, m->hdr.seq, EINVAL);
 		return;
 	}
+	if (m->flags & WS_CONNECT_DOCK) {
+		/* The Dock is a tool connection of its own kind; it sees
+		 * every app's windows, so only the console user gets it
+		 * (dock.c). */
+		if (m->flags & (WS_CONNECT_CONTROL | WS_CONNECT_JOIN)) {
+			reply_status(item, m->hdr.seq, EINVAL);
+			return;
+		}
+		if (!dock_may_list(srv, item->sender_euid)) {
+			ws_warn("pid %d (uid %d): Dock connection refused",
+			    (int)item->sender_pid, (int)item->sender_euid);
+			reply_status(item, m->hdr.seq, EPERM);
+			return;
+		}
+	}
 	if (m->flags & WS_CONNECT_JOIN) {
 		/* The optional tail must be there, and a tool can't join. */
 		if (item->size < sizeof(*m) || (m->flags & WS_CONNECT_CONTROL)) {
@@ -72,7 +87,7 @@ handle_hello(struct ws_server *srv, struct ws_mach_item *item)
 		}
 		target = client_lookup(srv, m->join_client);
 		if (target == NULL || target->doomed ||
-		    (target->flags & WS_CONNECT_CONTROL) ||
+		    (target->flags & WS_CONNECT_TOOL) ||
 		    timingsafe_bcmp(&target->token, &m->join_token,
 		    sizeof(target->token)) != 0) {
 			ws_warn("pid %d: join of client %u refused",
@@ -92,7 +107,8 @@ handle_hello(struct ws_server *srv, struct ws_mach_item *item)
 	c->token = random_token();
 	c->pid = item->sender_pid;
 	c->uid = item->sender_euid;
-	c->flags = m->flags & (WS_CONNECT_CONTROL | WS_CONNECT_XKB);
+	c->flags = m->flags & (WS_CONNECT_CONTROL | WS_CONNECT_XKB |
+	    WS_CONNECT_DOCK);
 	c->app = app != NULL ? app : c;
 	c->sock = -1;
 	c->hello_usec = ws_now_usec();
@@ -201,6 +217,61 @@ handle_snapshot(struct ws_server *srv, struct ws_client *c,
 	close(fd);
 }
 
+/* WS_MSG_DOCK_PREVIEW: answer, then send the picture on the socket. */
+static void
+handle_preview(struct ws_server *srv, struct ws_client *c,
+    struct ws_mach_item *item, uint32_t seq, uint32_t window, int32_t max)
+{
+	struct ws_window *w = window_lookup(srv, window);
+	uint32_t width, height, stride;
+	ws_event_t ev;
+	int fd;
+
+	if (w == NULL) {
+		reply_status(item, seq, ENOENT);
+		return;
+	}
+	fd = dock_preview_memfd(srv, w, max, &width, &height, &stride);
+	if (fd < 0) {
+		reply_status(item, seq, errno);
+		return;
+	}
+	reply_status(item, seq, 0);
+	event_init(srv, &ev, WS_EVENT_PREVIEW, sizeof(ev.u.preview), w->id);
+	ev.u.preview.width = width;
+	ev.u.preview.height = height;
+	ev.u.preview.stride = stride;
+	ev.u.preview.format = WS_FORMAT_ARGB8888;
+	ev.u.preview.fd = -1;
+	client_send(srv, c, &ev, fd);
+	close(fd);
+}
+
+/* WS_MSG_LIST_WINDOWS: tools only, and only for the console user. */
+static void
+handle_list(struct ws_server *srv, struct ws_client *c,
+    struct ws_mach_item *item, uint32_t options)
+{
+	ws_event_t ev;
+
+	if ((c->flags & WS_CONNECT_TOOL) == 0 ||
+	    !dock_may_list(srv, item->sender_euid)) {
+		client_error(srv, c, WS_MSG_LIST_WINDOWS, 0, EPERM,
+		    "window list not allowed");
+		event_init(srv, &ev, WS_EVENT_LIST_END, 0, 0);
+		client_send(srv, c, &ev, -1);
+		return;
+	}
+	list_windows(srv, c, options);
+}
+
+static bool
+is_dock_request(mach_msg_id_t id)
+{
+	return id == WS_MSG_DOCK_ACTIVATE || id == WS_MSG_DOCK_RESTORE ||
+	    id == WS_MSG_DOCK_PREVIEW || id == WS_MSG_DOCK_SHOW_MINIMIZED;
+}
+
 static size_t
 min_size(mach_msg_id_t id)
 {
@@ -218,6 +289,9 @@ min_size(mach_msg_id_t id)
 	case WS_MSG_ACTIVATE:
 	case WS_MSG_SNAPSHOT:
 	case WS_MSG_SET_APP_ICON:
+	case WS_MSG_DOCK_ACTIVATE:
+	case WS_MSG_DOCK_PREVIEW:
+	case WS_MSG_DOCK_SHOW_MINIMIZED:
 		return sizeof(ws_req_int_t);
 	case WS_MSG_WINDOW_ORDER:
 		return sizeof(ws_req_order_t);
@@ -302,6 +376,13 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 			reply_status(item, h->seq, EINVAL);
 		return;
 	}
+	if (is_dock_request(id) && (c->flags & WS_CONNECT_DOCK) == 0) {
+		client_error(srv, c, (uint32_t)id, h->window, EPERM,
+		    "not a Dock connection");
+		if (want_reply)
+			reply_status(item, h->seq, EPERM);
+		return;
+	}
 	if (needs_window(id)) {
 		w = window_lookup(srv, h->window);
 		if (w == NULL || w->owner != c) {
@@ -312,7 +393,10 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 			return;
 		}
 	}
-	value = ((ws_req_int_t *)(void *)h)->value;
+	/* Requests shorter than ws_req_int_t (an old LIST_WINDOWS) have
+	 * no value. */
+	value = item->size >= sizeof(ws_req_int_t) ?
+	    ((ws_req_int_t *)(void *)h)->value : 0;
 
 	switch (id) {
 	case WS_MSG_GOODBYE:
@@ -325,7 +409,7 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		ws_req_window_create_t *m = (void *)h;
 		ws_reply_t r;
 
-		if (c->flags & WS_CONNECT_CONTROL) {
+		if (c->flags & WS_CONNECT_TOOL) {
 			reply_status(item, h->seq, EPERM);
 			return;
 		}
@@ -363,10 +447,15 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		ws_req_title_t *m = (void *)h;
 
 		m->title[sizeof(m->title) - 1] = '\0';
-		strlcpy(w->title, m->title, sizeof(w->title));
+		if (strcmp(w->title, m->title) != 0) {
+			strlcpy(w->title, m->title, sizeof(w->title));
+			dock_list_changed(srv);
+		}
 		break;
 	}
 	case WS_MSG_WINDOW_SET_FLAGS:
+		if (w->flags != (uint32_t)value)
+			dock_list_changed(srv);
 		w->flags = (uint32_t)value;
 		if (w->visible)
 			damage_rect(srv, &w->frame);
@@ -475,8 +564,20 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		handle_snapshot(srv, c, item, h->seq);
 		return;
 	case WS_MSG_LIST_WINDOWS:
-		list_windows(srv, c);
+		handle_list(srv, c, item, (uint32_t)value);
 		break;
+	case WS_MSG_DOCK_ACTIVATE:
+		dock_activate(srv, c, h->window, (uint32_t)value);
+		break;
+	case WS_MSG_DOCK_RESTORE:
+		dock_restore(srv, c, h->window);
+		break;
+	case WS_MSG_DOCK_SHOW_MINIMIZED:
+		dock_show_minimized(srv, c, value != 0);
+		break;
+	case WS_MSG_DOCK_PREVIEW:
+		handle_preview(srv, c, item, h->seq, h->window, value);
+		return;
 	case WS_MSG_INJECT:
 		if (!may_inject(srv, item)) {
 			client_error(srv, c, (uint32_t)id, 0, EPERM,

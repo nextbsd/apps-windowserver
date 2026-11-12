@@ -81,6 +81,13 @@ enum {
 	/* added after protocol 1 shipped (servers with WS_SERVER_MINIMIZE) */
 	WS_MSG_WINDOW_MINIMIZE,		/* see "Minimizing" below */
 	WS_MSG_SET_APP_ICON,		/* ws_req_int_t: buffer id, 0 = none */
+	/* WS_CONNECT_DOCK only (servers with WS_SERVER_DOCK), see "The Dock" */
+	WS_MSG_DOCK_ACTIVATE,		/* ws_req_int_t: app id, or hdr.window */
+	WS_MSG_DOCK_RESTORE,		/* hdr.window */
+	WS_MSG_DOCK_PREVIEW,		/* sync, ws_req_int_t: largest side;
+					   image follows on the socket */
+	WS_MSG_DOCK_SHOW_MINIMIZED,	/* ws_req_int_t: 1 = this Dock shows
+					   minimized windows, 0 = no longer */
 	WS_MSG_LAST
 };
 
@@ -198,6 +205,80 @@ typedef struct ws_req_cursor {
  * of the app it joined, if any.
  */
 #define WS_MAX_APP_ICON		512
+
+/*
+ * The Dock (servers with WS_SERVER_DOCK). Apps see only their own
+ * windows. The Dock needs every app's, the way Darwin's Dock uses
+ * CoreGraphics' private window list, so it connects with
+ * WS_CONNECT_DOCK. A Dock connection is a tool connection like
+ * WS_CONNECT_CONTROL, not an app: it has no windows and is never
+ * activated (the Dock's own windows come from its ordinary app
+ * connection, its GNUstep backend's).
+ *
+ * Who gets it: the hello fails with EPERM unless the sender (its euid
+ * from the Mach audit trailer) is root, the server's own user, or the
+ * console user, i.e. the user of a loginwindow session: a root-owned
+ * /var/run/loginwindow/<uid>.session record. When no loginwindow
+ * session exists (a server started by hand with ws-session) and on a
+ * headless server, any user is allowed, as for the rest of the
+ * protocol. WS_CONNECT_DOCK can't be combined with WS_CONNECT_CONTROL
+ * or WS_CONNECT_JOIN (EINVAL). The same check guards WS_MSG_LIST_WINDOWS,
+ * which only WS_CONNECT_CONTROL and WS_CONNECT_DOCK connections may send
+ * (others get a WS_EVENT_ERROR with EPERM, then WS_EVENT_LIST_END).
+ *
+ * The trust boundary is the user: the list carries other apps' window
+ * titles, and those apps all belong to the console user, so another
+ * user (an SSH login on the same machine) can't read them. The console
+ * user's own processes are trusted, as they are on macOS (where any
+ * process of the user could read CGWindowListCopyWindowInfo's titles
+ * before 10.15); WindowServer doesn't tell the Dock binary apart from
+ * other programs of the same user.
+ *
+ * What a Dock connection gets and may send:
+ *   - WS_MSG_LIST_WINDOWS, optionally as a ws_req_int_t whose value is
+ *     WS_LIST_* (WS_LIST_ORDERED_OUT: windows that aren't shown too):
+ *     a WS_EVENT_WINDOW_INFO per window, then WS_EVENT_LIST_END.
+ *   - WS_EVENT_WINDOW_LIST_CHANGED whenever the list changed: a window
+ *     was created, destroyed, ordered in or out, restacked, minimized,
+ *     restored, retitled or got a new level or flags, the active app or
+ *     a key window changed, or a client went away. At most one per pass
+ *     of the server's event loop, so the Dock lists again rather than
+ *     polling. A frame change alone sends none (dragging a window would
+ *     flood the Dock); the list has the frames current when it's sent.
+ *   - WS_MSG_DOCK_ACTIVATE (ws_req_int_t): with hdr.window, activates
+ *     that window's app with the window as its key window, raising it,
+ *     or, if it's minimized, asking its owner to restore it as below;
+ *     with hdr.window 0, activates the app `value` names (an app id or
+ *     any client id of the app). Errors come back as WS_EVENT_ERROR.
+ *   - WS_MSG_DOCK_RESTORE (hdr.window, a minimized window): activates
+ *     the app and sends the window's owner WS_EVENT_WINDOW_RESTORE, as
+ *     a double-click on its tile does. The app does the restoring.
+ *   - WS_MSG_DOCK_PREVIEW (sync, ws_req_int_t, hdr.window): the reply
+ *     carries the status (ENOENT: no such window or nothing drawn yet);
+ *     then WS_EVENT_PREVIEW (ws_event_snapshot_t, about hdr.window)
+ *     arrives on the socket with a memfd holding the window's picture,
+ *     as much of its buffer as its frame shows, scaled down so neither
+ *     side is longer than `value` pixels (16 to WS_MAX_PREVIEW; 0 means
+ *     WS_MAX_PREVIEW) and never enlarged, as premultiplied ARGB8888.
+ *     It has no tile or icon: the Dock draws those.
+ *   - WS_MSG_DOCK_SHOW_MINIMIZED (ws_req_int_t, value 1): this Dock can
+ *     show minimized windows (a Dock that only reads the list, such as
+ *     `wsctl dock list`, doesn't send it). "Minimize into the Dock" is
+ *     the WindowServer default MinimizeIntoDock (off by default). While
+ *     it's on, the oldest Dock connection that sent this gets
+ *     WS_DOCK_MINIMIZED_WINDOWS in WS_EVENT_DOCK_STATE: WindowServer
+ *     draws no tiles, takes away the ones it drew, and lists minimized
+ *     windows with WS_WINDOW_INFO_IN_DOCK; the Dock shows them with
+ *     previews and restores them with WS_MSG_DOCK_RESTORE. Each time
+ *     such a window commits a frame, the Dock gets
+ *     WS_EVENT_PREVIEW_CHANGED for it (at most one per window per pass).
+ *     When that Dock goes away or sends value 0, the next such Dock
+ *     connection takes over, or else the server puts tiles back for the
+ *     windows still minimized.
+ *   - WS_EVENT_DOCK_STATE (WSTypes.h) after the welcome and whenever
+ *     its flags change.
+ */
+#define WS_MAX_PREVIEW		512
 
 /*
  * Synthetic input. Accepted when the server runs headless, or from a

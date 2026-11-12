@@ -19,6 +19,9 @@
  * Beta ends up active with W3 as its key window. tests/headless-test.sh
  * drives it with wsctl.
  *
+ * Alpha tries to list every app's windows, which only tools and the
+ * Dock may do.
+ *
  * Beta also gives the server a magenta app icon and acts like an app
  * that minimizes: typing "m" minimizes its key window, "c" redraws W3
  * in green (minimized or not), and on WS_EVENT_WINDOW_RESTORE it
@@ -378,6 +381,12 @@ main(int argc, char **argv)
 		if (ws_set_app_icon(apps[1].conn, 16, 16, icon, 16 * 4) < 0)
 			perror("wstest: app icon");
 	}
+	/* Only wsctl and the Dock may see every app's windows. */
+	if (ws_list_windows(apps[0].conn, NULL, NULL) < 0)
+		printf("list refused app=Alpha %s\n",
+		    errno == EPERM ? "EPERM" : strerror(errno));
+	else
+		printf("list allowed app=Alpha\n");
 	for (i = 0; i < NAPPS; i++)
 		ws_sync(apps[i].conn);
 	printf("ready\n");

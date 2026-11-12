@@ -270,6 +270,8 @@ conn_readable(struct ws_server *srv, struct ws_conn *conn)
 	client_send(srv, c, &ev, -1);
 	if (c->flags & WS_CONNECT_XKB)
 		keyboard_client_ready(srv, c);
+	if (c->flags & WS_CONNECT_DOCK)
+		dock_client_ready(srv, c);
 	ws_info("client %u (%s, pid %d) connected", c->id, c->app_name,
 	    (int)c->pid);
 }
@@ -680,6 +682,8 @@ client_destroy(struct ws_server *srv, struct ws_client *c)
 	}
 	app_member_gone(srv, c);
 	c->key_window = NULL;
+	if (c->flags & WS_CONNECT_DOCK)
+		dock_client_gone(srv, c);
 	if (srv->active == c)
 		app_deactivate(srv, c);
 	keyboard_focus_update(srv);
