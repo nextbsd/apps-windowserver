@@ -42,7 +42,8 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_POINTER_GRAB | WS_SERVER_POINTER_WARP | \
 				 WS_SERVER_WINDOW_CURSOR | WS_SERVER_INPUT_REGION | \
 				 WS_SERVER_COMMIT_FRAME | WS_SERVER_WINDOW_IDS | \
-				 WS_SERVER_MENU_BAR | WS_SERVER_ACTIVATE_RAISE)
+				 WS_SERVER_MENU_BAR | WS_SERVER_ACTIVATE_RAISE | \
+				 WS_SERVER_DOCK_NOT_ACTIVE)
 
 /* The standard cursors with a built-in image (cursor.c): kinds 0 to
    WS_CURSOR_NOT_ALLOWED. */
@@ -414,6 +415,15 @@ struct ws_server {
 	uint32_t	next_window_id;
 	uint32_t	event_serial;
 	struct ws_client *active;	/* an app (client->app), or NULL */
+	/*
+	 * The Dock's app while the user works in it (a click on a tile or
+	 * in a Dock popup, or it activated itself), or NULL. The Dock never
+	 * becomes the active app, as on Darwin: srv->active keeps its menus
+	 * and Command keys, and the Dock's app hears WS_EVENT_APP_ACTIVATED
+	 * and _DEACTIVATED for this instead. Keys go to its key window, if
+	 * it has a visible one (a Dock popup with a text field).
+	 */
+	struct ws_client *dock_front;
 
 	/* pointer */
 	double		ptr_x;
@@ -607,6 +617,8 @@ int	window_create_check_id(struct ws_server *srv, struct ws_client *c,
 void	app_activate(struct ws_server *srv, struct ws_client *c,
 	    struct ws_window *key);
 void	app_deactivate(struct ws_server *srv, struct ws_client *c);
+void	app_dock_front_end(struct ws_server *srv, bool tell);
+bool	app_has_focus(struct ws_server *srv, struct ws_client *c);
 void	app_member_gone(struct ws_server *srv, struct ws_client *c);
 void	damage_rect(struct ws_server *srv, const ws_rect_t *r);
 void	damage_all(struct ws_server *srv);
@@ -639,6 +651,7 @@ int	tile_set_app_icon(struct ws_server *srv, struct ws_client *c,
 
 /* ---- dock.c ---- */
 bool	dock_may_list(struct ws_server *srv, uid_t uid);
+bool	dock_owns_app(struct ws_server *srv, const struct ws_client *a);
 uid_t	console_uid(void);
 bool	dock_shows_minimized(struct ws_server *srv,
 	    const struct ws_window *w);

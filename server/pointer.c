@@ -77,10 +77,10 @@ send_tracking(struct ws_server *srv, struct ws_window *target)
 {
 	struct ws_client *c;
 
-	if (srv->active == NULL)
+	if (srv->active == NULL && srv->dock_front == NULL)
 		return;
 	for (c = srv->clients; c != NULL; c = c->next)
-		if (c->pointer_track && !c->dead && c->app == srv->active &&
+		if (c->pointer_track && !c->dead && app_has_focus(srv, c->app) &&
 		    (target == NULL || target->tile_for != NULL ||
 		    target->owner != c))
 			send_pointer_to(srv, c, NULL, WS_EVENT_MOUSE_MOVED, 0, 0);
@@ -166,7 +166,7 @@ pointer_grab(struct ws_server *srv, struct ws_client *c, uint32_t mode)
 {
 	if (mode != WS_GRAB_POINTER && mode != WS_GRAB_OUTSIDE)
 		return EINVAL;
-	if ((c->flags & WS_CONNECT_TOOL) || c->app != srv->active ||
+	if ((c->flags & WS_CONNECT_TOOL) || !app_has_focus(srv, c->app) ||
 	    overview_active(srv))
 		return EPERM;
 	if (srv->pgrab != NULL && srv->pgrab != c)
@@ -198,7 +198,7 @@ pointer_warp(struct ws_server *srv, struct ws_client *c, struct ws_window *w,
 {
 	struct ws_window *t = srv->grab != NULL ? srv->grab : srv->hover;
 
-	if ((c->flags & WS_CONNECT_TOOL) || c->app != srv->active ||
+	if ((c->flags & WS_CONNECT_TOOL) || !app_has_focus(srv, c->app) ||
 	    overview_active(srv))
 		return EPERM;
 	if (srv->pgrab != c && (t == NULL || t->tile_for != NULL ||
@@ -225,7 +225,7 @@ pointer_query(struct ws_server *srv, struct ws_client *c,
 		return EPERM;
 	w = overview_active(srv) ? NULL :
 	    window_at_owned(srv, c, srv->ptr_x, srv->ptr_y);
-	if (c->app != srv->active && w == NULL)
+	if (!app_has_focus(srv, c->app) && w == NULL)
 		return EPERM;
 	memset(info, 0, sizeof(*info));
 	info->x = srv->ptr_x;
@@ -378,13 +378,22 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 				tile_select(srv, NULL);
 			if (w != NULL && w->tile_for == NULL) {
 				c = w->owner->app;
-				if (c != srv->active &&
+				/* A click outside the Dock while the user
+				   worked in it gives input back. */
+				if (srv->dock_front != NULL &&
+				    c != srv->dock_front &&
+				    (w->flags & WS_WINDOW_NO_ACTIVATE) == 0 &&
+				    (c->flags & WS_CONNECT_TOOL) == 0)
+					app_dock_front_end(srv, true);
+				if (!app_has_focus(srv, c) &&
 				    (w->flags & WS_WINDOW_NO_ACTIVATE) == 0 &&
 				    (c->flags & WS_CONNECT_TOOL) == 0) {
 					app_activate(srv, c,
 					    (w->flags & WS_WINDOW_NO_KEY) ? NULL : w);
-					activated = true;
-				} else if (c == srv->active) {
+					/* The Dock's app isn't made
+					   active: its click goes through. */
+					activated = srv->active == c;
+				} else if (app_has_focus(srv, c)) {
 					window_make_key(srv, w);
 				}
 				if (srv->cfg.raise_on_click)

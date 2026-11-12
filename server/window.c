@@ -244,12 +244,82 @@ set_key_window(struct ws_server *srv, struct ws_client *a, struct ws_window *w)
 		return;
 	a->key_window = w;
 	dock_list_changed(srv);
-	if (srv->active != a)
+	if (!app_has_focus(srv, a))
 		return;
 	if (old != NULL)
 		send_simple(srv, old->owner, WS_EVENT_KEY_WINDOW_LOST, old->id, 0);
 	if (w != NULL)
 		send_simple(srv, w->owner, WS_EVENT_KEY_WINDOW_GAINED, w->id, 0);
+	keyboard_focus_update(srv);
+}
+
+/*
+ * Whether app a gets what the active app gets besides its menus: key
+ * focus for its key window and the pointer requests. The active app, or
+ * the Dock's app while the user works in it.
+ */
+bool
+app_has_focus(struct ws_server *srv, struct ws_client *a)
+{
+	return a != NULL && (a == srv->active || a == srv->dock_front);
+}
+
+/*
+ * The Dock's app d takes the user's input without becoming the active
+ * app ("Activation" in WSProtocol.h): the active app keeps its menus
+ * and hears nothing; d hears that it was activated, and `key` (or its
+ * remembered key window) gets the keys.
+ */
+static void
+dock_front_begin(struct ws_server *srv, struct ws_client *d,
+    struct ws_window *key)
+{
+	if (srv->pgrab != NULL && srv->pgrab->app != d)
+		pointer_ungrab(srv, srv->pgrab, true);
+	if (srv->dock_front == d) {
+		if (key != NULL)
+			set_key_window(srv, d, key);
+		return;
+	}
+	srv->dock_front = d;
+	if (key != NULL)
+		d->key_window = key;
+	if (d->key_window != NULL && !can_be_key(d->key_window))
+		d->key_window = NULL;
+	ws_debug("the Dock's app %u (%s) takes input; app %u stays active",
+	    d->id, d->app_name, srv->active != NULL ? srv->active->id : 0);
+	send_app(srv, d, WS_EVENT_APP_ACTIVATED,
+	    srv->active != NULL ? srv->active->id : 0);
+	if (d->key_window != NULL)
+		send_simple(srv, d->key_window->owner,
+		    WS_EVENT_KEY_WINDOW_GAINED, d->key_window->id, 0);
+	keyboard_focus_update(srv);
+}
+
+/*
+ * The user moved on from the Dock (another app or window was activated
+ * or clicked), or the Dock's app gave up or went away (tell false):
+ * input goes back to the active app.
+ */
+void
+app_dock_front_end(struct ws_server *srv, bool tell)
+{
+	struct ws_client *d = srv->dock_front;
+
+	if (d == NULL)
+		return;
+	srv->dock_front = NULL;
+	if (srv->pgrab != NULL && srv->pgrab->app == d)
+		pointer_ungrab(srv, srv->pgrab, true);
+	if (tell && !d->dead) {
+		if (d->key_window != NULL)
+			send_simple(srv, d->key_window->owner,
+			    WS_EVENT_KEY_WINDOW_LOST, d->key_window->id, 0);
+		send_app(srv, d, WS_EVENT_APP_DEACTIVATED,
+		    srv->active != NULL ? srv->active->id : 0);
+	}
+	ws_debug("the Dock's app %u (%s) gave back input", d->id,
+	    d->app_name);
 	keyboard_focus_update(srv);
 }
 
@@ -266,6 +336,12 @@ app_activate(struct ws_server *srv, struct ws_client *c, struct ws_window *key)
 
 	if (c != NULL && (c->dead || (c->flags & WS_CONNECT_TOOL)))
 		return;
+	/* The Dock never becomes the active app (as on Darwin). */
+	if (c != NULL && dock_owns_app(srv, c)) {
+		dock_front_begin(srv, c, key);
+		return;
+	}
+	app_dock_front_end(srv, true);
 	/* Another app takes over: a pointer grab of the old one ends. */
 	if (srv->pgrab != NULL && srv->pgrab->app != c)
 		pointer_ungrab(srv, srv->pgrab, true);
@@ -312,6 +388,10 @@ app_deactivate(struct ws_server *srv, struct ws_client *c)
 	struct ws_window *w;
 	struct ws_client *next = NULL;
 
+	if (c != NULL && srv->dock_front == c) {
+		app_dock_front_end(srv, false);
+		return;
+	}
 	if (srv->active != c)
 		return;
 	for (w = srv->stack_top; w != NULL; w = w->below) {
@@ -319,6 +399,7 @@ app_deactivate(struct ws_server *srv, struct ws_client *c)
 			continue;	/* a minimized window's tile */
 		if (w->owner->app != c && !w->owner->dead &&
 		    (w->owner->flags & WS_CONNECT_TOOL) == 0 &&
+		    !dock_owns_app(srv, w->owner->app) &&
 		    w->level >= WS_LEVEL_NORMAL && w->level <= WS_LEVEL_CLIENT_MAX) {
 			next = w->owner->app;
 			break;
@@ -365,6 +446,8 @@ app_member_gone(struct ws_server *srv, struct ws_client *c)
 	menu_bar_app_gone(srv, c, heir);
 	if (srv->active == c)
 		srv->active = heir;
+	if (srv->dock_front == c)
+		srv->dock_front = heir;
 	ws_info("client %u (%s) carries on app %u", heir->id, heir->app_name,
 	    c->id);
 }

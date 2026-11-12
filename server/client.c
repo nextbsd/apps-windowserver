@@ -687,7 +687,7 @@ client_destroy(struct ws_server *srv, struct ws_client *c)
 	c->key_window = NULL;
 	if (c->flags & WS_CONNECT_DOCK)
 		dock_client_gone(srv, c);
-	if (srv->active == c)
+	if (srv->active == c || srv->dock_front == c)
 		app_deactivate(srv, c);
 	/* After the deactivation: the next active app's bar may count. */
 	if (srv->menu_bar_app == c)

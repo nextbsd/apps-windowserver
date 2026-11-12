@@ -577,6 +577,23 @@ typedef struct ws_req_cursor {
  * included, to the front of its level, keeping their order, as a Dock
  * activation does; their owners hear WS_EVENT_WINDOW_ORDERED. Older
  * servers ignore `value` and just activate.
+ *
+ * The Dock's app (servers with WS_SERVER_DOCK_NOT_ACTIVE) never becomes
+ * the active app, as on Darwin: its app is the one whose process also
+ * holds a WS_CONNECT_DOCK connection. A click in one of its windows, or
+ * its own WS_MSG_ACTIVATE, leaves the active app active, menus, menu
+ * bar strip, key window and Command keys included; that app hears
+ * nothing. The Dock's app instead hears WS_EVENT_APP_ACTIVATED (so
+ * that a GNUstep Dock can pop up menus, grab the pointer for them and
+ * show its panels as before) and, as soon as anything else is
+ * activated or clicked, WS_EVENT_APP_DEACTIVATED. Meanwhile it may
+ * grab, warp and query the pointer like the active app, and keys go
+ * to its key window while it has a visible one (a Dock popup with a
+ * text field, made key with WS_MSG_WINDOW_MAKE_KEY or a click), and
+ * to the active app otherwise. Its first click isn't swallowed when
+ * ClickThrough is off. If the Dock's app was active before its Dock
+ * connection came, the next app takes over then. Older servers make
+ * the Dock's app active like any other.
  */
 
 /*

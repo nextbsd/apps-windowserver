@@ -250,10 +250,37 @@ dock_tiles_follow(struct ws_server *srv)
 	}
 }
 
+/*
+ * Whether app a is the Dock's: its process also holds a Dock
+ * connection. The Dock's app never becomes the active app, as on Darwin
+ * ("Activation" in WSProtocol.h).
+ */
+bool
+dock_owns_app(struct ws_server *srv, const struct ws_client *a)
+{
+	struct ws_client *d;
+
+	if (a == NULL || a->pid <= 0 || (a->flags & WS_CONNECT_TOOL))
+		return false;
+	for (d = srv->clients; d != NULL; d = d->next)
+		if ((d->flags & WS_CONNECT_DOCK) && !d->dead &&
+		    d->pid == a->pid && d->uid == a->uid)
+			return true;
+	return false;
+}
+
 /* A Dock connection got its welcome: tell it the state. */
 void
 dock_client_ready(struct ws_server *srv, struct ws_client *c)
 {
+	/* Its app activated itself before the Dock connection came (as a
+	   GNUstep app does when it finishes launching): the next app
+	   takes over. */
+	if (srv->active != NULL && dock_owns_app(srv, srv->active)) {
+		ws_debug("app %u (%s) is the Dock's: it isn't the active app",
+		    srv->active->id, srv->active->app_name);
+		app_deactivate(srv, srv->active);
+	}
 	if (dock_usable(c))
 		send_state(srv, c);
 }
