@@ -123,6 +123,14 @@ int		 ws_window_make_key(ws_connection_t *conn, uint32_t window);
  */
 ws_buffer_t	*ws_buffer_create(ws_connection_t *conn, uint32_t width,
     uint32_t height, uint32_t scale);
+/*
+ * The same with a pixel format: WS_FORMAT_ARGB8888 (what
+ * ws_buffer_create makes) or WS_FORMAT_XRGB8888, whose top byte is
+ * ignored: the window is opaque (servers with WS_SERVER_XRGB; older ones
+ * answer with a WS_EVENT_ERROR).
+ */
+ws_buffer_t	*ws_buffer_create_format(ws_connection_t *conn, uint32_t width,
+    uint32_t height, uint32_t scale, uint32_t format);
 void		 ws_buffer_destroy(ws_connection_t *conn, ws_buffer_t *buffer);
 void		*ws_buffer_data(ws_buffer_t *buffer);
 uint32_t	 ws_buffer_stride(ws_buffer_t *buffer);

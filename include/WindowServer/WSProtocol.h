@@ -250,7 +250,7 @@ typedef struct ws_sock_buffer {
 	uint32_t	width;
 	uint32_t	height;
 	uint32_t	stride;		/* bytes per row */
-	uint32_t	format;		/* WS_FORMAT_ARGB8888 */
+	uint32_t	format;		/* WS_FORMAT_ARGB8888 or _XRGB8888 */
 	uint32_t	scale;		/* 1 = one buffer pixel per point */
 	uint64_t	offset;		/* start of the pixels in the fd */
 } ws_sock_buffer_t;

@@ -105,7 +105,9 @@ composite_region(struct ws_server *srv, pixman_region32_t *region)
 		    w->frame.x + bw <= ext->x1 || w->frame.y + bh <= ext->y1)
 			continue;
 		pixman_image_composite32(
-		    (w->flags & WS_WINDOW_OPAQUE) ? PIXMAN_OP_SRC : PIXMAN_OP_OVER,
+		    ((w->flags & WS_WINDOW_OPAQUE) ||
+		    b->format == WS_FORMAT_XRGB8888) ? PIXMAN_OP_SRC :
+		    PIXMAN_OP_OVER,
 		    b->image, NULL, srv->shadow, 0, 0, 0, 0,
 		    w->frame.x, w->frame.y, bw, bh);
 	}

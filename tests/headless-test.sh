@@ -13,6 +13,8 @@
 B=${1:-build}
 export WS_SERVICE_NAME="org.nextbsd.windowserver.test.$$"
 export WS_SnapshotPath="/tmp/ws-test-$$-signal.ppm"
+# Not black, so a window drawn with the wrong alpha would show.
+export WS_BackgroundColor=202020
 LOG="/tmp/ws-test-$$"
 SOCK="$LOG/ws.sock"
 mkdir -p "$LOG" || exit 1
@@ -110,7 +112,10 @@ expect_pixel 150 150 30a040 "W2 at main-menu level"
 expect_pixel 320 300 30a040 "W2 over W1 and W3"
 expect_pixel 700 600 3050c0 "W3 only"
 expect_pixel 120 450 c03030 "W1 only"
-expect_pixel 1000 700 000000 "desktop background"
+expect_pixel 1000 700 202020 "desktop background"
+# W4 is XRGB8888 with alpha byte 0: opaque, without WS_WINDOW_OPAQUE.
+expect_pixel 1000 200 c0c030 "XRGB8888 window W4 opaque"
+expect_pixel 901 101 606018 "XRGB8888 window W4 border"
 
 # Click into Alpha's W1 where nothing covers it: Alpha becomes active.
 "$B/wsctl" click 150 450 || fail "wsctl click"
