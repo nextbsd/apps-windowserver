@@ -1,0 +1,233 @@
+/*-
+ * Copyright (c) 2026, Joseph Maloney
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * WSProtocol.h - WindowServer wire protocol, version WS_PROTOCOL_VERSION.
+ *
+ * Applications normally use libWindowServerClient (WSClient.h), which
+ * hides everything in this file. It is public so the protocol is
+ * documented in one place and other implementations can follow it.
+ *
+ * Two channels per client:
+ *
+ *  1. Mach (control). The client looks up WS_SERVICE_NAME through the
+ *     bootstrap server and sends requests to it. Every request starts
+ *     with ws_req_header_t. Requests that need an answer carry a
+ *     send-once reply port in msgh_local_port (MACH_MSG_TYPE_MAKE_SEND_ONCE)
+ *     and get a ws_reply_t back; all other requests are one-way. The
+ *     server reads the sender's pid from the Mach audit trailer.
+ *
+ *  2. A Unix domain stream socket. NextBSD's Mach can't carry file
+ *     descriptors or shared memory yet, so window buffers (memfd)
+ *     travel here with SCM_RIGHTS, and the server sends its events
+ *     (ws_event_t, WSTypes.h) here, which gives clients a plain file
+ *     descriptor to poll. Every message starts with its own size
+ *     (ws_sock_header_t.size, ws_event_header_t.size), so readers split
+ *     the byte stream themselves. (SOCK_SEQPACKET would do that for us,
+ *     but on NextBSD it doesn't keep message boundaries.) A message
+ *     that carries a descriptor sends it with its first byte; readers
+ *     queue received descriptors and take them in order.
+ *
+ * Connection setup:
+ *   - Mach WS_MSG_HELLO -> reply with client_id, a random 64-bit token
+ *     and the socket path.
+ *   - connect() to the socket path and send WS_SOCK_AUTH {client_id,
+ *     token}. The server also checks the peer pid (LOCAL_PEERCRED)
+ *     against the pid from the HELLO audit trailer.
+ *   - The server answers with WS_EVENT_WELCOME on the socket.
+ *
+ * Ordering rule: before the server handles a Mach request from a
+ * client, it reads everything already queued on that client's socket.
+ * A client therefore sends WS_SOCK_BUFFER_CREATE on the socket and can
+ * then immediately refer to the buffer in a Mach request.
+ */
+#ifndef _WINDOWSERVER_WSPROTOCOL_H_
+#define _WINDOWSERVER_WSPROTOCOL_H_
+
+#include <stdint.h>
+#include <mach/message.h>
+#include <WindowServer/WSTypes.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Mach message ids ('WS' << 16 | n). */
+#define WS_MSG_BASE		0x57530000
+enum {
+	WS_MSG_HELLO = WS_MSG_BASE + 1,	/* sync */
+	WS_MSG_GOODBYE,
+	WS_MSG_SYNC,			/* sync: round trip */
+	WS_MSG_WINDOW_CREATE,		/* sync */
+	WS_MSG_WINDOW_DESTROY,
+	WS_MSG_WINDOW_SET_FRAME,
+	WS_MSG_WINDOW_SET_LEVEL,
+	WS_MSG_WINDOW_ORDER,
+	WS_MSG_WINDOW_SET_TITLE,
+	WS_MSG_WINDOW_SET_FLAGS,
+	WS_MSG_WINDOW_ATTACH,
+	WS_MSG_WINDOW_DAMAGE,
+	WS_MSG_WINDOW_COMMIT,
+	WS_MSG_WINDOW_MAKE_KEY,
+	WS_MSG_BUFFER_DESTROY,
+	WS_MSG_SET_CURSOR,
+	WS_MSG_CURSOR_VISIBLE,
+	WS_MSG_ACTIVATE,
+	WS_MSG_DEACTIVATE,
+	WS_MSG_SNAPSHOT,		/* sync; image follows on the socket */
+	WS_MSG_LIST_WINDOWS,		/* answers on the socket */
+	WS_MSG_INJECT,			/* synthetic input (see below) */
+	WS_MSG_LAST
+};
+
+#define WS_MAX_DAMAGE_RECTS	16	/* more: send several messages */
+#define WS_MAX_TITLE		256
+#define WS_MAX_APP_NAME		64
+#define WS_MAX_SOCKET_PATH	104	/* sizeof(sun_path) */
+
+typedef struct ws_req_header {
+	mach_msg_header_t head;
+	uint32_t	version;	/* WS_PROTOCOL_VERSION */
+	uint32_t	client_id;	/* 0 for HELLO */
+	uint64_t	token;		/* from the HELLO reply */
+	uint32_t	seq;		/* echoed in the reply */
+	uint32_t	window;		/* target window, if any */
+} ws_req_header_t;
+
+typedef struct ws_req_hello {
+	ws_req_header_t	hdr;
+	uint32_t	flags;		/* WS_CONNECT_* */
+	uint32_t	reserved;
+	char		app_name[WS_MAX_APP_NAME];
+	char		bundle_id[128];
+} ws_req_hello_t;
+
+typedef struct ws_req_window_create {
+	ws_req_header_t	hdr;
+	ws_rect_t	frame;
+	int32_t		level;
+	uint32_t	flags;		/* WS_WINDOW_* */
+	char		title[128];
+} ws_req_window_create_t;
+
+typedef struct ws_req_frame {
+	ws_req_header_t	hdr;
+	ws_rect_t	frame;
+} ws_req_frame_t;
+
+typedef struct ws_req_int {		/* SET_LEVEL, SET_FLAGS, COMMIT,
+					 * ATTACH, BUFFER_DESTROY,
+					 * CURSOR_VISIBLE, ACTIVATE,
+					 * SNAPSHOT */
+	ws_req_header_t	hdr;
+	int32_t		value;
+	uint32_t	reserved;
+} ws_req_int_t;
+
+typedef struct ws_req_order {
+	ws_req_header_t	hdr;
+	int32_t		op;		/* WS_ORDER_* */
+	uint32_t	relative_to;	/* window id, 0 = whole level */
+} ws_req_order_t;
+
+typedef struct ws_req_title {
+	ws_req_header_t	hdr;
+	char		title[WS_MAX_TITLE];
+} ws_req_title_t;
+
+typedef struct ws_req_damage {
+	ws_req_header_t	hdr;
+	uint32_t	count;
+	uint32_t	reserved;
+	ws_rect_t	rects[WS_MAX_DAMAGE_RECTS];	/* window-local */
+} ws_req_damage_t;
+
+typedef struct ws_req_cursor {
+	ws_req_header_t	hdr;
+	uint32_t	kind;		/* WS_CURSOR_* */
+	uint32_t	buffer_id;	/* for WS_CURSOR_CUSTOM */
+	int32_t		hot_x;
+	int32_t		hot_y;
+} ws_req_cursor_t;
+
+/*
+ * Synthetic input. Accepted when the server runs headless, or from a
+ * process running as root or as the server's own user.
+ */
+typedef struct ws_req_inject {
+	ws_req_header_t	hdr;
+	uint32_t	kind;		/* WS_INJECT_* */
+	uint32_t	pressed;
+	double		x;
+	double		y;
+	double		dx;
+	double		dy;
+	uint32_t	button;
+	uint32_t	keycode;	/* evdev code, used if key_name is "" */
+	char		key_name[32];	/* XKB keysym name, e.g. "a",
+					 * "Return", "shift+a", "ctrl+q" */
+} ws_req_inject_t;
+
+typedef struct ws_reply {
+	mach_msg_header_t head;
+	uint32_t	version;
+	uint32_t	seq;
+	int32_t		status;		/* 0 or an errno value */
+	uint32_t	reserved;
+	union {
+		struct {
+			uint32_t client_id;
+			uint32_t server_flags;
+			uint64_t token;
+			char	 socket_path[WS_MAX_SOCKET_PATH];
+		} hello;
+		struct {
+			uint32_t window;
+			uint32_t reserved;
+		} create;
+		uint8_t	raw[128];
+	} u;
+} ws_reply_t;
+
+/* Largest request; servers size their receive buffer from this. */
+#define WS_MAX_REQUEST_SIZE	1024
+
+/* Client -> server socket messages. */
+enum {
+	WS_SOCK_AUTH = 1,
+	WS_SOCK_BUFFER_CREATE = 2,	/* carries one fd (SCM_RIGHTS) */
+};
+
+typedef struct ws_sock_header {
+	uint32_t	type;
+	uint32_t	size;
+} ws_sock_header_t;
+
+typedef struct ws_sock_auth {
+	ws_sock_header_t hdr;
+	uint32_t	client_id;
+	uint32_t	version;
+	uint64_t	token;
+} ws_sock_auth_t;
+
+/*
+ * A window buffer. The fd must be a memfd (or other shared memory fd)
+ * of at least stride * height bytes, sealed with F_SEAL_SHRINK so the
+ * server can't be made to fault on a truncated mapping.
+ */
+typedef struct ws_sock_buffer {
+	ws_sock_header_t hdr;
+	uint32_t	buffer_id;	/* chosen by the client, nonzero */
+	uint32_t	width;
+	uint32_t	height;
+	uint32_t	stride;		/* bytes per row */
+	uint32_t	format;		/* WS_FORMAT_ARGB8888 */
+	uint32_t	scale;		/* 1 = one buffer pixel per point */
+	uint64_t	offset;		/* start of the pixels in the fd */
+} ws_sock_buffer_t;
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* !_WINDOWSERVER_WSPROTOCOL_H_ */
