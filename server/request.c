@@ -499,6 +499,7 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 	case WS_MSG_WINDOW_SET_FRAME:
 		window_set_frame(srv, w, &((ws_req_frame_t *)(void *)h)->frame);
 		tiling_client_frame(srv, w);
+		window_clear_owner_frame(srv, w);
 		break;
 	case WS_MSG_WINDOW_SET_LEVEL:
 		window_set_level(srv, w, value);
@@ -564,8 +565,10 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		}
 		window_commit(srv, w, (uint32_t)value,
 		    (value & WS_COMMIT_SET_FRAME) ? &m->frame : NULL);
-		if (value & WS_COMMIT_SET_FRAME)
+		if (value & WS_COMMIT_SET_FRAME) {
 			tiling_client_frame(srv, w);
+			window_clear_owner_frame(srv, w);
+		}
 		break;
 	}
 	case WS_MSG_WINDOW_MAKE_KEY:

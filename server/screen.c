@@ -9,7 +9,9 @@
  * (the Mac menu style) and the strip the Dock keeps on its edge: what
  * NSScreen's visibleFrame is on macOS. Every connection gets it in the
  * welcome and WS_EVENT_USABLE_AREA when it changes, and the server's
- * own things (minimized-window tiles, the overview) stay inside it.
+ * own things (minimized-window tiles, the overview) stay inside it, and
+ * windows are pushed out from under the Dock and the menu bar strip when
+ * it changes (clear.c).
  */
 
 #include <errno.h>
@@ -98,6 +100,8 @@ send_usable(struct ws_server *srv)
 static void
 usable_set(struct ws_server *srv, const ws_rect_t *r)
 {
+	ws_rect_t old = srv->usable;
+
 	srv->usable = *r;
 	srv->usable_menu_bar = menu_bar_height(srv);
 	ws_info("usable area %d,%d %dx%d, menu bar %u", r->x, r->y, r->width,
@@ -105,6 +109,7 @@ usable_set(struct ws_server *srv, const ws_rect_t *r)
 	send_usable(srv);
 	window_tiles_place(srv);
 	tiling_changed(srv);		/* tiling lays out again */
+	windows_keep_clear(srv, &old);	/* the windows that float move */
 	srv->ov.dirty = true;		/* the overview lays out again */
 }
 
