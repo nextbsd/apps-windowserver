@@ -294,19 +294,32 @@ store_load(struct ws_server *srv)
 	free(buf);
 }
 
-/* /Library/Preferences may not exist yet. */
+/* /Library/Preferences, or even /Library, may not exist yet: make the
+   store's directories, as mkdir -p. */
 static void
 store_mkdir(struct ws_server *srv)
 {
-	char dir[sizeof(srv->cfg.display_store)], *slash;
+	char dir[sizeof(srv->cfg.display_store)], *p;
 
 	strlcpy(dir, srv->cfg.display_store, sizeof(dir));
-	slash = strrchr(dir, '/');
-	if (slash == NULL || slash == dir)
+	p = strrchr(dir, '/');
+	if (p == NULL || p == dir)
 		return;
-	*slash = '\0';
-	if (mkdir(dir, 0755) < 0 && errno != EEXIST)
-		ws_warn("mkdir %s: %s", dir, strerror(errno));
+	*p = '\0';
+	for (p = dir + 1;; p++) {
+		if (*p != '/' && *p != '\0')
+			continue;
+		char c = *p;
+
+		*p = '\0';
+		if (mkdir(dir, 0755) < 0 && errno != EEXIST) {
+			ws_warn("mkdir %s: %s", dir, strerror(errno));
+			return;
+		}
+		if (c == '\0')
+			return;
+		*p = c;
+	}
 }
 
 /* Write the store again with display_id's choice changed (w 0: gone). */
