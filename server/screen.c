@@ -233,18 +233,26 @@ screen_changed(struct ws_server *srv)
 int
 screen_resize(struct ws_server *srv, uint32_t width, uint32_t height)
 {
-	uint32_t ow = srv->width, oh = srv->height;
+	uint32_t ow = srv->panel_width, oh = srv->panel_height;
+	int e;
 
 	if (!srv->headless)
 		return ENOTSUP;
 	if (width < 64 || height < 64 || width > 16384 || height > 16384)
 		return EINVAL;
-	if (width == srv->width && height == srv->height)
+	if (width == srv->panel_width && height == srv->panel_height)
 		return 0;
-	if (compositor_resize(srv, width, height) < 0)
-		return ENOMEM;
-	ws_info("screen changed: %ux%u -> %ux%u", ow, oh, width, height);
-	screen_changed(srv);
-	windows_keep_on_screen(srv, ow, oh);
+	/* the panel's pixels; the points follow the display mode */
+	srv->panel_width = width;
+	srv->panel_height = height;
+	e = display_apply(srv, true);
+	if (e != 0) {
+		srv->panel_width = ow;
+		srv->panel_height = oh;
+		(void)display_apply(srv, true);
+		return e;
+	}
+	ws_info("screen changed: %ux%u -> %ux%u pixels", ow, oh, width,
+	    height);
 	return 0;
 }

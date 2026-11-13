@@ -604,6 +604,54 @@ typedef struct ws_req_cursor {
  */
 
 /*
+ * HiDPI (servers with WS_SERVER_SCALE), the way macOS's Retina displays
+ * work. The screen is laid out in points: ws_screen_info_t.width and
+ * .height are the "looks like" size, and .scale (1, 2 or 3) is the
+ * number of backing pixels per point. WindowServer composites into a
+ * backing store of width x height times scale pixels, and when that
+ * isn't the panel's own size (a "looks like 2048 x 1152" mode on a
+ * 3840 x 2160 panel) scales the finished frame to the panel, as macOS's
+ * scaled modes do. Everything on the wire stays in points: frames,
+ * damage, pointer coordinates (with sub-point precision), the usable
+ * area, menu bar and Dock strips, cursor hot spots.
+ *
+ * Window buffers say how many pixels they have per point
+ * (ws_buffer_create's scale): a window of w x h points takes a w*scale x
+ * h*scale buffer with that scale and is drawn sharp. A buffer of
+ * another scale is scaled to the window's size in points, so old
+ * clients (and X servers, which draw at 1x, as XQuartz's apps do) show
+ * at the right size, only less sharp. A client that hears a new scale
+ * in WS_EVENT_SCREEN_CHANGED may draw at it from then on.
+ *
+ * The display mode. WindowServer picks a default for each display:
+ * 1x at the panel's size for ordinary displays (below about 125 ppi,
+ * or under 2560 pixels wide); otherwise exactly 2x, as macOS does (a
+ * 3840 x 2160 monitor looks like 1920 x 1080). When the EDID's physical
+ * size is missing or made up (0 mm, virtual machines' displays), it
+ * goes by the size in pixels alone: 2x from 3840 x 2160. The other
+ * "looks like" sizes (2048 x 1152, 2560 x 1440, 3008 x 1692 on a 4K
+ * panel) are drawn at 2x and scaled to the panel. Overrides, strongest
+ * first:
+ *   - the DisplayScale setting, Auto or 1, 2, 3: that integer scale
+ *     at the panel's size divided by it, on every display;
+ *   - the user's "looks like" choice for this display, the setting
+ *     DisplayLooksLike ("WxH", or "Default" to go back), which
+ *     WindowServer keeps per display (EDID vendor, product and serial)
+ *     in /Library/Preferences/org.nextbsd.windowserver.displays.plist,
+ *     for every user, as macOS's windowserver displays plist does;
+ *   - DisplayDefaultLooksLike, "Default" or "WxH": the system's choice
+ *     (org.nextbsd.WindowServer.plist) for a display the user hasn't
+ *     picked a size for.
+ * All take effect at once (clients hear WS_EVENT_SCREEN_CHANGED with
+ * the new size and scale), through WS_MSG_SET_SETTINGS (console user
+ * or root, no password). WS_MSG_GET_SETTINGS also lists read-only
+ * entries about the display: DisplayID, DisplayName, DisplayPanel
+ * ("3840x2160"), DisplayModes (the "looks like" choices, "WxH,WxH,...",
+ * from Larger Text to More Space), DisplayDefault and DisplayCurrent
+ * ("WxH@scale").
+ */
+
+/*
  * Activation. WS_MSG_ACTIVATE (ws_req_int_t) makes the sender's app the
  * active app; WS_MSG_DEACTIVATE gives it up. On its own, activating
  * moves no window: an app that activates itself orders its own windows

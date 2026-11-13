@@ -7,10 +7,15 @@
  * <stdint.h>, so it can be included by any client, including the LGPL
  * GNUstep backend.
  *
- * Coordinates: screen and window coordinates are in pixels with the
+ * Coordinates: screen and window coordinates are in points with the
  * origin at the top-left corner and y growing downwards. Window-local
  * coordinates are relative to the window frame's top-left corner.
- * (GNUstep's bottom-left origin is converted by the backend.)
+ * (GNUstep's bottom-left origin is converted by the backend.) A point
+ * is one pixel on a 1x screen; on a HiDPI screen (servers with
+ * WS_SERVER_SCALE) it is ws_screen_info_t.scale pixels of the screen's
+ * backing store, and window buffers carry that many pixels per point
+ * (ws_buffer_create's scale). Pointer coordinates are points too, with
+ * sub-point precision.
  */
 #ifndef _WINDOWSERVER_WSTYPES_H_
 #define _WINDOWSERVER_WSTYPES_H_
@@ -261,6 +266,15 @@ extern "C" {
 						   WS_MSG_CAPTURE_*,
 						   WS_EVENT_CAPTURE_* ("Screen
 						   capture" in WSProtocol.h) */
+#define WS_SERVER_SCALE		0x10000000 /* HiDPI: the screen's backing
+						   scale in ws_screen_info_t.scale
+						   (welcome and
+						   WS_EVENT_SCREEN_CHANGED), buffers
+						   of any scale composited at their
+						   size in points, "looks like"
+						   display modes ("HiDPI" in
+						   WSProtocol.h). Servers without it
+						   are 1x. */
 
 /* WS_MSG_ACTIVATE flags (ws_activate_flags). */
 #define WS_ACTIVATE_RAISE	0x0001	/* also bring the app's windows,
@@ -357,13 +371,20 @@ typedef struct ws_rect {
 	int32_t		height;
 } ws_rect_t;
 
+/* "looks like" choices a display offers at most ("HiDPI" in
+   WSProtocol.h). */
+#define WS_MAX_DISPLAY_MODES	12
+
 typedef struct ws_screen_info {
 	uint32_t	screen_id;
 	int32_t		x;
 	int32_t		y;
 	uint32_t	width;
 	uint32_t	height;
-	uint32_t	scale;		/* 1 for now */
+	uint32_t	scale;		/* backing pixels per point: 1, 2
+					   or 3 (servers with
+					   WS_SERVER_SCALE; others 1).
+					   width and height are points */
 	uint32_t	refresh_mhz;	/* 60000 = 60 Hz, 0 if unknown */
 	uint32_t	mm_width;
 	uint32_t	mm_height;

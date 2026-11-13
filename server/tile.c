@@ -252,21 +252,40 @@ int
 tile_init(struct ws_server *srv)
 {
 	int size = srv->cfg.minimize_tile_size;
-	double r;
 
 	if (size < TILE_SIZE_MIN)
 		size = TILE_SIZE_MIN;
 	if (size > TILE_SIZE_MAX)
 		size = TILE_SIZE_MAX;
 	srv->cfg.minimize_tile_size = size;
-	r = size / 8.0;
-	srv->tile_mask_outer = round_mask(size, r);
-	srv->tile_mask_inner = round_mask(size - 2, r - 1);
-	if (srv->tile_mask_outer == NULL || srv->tile_mask_inner == NULL)
+	if (tile_rescale(srv) < 0)
 		return -1;
 	if (srv->cfg.minimize_tile_image[0] != '\0')
 		srv->tile_background =
 		    load_tile_image(srv->cfg.minimize_tile_image);
+	return 0;
+}
+
+/* The masks at the screen's scale; every tile is drawn again. */
+int
+tile_rescale(struct ws_server *srv)
+{
+	int k = srv->scale ? (int)srv->scale : 1;
+	int size = srv->cfg.minimize_tile_size * k;
+	double r = size / 8.0;
+	struct ws_window *t;
+
+	if (srv->tile_mask_outer != NULL)
+		pixman_image_unref(srv->tile_mask_outer);
+	if (srv->tile_mask_inner != NULL)
+		pixman_image_unref(srv->tile_mask_inner);
+	srv->tile_mask_outer = round_mask(size, r);
+	srv->tile_mask_inner = round_mask(size - 2 * k, r - k);
+	if (srv->tile_mask_outer == NULL || srv->tile_mask_inner == NULL)
+		return -1;
+	for (t = srv->stack_bottom; t != NULL; t = t->above)
+		if (t->tile_for != NULL)
+			t->tile_dirty = true;
 	return 0;
 }
 
@@ -300,10 +319,16 @@ tile_render(struct ws_server *srv, struct ws_window *t)
 	struct ws_window *w = t->tile_for;
 	struct ws_buffer *b = w->buffer;
 	pixman_image_t *icon, *src;
-	int s = t->frame.width, pad, inner, cw, ch, dw, dh, bs;
+	/* drawn in backing pixels, sharp on HiDPI */
+	int k = (int)srv->scale, s = t->frame.width * k;
+	int pad, inner, cw, ch, dw, dh, bs;
 	double f;
 
 	t->tile_dirty = false;
+	if (t->tile_image != NULL && pixman_image_get_width(t->tile_image) != s) {
+		pixman_image_unref(t->tile_image);
+		t->tile_image = NULL;
+	}
 	if (t->tile_image == NULL) {
 		t->tile_image = pixman_image_create_bits(PIXMAN_a8r8g8b8, s, s,
 		    NULL, 0);
@@ -320,7 +345,7 @@ tile_render(struct ws_server *srv, struct ws_window *t)
 	else {
 		fill_masked(t->tile_image, &tile_rim, srv->tile_mask_outer, 0, 0);
 		fill_masked(t->tile_image, &tile_face, srv->tile_mask_inner,
-		    1, 1);
+		    k, k);
 	}
 	if (srv->tile_selected == t)
 		fill_masked(t->tile_image, &tile_highlight,
@@ -338,8 +363,8 @@ tile_render(struct ws_server *srv, struct ws_window *t)
 		if (ch > w->frame.height * (int)b->scale)
 			ch = w->frame.height * (int)b->scale;
 		f = fmin((double)inner / cw, (double)inner / ch);
-		if (f > 1.0)
-			f = 1.0;
+		if (f > (double)k / b->scale)
+			f = (double)k / b->scale;	/* never enlarged */
 		dw = (int)lround(cw * f);
 		dh = (int)lround(ch * f);
 		if (dw < 1)
@@ -364,7 +389,7 @@ tile_render(struct ws_server *srv, struct ws_window *t)
 	    t->owner->app->app_icon;
 	if (icon != NULL) {
 		bs = s * 3 / 8;
-		tile_scale(icon, t->tile_image, s - bs - 1, s - bs - 1,
+		tile_scale(icon, t->tile_image, s - bs - k, s - bs - k,
 		    bs, bs, pixman_image_get_width(icon),
 		    pixman_image_get_height(icon));
 	}

@@ -10,6 +10,7 @@
  */
 
 #include <errno.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -297,15 +298,17 @@ static const struct std_cursor {
 	[WS_CURSOR_DRAG_LINK] =		STD(drag_link, 0, 0),
 };
 
+/* The image of a standard cursor, k pixels per point: each point a
+   k x k block, so it stays crisp on HiDPI screens. */
 static pixman_image_t *
-make_image(const char *const *rows, int h)
+make_image(const char *const *rows, int h, int k)
 {
 	const int w = (int)strlen(rows[0]);
 	pixman_image_t *img;
-	uint32_t *px;
-	int x, y, stride;
+	uint32_t *px, v;
+	int x, y, stride, i, j;
 
-	img = pixman_image_create_bits(PIXMAN_a8r8g8b8, w, h, NULL, 0);
+	img = pixman_image_create_bits(PIXMAN_a8r8g8b8, w * k, h * k, NULL, 0);
 	if (img == NULL)
 		return NULL;
 	px = pixman_image_get_data(img);
@@ -314,11 +317,40 @@ make_image(const char *const *rows, int h)
 		for (x = 0; x < w; x++) {
 			char ch = rows[y][x];
 
-			px[y * stride + x] = ch == '#' ? 0xff000000 :
+			v = ch == '#' ? 0xff000000 :
 			    ch == '.' ? 0xffffffff :
 			    ch == 'g' ? 0xff28b440 : 0x00000000;
+			for (j = 0; j < k; j++)
+				for (i = 0; i < k; i++)
+					px[(y * k + j) * stride + x * k + i] = v;
 		}
 	return img;
+}
+
+/* The standard cursors at the screen's scale. */
+int
+cursor_rescale(struct ws_server *srv)
+{
+	int i, k = srv->scale ? (int)srv->scale : 1;
+	pixman_image_t *img;
+
+	for (i = 0; i < WS_NSTD_CURSORS; i++) {
+		img = make_image(std_cursors[i].rows, std_cursors[i].h, k);
+		if (img == NULL)
+			return -1;
+		if (srv->cursor_image == srv->cursor_std[i])
+			srv->cursor_image = NULL;	/* force a reload */
+		if (srv->cursor_std[i] != NULL)
+			pixman_image_unref(srv->cursor_std[i]);
+		srv->cursor_std[i] = img;
+	}
+	srv->cursor_hot_x = -1;
+	if (srv->cursor_hw && srv->output != NULL &&
+	    srv->output->cursor_hide != NULL)
+		srv->output->cursor_hide(srv);
+	srv->cursor_hw = false;
+	cursor_update(srv);
+	return 0;
 }
 
 int
@@ -328,7 +360,7 @@ cursor_init(struct ws_server *srv)
 
 	for (i = 0; i < WS_NSTD_CURSORS; i++) {
 		srv->cursor_std[i] = make_image(std_cursors[i].rows,
-		    std_cursors[i].h);
+		    std_cursors[i].h, srv->scale ? (int)srv->scale : 1);
 		if (srv->cursor_std[i] == NULL)
 			return -1;
 	}
@@ -360,12 +392,18 @@ sw_cursor_damage(struct ws_server *srv)
 	damage_rect(srv, &srv->cursor_rect);
 	memset(&srv->cursor_rect, 0, sizeof(srv->cursor_rect));
 	if (!srv->cursor_hw && srv->cursor_visible && srv->cursor_image != NULL) {
-		srv->cursor_rect.x = (int32_t)srv->ptr_x - srv->cursor_hot_x;
-		srv->cursor_rect.y = (int32_t)srv->ptr_y - srv->cursor_hot_y;
+		uint32_t is = srv->cursor_image_scale ? srv->cursor_image_scale :
+		    1;
+
+		/* points, rounded out: it's drawn at the pointer's pixel */
+		srv->cursor_rect.x = (int32_t)floor(srv->ptr_x) -
+		    srv->cursor_hot_x;
+		srv->cursor_rect.y = (int32_t)floor(srv->ptr_y) -
+		    srv->cursor_hot_y;
 		srv->cursor_rect.width =
-		    pixman_image_get_width(srv->cursor_image);
+		    pixman_image_get_width(srv->cursor_image) / (int)is + 2;
 		srv->cursor_rect.height =
-		    pixman_image_get_height(srv->cursor_image);
+		    pixman_image_get_height(srv->cursor_image) / (int)is + 2;
 		damage_rect(srv, &srv->cursor_rect);
 	}
 }
@@ -387,6 +425,7 @@ cursor_update(struct ws_server *srv)
 	uint32_t kind = WS_CURSOR_ARROW;
 	struct ws_buffer *buf = NULL;
 	pixman_image_t *img;
+	uint32_t iscale = srv->scale ? srv->scale : 1;
 	int hx = 0, hy = 0;
 	bool visible = true, hw = false;
 
@@ -421,6 +460,7 @@ cursor_update(struct ws_server *srv)
 	}
 	if (kind == WS_CURSOR_CUSTOM && buf != NULL) {
 		img = buf->image;
+		iscale = buf->scale ? buf->scale : 1;	/* hot spot: points */
 	} else {
 		/* A kind this server doesn't know gets the arrow. */
 		if (kind >= WS_NSTD_CURSORS)
@@ -433,6 +473,7 @@ cursor_update(struct ws_server *srv)
 	    hy == srv->cursor_hot_y && visible == srv->cursor_visible)
 		return;
 	srv->cursor_image = img;
+	srv->cursor_image_scale = iscale;
 	srv->cursor_hot_x = hx;
 	srv->cursor_hot_y = hy;
 	srv->cursor_visible = visible;
@@ -442,9 +483,14 @@ cursor_update(struct ws_server *srv)
 		if (!visible) {
 			srv->output->cursor_hide(srv);
 			hw = true;
-		} else if (srv->output->cursor_set(srv, img, hx, hy)) {
-			srv->output->cursor_move(srv, (int)srv->ptr_x,
-			    (int)srv->ptr_y);
+		} else if (iscale == srv->scale &&
+		    srv->output->cursor_set(srv, img,
+		    (int)lround(hx * iscale * panel_x(srv, 1) / iscale),
+		    (int)lround(hy * iscale * panel_y(srv, 1) / iscale))) {
+			/* the hardware plane shows panel pixels */
+			srv->output->cursor_move(srv,
+			    (int)panel_x(srv, srv->ptr_x),
+			    (int)panel_y(srv, srv->ptr_y));
 			hw = true;
 		}
 	}
@@ -459,8 +505,9 @@ cursor_moved(struct ws_server *srv)
 {
 	if (srv->cursor_hw) {
 		if (srv->display_active && srv->cursor_visible)
-			srv->output->cursor_move(srv, (int)srv->ptr_x,
-			    (int)srv->ptr_y);
+			srv->output->cursor_move(srv,
+			    (int)panel_x(srv, srv->ptr_x),
+			    (int)panel_y(srv, srv->ptr_y));
 		return;
 	}
 	sw_cursor_damage(srv);

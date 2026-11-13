@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include <xf86drm.h>
@@ -64,6 +65,41 @@ static struct drm_output drm;
 
 /* ---- device selection ---- */
 
+/* DisplayPanelMode: "Preferred", or "WxH" / "WxH@Hz" naming one of the
+   connector's modes. */
+static const char *panel_mode_want;
+
+static void
+pick_mode(drmModeConnector *conn, struct drm_output *out)
+{
+	unsigned w = 0, h = 0, hz = 0;
+	int j, n;
+
+	out->mode = conn->modes[0];
+	for (j = 0; j < conn->count_modes; j++)
+		if (conn->modes[j].type & DRM_MODE_TYPE_PREFERRED) {
+			out->mode = conn->modes[j];
+			break;
+		}
+	if (panel_mode_want == NULL ||
+	    strcasecmp(panel_mode_want, "Preferred") == 0)
+		return;
+	n = sscanf(panel_mode_want, "%ux%u@%u", &w, &h, &hz);
+	if (n < 2) {
+		ws_warn("DisplayPanelMode %s: not WxH[@Hz]", panel_mode_want);
+		return;
+	}
+	for (j = 0; j < conn->count_modes; j++)
+		if (conn->modes[j].hdisplay == w &&
+		    conn->modes[j].vdisplay == h &&
+		    (n < 3 || conn->modes[j].vrefresh == hz)) {
+			out->mode = conn->modes[j];
+			return;
+		}
+	ws_warn("DisplayPanelMode %s: the display has no such mode; using "
+	    "%ux%u", panel_mode_want, out->mode.hdisplay, out->mode.vdisplay);
+}
+
 static bool
 pick_connector(int fd, struct drm_output *out)
 {
@@ -86,13 +122,9 @@ pick_connector(int fd, struct drm_output *out)
 			drmModeFreeConnector(conn);
 			continue;
 		}
-		/* preferred mode, else the first one */
-		out->mode = conn->modes[0];
-		for (j = 0; j < conn->count_modes; j++)
-			if (conn->modes[j].type & DRM_MODE_TYPE_PREFERRED) {
-				out->mode = conn->modes[j];
-				break;
-			}
+		/* DisplayPanelMode, else the preferred mode, else the
+		   first one */
+		pick_mode(conn, out);
 		/* the CRTC already driving it, else any compatible one */
 		if (conn->encoder_id != 0 &&
 		    (enc = drmModeGetEncoder(fd, conn->encoder_id)) != NULL) {
@@ -189,7 +221,7 @@ fb_copy(struct ws_server *srv, struct drm_fb *fb)
 		return;
 	pixman_image_set_clip_region32(fb->image, &fb->missing);
 	ext = pixman_region32_extents(&fb->missing);
-	pixman_image_composite32(PIXMAN_OP_SRC, srv->shadow, NULL, fb->image,
+	pixman_image_composite32(PIXMAN_OP_SRC, srv->out, NULL, fb->image,
 	    ext->x1, ext->y1, 0, 0, ext->x1, ext->y1, ext->x2 - ext->x1,
 	    ext->y2 - ext->y1);
 	pixman_image_set_clip_region32(fb->image, NULL);
@@ -203,7 +235,7 @@ modeset(struct ws_server *srv)
 	int r;
 
 	pixman_region32_union_rect(&fb->missing, &fb->missing, 0, 0,
-	    srv->width, srv->height);
+	    srv->panel_width, srv->panel_height);
 	fb_copy(srv, fb);
 	r = drmModeSetCrtc(drm.fd, drm.crtc_id, fb->fb_id, 0, 0,
 	    &drm.connector_id, 1, &drm.mode);
@@ -411,6 +443,7 @@ drm_open(struct ws_server *srv)
 
 	memset(&drm, 0, sizeof(drm));
 	drm.fd = -1;
+	panel_mode_want = srv->cfg.display_panel_mode;
 	if (srv->cfg.drm_device[0] != '\0') {
 		drm.fd = open_card(srv->cfg.drm_device, &drm);
 	} else {
@@ -434,23 +467,52 @@ drm_open(struct ws_server *srv)
 		ws_err("%s: no dumb buffer support", drm.path);
 		goto fail;
 	}
-	srv->width = drm.mode.hdisplay;
-	srv->height = drm.mode.vdisplay;
+	srv->panel_width = drm.mode.hdisplay;
+	srv->panel_height = drm.mode.vdisplay;
 	srv->refresh_mhz = drm.mode.vrefresh * 1000;
 	snprintf(srv->screen_name, sizeof(srv->screen_name), "%s", drm.mode.name);
 	{
 		drmModeConnector *conn = drmModeGetConnector(drm.fd,
 		    drm.connector_id);
+		drmModeObjectProperties *props;
+		drmModePropertyRes *pr;
+		drmModePropertyBlobRes *blob;
+		uint32_t k;
 
 		if (conn != NULL) {
 			srv->mm_width = conn->mmWidth;
 			srv->mm_height = conn->mmHeight;
+			srv->screen_internal =
+			    conn->connector_type == DRM_MODE_CONNECTOR_eDP ||
+			    conn->connector_type == DRM_MODE_CONNECTOR_LVDS ||
+			    conn->connector_type == DRM_MODE_CONNECTOR_DSI;
 			drmModeFreeConnector(conn);
 		}
+		/* the EDID: which display it is, and if its size is real
+		   (display.c) */
+		props = drmModeObjectGetProperties(drm.fd, drm.connector_id,
+		    DRM_MODE_OBJECT_CONNECTOR);
+		for (k = 0; props != NULL && k < props->count_props; k++) {
+			pr = drmModeGetProperty(drm.fd, props->props[k]);
+			if (pr == NULL)
+				continue;
+			if (strcmp(pr->name, "EDID") == 0 &&
+			    props->prop_values[k] != 0 &&
+			    (blob = drmModeGetPropertyBlob(drm.fd,
+			    (uint32_t)props->prop_values[k])) != NULL) {
+				display_set_edid(srv, blob->data, blob->length);
+				drmModeFreePropertyBlob(blob);
+			}
+			drmModeFreeProperty(pr);
+		}
+		if (props != NULL)
+			drmModeFreeObjectProperties(props);
 	}
 	drm.saved_crtc = drmModeGetCrtc(drm.fd, drm.crtc_id);
-	if (fb_create(drm.fd, &drm.fb[0], srv->width, srv->height) < 0 ||
-	    fb_create(drm.fd, &drm.fb[1], srv->width, srv->height) < 0) {
+	if (fb_create(drm.fd, &drm.fb[0], srv->panel_width,
+	    srv->panel_height) < 0 ||
+	    fb_create(drm.fd, &drm.fb[1], srv->panel_width,
+	    srv->panel_height) < 0) {
 		ws_err("%s: can't create dumb buffers", drm.path);
 		goto fail;
 	}
@@ -458,8 +520,8 @@ drm_open(struct ws_server *srv)
 	if (srv->cfg.hardware_cursor)
 		cursor_setup();
 	srv->output = &drm_output_ops;
-	ws_info("%s: %ux%u@%u connector %u crtc %u%s", drm.path, srv->width,
-	    srv->height, drm.mode.vrefresh, drm.connector_id, drm.crtc_id,
+	ws_info("%s: %ux%u@%u connector %u crtc %u%s", drm.path,
+	    srv->panel_width, srv->panel_height, drm.mode.vrefresh, drm.connector_id, drm.crtc_id,
 	    drm.cursor_ok ? ", hardware cursor" : "");
 	return drm.fd;
 fail:

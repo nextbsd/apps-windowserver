@@ -120,6 +120,8 @@ apply(struct ws_server *srv, const struct ws_config *next)
 		input_reconfigure(srv);
 	if (need & CONFIG_TILING)
 		tiling_config_changed(srv, &old);
+	if (need & CONFIG_DISPLAY)
+		(void)display_apply(srv, false);
 	event_init(srv, &ev, WS_EVENT_SETTINGS_CHANGED, 0, 0);
 	settings_tools_notify(srv, &ev);
 }
@@ -237,6 +239,10 @@ value_ok(const struct ws_config *cfg, const char *key)
 		return cfg->tiling_border >= 0 && cfg->tiling_border <= 16;
 	if (strcmp(key, "TilingModifier") == 0)
 		return tiling_modifier_parse(cfg->tiling_modifier, NULL);
+	if (strcmp(key, "DisplayScale") == 0)
+		return display_scale_ok(cfg->display_scale);
+	if (strcmp(key, "DisplayDefaultLooksLike") == 0)
+		return display_default_ok(cfg->display_default_looks_like);
 	if (strcmp(key, "TilingNewWindowSplits") == 0)
 		return strcasecmp(cfg->tiling_new_window_splits, "largest") == 0 ||
 		    strcasecmp(cfg->tiling_new_window_splits, "pointer") == 0 ||
@@ -298,7 +304,7 @@ settings_set(struct ws_server *srv, struct ws_client *c,
 	ws_req_settings_t *m = (ws_req_settings_t *)(void *)item->msg.buf;
 	struct ws_config base, session, next;
 	bool set[CONFIG_MAX_KEYS], skip, any;
-	char bad[64] = "";
+	char bad[64] = "", looks[32] = "";
 	const char *p, *end, *key, *value;
 	int i, type, n = 0;
 
@@ -346,7 +352,20 @@ settings_set(struct ws_server *srv, struct ws_client *c,
 		}
 		p++;
 		i = config_find(key);
-		if (i < 0)
+		if (i < 0 && strcmp(key, "DisplayLooksLike") == 0) {
+			/* Not a session value: kept per display for every
+			   user (display.c), applied after the reply. */
+			if (type == WS_SETTING_DEFAULT)
+				strlcpy(looks, "Default", sizeof(looks));
+			else if (display_looks_like_ok(srv, value))
+				strlcpy(looks, value, sizeof(looks));
+			else
+				e = EINVAL;
+			if (e == 0) {
+				n++;
+				continue;
+			}
+		} else if (i < 0)
 			e = EINVAL;
 		else if ((config_key_flags(i) & CONFIG_SETTABLE) == 0)
 			e = EPERM;
@@ -404,6 +423,8 @@ settings_set(struct ws_server *srv, struct ws_client *c,
 	/* Reply first, so the sender isn't kept waiting for the keymap. */
 	reply_key(item, m->hdr.seq, 0, bad[0] ? bad : NULL);
 	apply(srv, &next);
+	if (looks[0] != '\0')
+		(void)display_set_looks_like(srv, looks);
 }
 
 /* ---- WS_MSG_GET_SETTINGS ---- */
@@ -431,6 +452,20 @@ settings_get(struct ws_server *srv, struct ws_client *c)
 		if (!config_get_text(&srv->cfg, i, ev.u.setting.value,
 		    sizeof(ev.u.setting.value)))
 			ev.u.setting.flags |= WS_SETTING_TRUNCATED;
+		client_send(srv, c, &ev, -1);
+	}
+	/* What the display offers and runs at (display.c), read-only
+	   but DisplayLooksLike. */
+	for (i = 0;; i++) {
+		event_init(srv, &ev, WS_EVENT_SETTING, sizeof(ev.u.setting), 0);
+		if (display_info(srv, (unsigned)i, ev.u.setting.key,
+		    sizeof(ev.u.setting.key), ev.u.setting.value,
+		    sizeof(ev.u.setting.value)) < 0)
+			break;
+		ev.u.setting.type = WS_SETTING_STRING;
+		ev.u.setting.source = WS_SETTING_SOURCE_SYSTEM;
+		ev.u.setting.flags = strcmp(ev.u.setting.key,
+		    "DisplayLooksLike") == 0 ? WS_SETTING_SETTABLE : 0;
 		client_send(srv, c, &ev, -1);
 	}
 	event_init(srv, &ev, WS_EVENT_LIST_END, 0, 0);

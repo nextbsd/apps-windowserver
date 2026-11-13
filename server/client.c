@@ -202,7 +202,7 @@ screen_info(struct ws_server *srv, ws_screen_info_t *si)
 	si->screen_id = 1;
 	si->width = srv->width;
 	si->height = srv->height;
-	si->scale = 1;
+	si->scale = srv->scale ? srv->scale : 1;
 	si->refresh_mhz = srv->refresh_mhz;
 	si->mm_width = srv->mm_width;
 	si->mm_height = srv->mm_height;
@@ -524,16 +524,9 @@ buffer_create(struct ws_server *srv, struct ws_client *c,
 		free(b);
 		return;
 	}
-	if (b->scale != 1) {
-		pixman_transform_t t;
-
-		pixman_transform_init_scale(&t,
-		    pixman_int_to_fixed((int)b->scale),
-		    pixman_int_to_fixed((int)b->scale));
-		pixman_image_set_transform(b->image, &t);
-		pixman_image_set_filter(b->image, PIXMAN_FILTER_BILINEAR,
-		    NULL, 0);
-	}
+	/* The compositor scales it to the screen's scale (shadow_image). */
+	if (b->scale > 4)
+		b->scale = 4;
 	b->refs = 1;
 	b->client_ref = true;
 	b->next = c->buffers;

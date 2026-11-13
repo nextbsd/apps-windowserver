@@ -142,6 +142,27 @@
 	     the Dock or a window that floats) -->
 	<key>TilingFocusFollowsMouse</key>
 	<true/>
+	<!-- HiDPI ("HiDPI" in WSProtocol.h). The screen is laid out in
+	     points, drawn at a backing scale. Each display gets a default:
+	     1x for ordinary displays, exactly 2x for HiDPI ones (a 4K
+	     monitor looks like 1920 x 1080; with no real EDID size, as in
+	     virtual machines, any screen of 3840 x 2160 or more).
+	     DisplayScale Auto, or 1, 2 or 3 to force that integer scale
+	     on every display. DisplayDefaultLooksLike Default, or WxH: the
+	     "looks like" size for displays the user hasn't picked one for
+	     in Displays (sizes that aren't the panel divided by 2 are drawn
+	     at 2x and scaled to the panel). The user's picks are kept per
+	     display in DisplayStore. DisplayPanelMode Preferred, or WxH or
+	     WxH@Hz: the mode the panel runs at. wsctl display shows and
+	     sets them. -->
+	<key>DisplayScale</key>
+	<string>Auto</string>
+	<key>DisplayDefaultLooksLike</key>
+	<string>Default</string>
+	<key>DisplayPanelMode</key>
+	<string>Preferred</string>
+	<key>DisplayStore</key>
+	<string>/Library/Preferences/org.nextbsd.windowserver.displays.plist</string>
 	<!-- empty: the first /dev/dri/card* with a connected display -->
 	<key>DRMDevice</key>
 	<string></string>

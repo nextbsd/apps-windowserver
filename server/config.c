@@ -100,6 +100,12 @@ static const struct ckey keys[] = {
 	S("TilingModifier", tiling_modifier, CONFIG_TILING),
 	S("TilingNewWindowSplits", tiling_new_window_splits, CONFIG_TILING),
 	B("TilingFocusFollowsMouse", tiling_focus_follows_mouse, CONFIG_TILING),
+	/* HiDPI (display.c, "HiDPI" in WSProtocol.h) */
+	S("DisplayScale", display_scale, CONFIG_DISPLAY),
+	S("DisplayDefaultLooksLike", display_default_looks_like,
+	    CONFIG_DISPLAY),
+	S("DisplayPanelMode", display_panel_mode, 0),
+	S("DisplayStore", display_store, 0),
 };
 
 #define NKEYS	(sizeof(keys) / sizeof(keys[0]))
@@ -160,6 +166,15 @@ config_defaults(struct ws_config *cfg)
 	strlcpy(cfg->tiling_new_window_splits, "largest",
 	    sizeof(cfg->tiling_new_window_splits));
 	cfg->tiling_focus_follows_mouse = true;
+	/* The scale follows the display: "HiDPI" in WSProtocol.h. */
+	strlcpy(cfg->display_scale, "Auto", sizeof(cfg->display_scale));
+	strlcpy(cfg->display_default_looks_like, "Default",
+	    sizeof(cfg->display_default_looks_like));
+	strlcpy(cfg->display_panel_mode, "Preferred",
+	    sizeof(cfg->display_panel_mode));
+	strlcpy(cfg->display_store,
+	    "/Library/Preferences/org.nextbsd.windowserver.displays.plist",
+	    sizeof(cfg->display_store));
 }
 
 static int

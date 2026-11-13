@@ -626,50 +626,40 @@ static void
 draw_scaled(struct ws_server *srv, pixman_image_t *src, int sw, int sh,
     ws_rect_t r, pixman_image_t *mask)
 {
-	pixman_transform_t tr;
-
-	if (r.width <= 0 || r.height <= 0 || sw <= 0 || sh <= 0)
-		return;
-	pixman_transform_init_scale(&tr,
-	    pixman_double_to_fixed((double)sw / r.width),
-	    pixman_double_to_fixed((double)sh / r.height));
-	pixman_image_set_transform(src, &tr);
-	pixman_image_set_filter(src, PIXMAN_FILTER_BILINEAR, NULL, 0);
-	pixman_image_set_repeat(src, PIXMAN_REPEAT_PAD);
-	pixman_image_composite32(PIXMAN_OP_OVER, src, mask, srv->shadow, 0, 0,
-	    0, 0, r.x, r.y, r.width, r.height);
-	pixman_image_set_transform(src, NULL);
-	pixman_image_set_filter(src, PIXMAN_FILTER_NEAREST, NULL, 0);
-	pixman_image_set_repeat(src, PIXMAN_REPEAT_NONE);
+	shadow_scaled(srv, src, sw, sh, r, mask);
 }
 
 /* The preview at the item's place in the open overview, box-filtered
  * like the tiles, redrawn when the window commits. */
 static pixman_image_t *
-item_cache(struct ws_overview_item *it, struct ws_window *w)
+item_cache(struct ws_server *srv, struct ws_overview_item *it,
+    struct ws_window *w)
 {
 	pixman_image_t *src;
-	int cw, ch;
+	int cw, ch, s = (int)srv->scale;
+	int pw = it->to.width * s, ph = it->to.height * s;
 
-	if (it->cache != NULL && !it->cache_dirty)
+	if (it->cache != NULL && !it->cache_dirty &&
+	    pixman_image_get_width(it->cache) == pw &&
+	    pixman_image_get_height(it->cache) == ph)
 		return it->cache;
 	if (it->cache == NULL ||
-	    pixman_image_get_width(it->cache) != it->to.width ||
-	    pixman_image_get_height(it->cache) != it->to.height) {
+	    pixman_image_get_width(it->cache) != pw ||
+	    pixman_image_get_height(it->cache) != ph) {
 		if (it->cache != NULL)
 			pixman_image_unref(it->cache);
+		/* backing pixels, so the preview is sharp on HiDPI */
 		it->cache = pixman_image_create_bits(PIXMAN_a8r8g8b8,
-		    it->to.width, it->to.height, NULL, 0);
+		    pw, ph, NULL, 0);
 		if (it->cache == NULL)
 			return NULL;
 	}
 	memset(pixman_image_get_data(it->cache), 0,
-	    (size_t)pixman_image_get_stride(it->cache) * (size_t)it->to.height);
+	    (size_t)pixman_image_get_stride(it->cache) * (size_t)ph);
 	src = buffer_view(w);
 	if (src != NULL) {
 		buffer_extent(w, &cw, &ch);
-		tile_scale(src, it->cache, 0, 0, it->to.width, it->to.height,
-		    cw, ch);
+		tile_scale(src, it->cache, 0, 0, pw, ph, cw, ch);
 		pixman_image_unref(src);
 	}
 	it->cache_dirty = false;
@@ -680,13 +670,7 @@ static void
 fill_rect(struct ws_server *srv, const pixman_color_t *color, int x, int y,
     int w, int h)
 {
-	pixman_image_t *solid = pixman_image_create_solid_fill(color);
-
-	if (solid == NULL)
-		return;
-	pixman_image_composite32(PIXMAN_OP_OVER, solid, NULL, srv->shadow,
-	    0, 0, 0, 0, x, y, w, h);
-	pixman_image_unref(solid);
+	shadow_fill(srv, color, x, y, w, h);
 }
 
 static void
@@ -789,11 +773,11 @@ overview_composite(struct ws_server *srv, pixman_region32_t *region)
 			continue;
 		to = it->to;
 		if (ov->state == WS_OVERVIEW_STATE_OPEN) {
-			src = item_cache(it, w);
+			src = item_cache(srv, it, w);
 			if (src != NULL)
-				pixman_image_composite32(PIXMAN_OP_OVER, src,
-				    NULL, srv->shadow, 0, 0, 0, 0, to.x, to.y,
-				    to.width, to.height);
+				shadow_image(srv, PIXMAN_OP_OVER, src,
+				    srv->scale, NULL, to.x, to.y, to.width,
+				    to.height);
 		} else {
 			from = home_rect(srv, w);
 			r.x = (int32_t)lround(from.x + (to.x - from.x) * e);

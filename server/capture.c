@@ -20,6 +20,7 @@
 #include <sys/mman.h>
 
 #include <errno.h>
+#include <math.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -193,22 +194,32 @@ capture_end(struct ws_server *srv, struct ws_capture *s, uint32_t state,
 }
 
 /* The source's size: the screen's, or the window's frame. */
+/* A window's pixels per point. */
+static uint32_t
+win_scale(struct ws_window *w)
+{
+	return w->buffer != NULL && w->buffer->scale > 0 ? w->buffer->scale :
+	    1;
+}
+
 static bool
 source_size(struct ws_server *srv, struct ws_capture *s, uint32_t *w,
     uint32_t *h)
 {
 	struct ws_window *win;
 
+	/* Sources are pixels: the panel's, or the window buffer's (HiDPI,
+	   "HiDPI" in WSProtocol.h). */
 	if (s->window == 0) {
-		*w = srv->width;
-		*h = srv->height;
+		*w = srv->panel_width;
+		*h = srv->panel_height;
 		return true;
 	}
 	win = window_lookup(srv, s->window);
 	if (win == NULL || win->frame.width <= 0 || win->frame.height <= 0)
 		return false;
-	*w = (uint32_t)win->frame.width;
-	*h = (uint32_t)win->frame.height;
+	*w = (uint32_t)win->frame.width * win_scale(win);
+	*h = (uint32_t)win->frame.height * win_scale(win);
 	return true;
 }
 
@@ -427,11 +438,13 @@ cursor_in_source(struct ws_server *srv, struct ws_capture *s, ws_rect_t *r)
 {
 	struct ws_window *w;
 
+	uint32_t is = srv->cursor_image_scale ? srv->cursor_image_scale : 1;
+	double k;
+
 	memset(r, 0, sizeof(*r));
 	if (!srv->cursor_visible || srv->cursor_image == NULL)
 		return;
-	r->x = (int32_t)srv->ptr_x - srv->cursor_hot_x;
-	r->y = (int32_t)srv->ptr_y - srv->cursor_hot_y;
+	/* in source pixels; the image is drawn at its own size */
 	r->width = pixman_image_get_width(srv->cursor_image);
 	r->height = pixman_image_get_height(srv->cursor_image);
 	if (s->window != 0) {
@@ -441,9 +454,18 @@ cursor_in_source(struct ws_server *srv, struct ws_capture *s, ws_rect_t *r)
 			memset(r, 0, sizeof(*r));
 			return;
 		}
-		r->x -= w->frame.x;
-		r->y -= w->frame.y;
+		k = win_scale(w);
+		r->x = (int32_t)floor((srv->ptr_x - w->frame.x -
+		    srv->cursor_hot_x) * k);
+		r->y = (int32_t)floor((srv->ptr_y - w->frame.y -
+		    srv->cursor_hot_y) * k);
+	} else {
+		r->x = (int32_t)floor(panel_x(srv, srv->ptr_x -
+		    srv->cursor_hot_x));
+		r->y = (int32_t)floor(panel_y(srv, srv->ptr_y -
+		    srv->cursor_hot_y));
 	}
+	(void)is;
 }
 
 /* Do we draw the pointer into s's frames ourselves? */
@@ -538,15 +560,14 @@ capture_fill(struct ws_server *srv, struct ws_capture *s, int i)
 		   we draw it below) */
 		compositor_capture_overlays(srv, true,
 		    (s->flags & WS_CAPTURE_CURSOR) == 0);
-		copy_region(s, b, srv->shadow, 0, 0, &region);
+		copy_region(s, b, srv->out, 0, 0, &region);
 		compositor_capture_overlays(srv, false,
 		    (s->flags & WS_CAPTURE_CURSOR) == 0);
 	} else {
 		w = window_lookup(srv, s->window);
 		if (w != NULL && w->buffer != NULL) {
 			pixman_region32_intersect_rect(&region, &region, 0, 0,
-			    w->buffer->width / w->buffer->scale,
-			    w->buffer->height / w->buffer->scale);
+			    w->buffer->width, w->buffer->height);
 			copy_region(s, b, w->buffer->image, 0, 0, &region);
 		}
 	}
@@ -678,10 +699,27 @@ capture_window_committed(struct ws_server *srv, struct ws_window *w,
 		if (s->window != w->id || s->state != WS_CAPTURE_RUNNING ||
 		    s->src_width == 0)
 			continue;
-		if (damage == NULL)
+		if (damage == NULL) {
 			capture_damage_all(s);
-		else
+		} else if (win_scale(w) == 1) {
 			capture_damage(s, damage);
+		} else {
+			/* window-local points to buffer pixels */
+			pixman_region32_t px;
+			pixman_box32_t *b;
+			int i, n, k = (int)win_scale(w);
+
+			pixman_region32_init(&px);
+			b = pixman_region32_rectangles(
+			    (pixman_region32_t *)(uintptr_t)damage, &n);
+			for (i = 0; i < n; i++)
+				pixman_region32_union_rect(&px, &px,
+				    b[i].x1 * k, b[i].y1 * k,
+				    (unsigned)((b[i].x2 - b[i].x1) * k),
+				    (unsigned)((b[i].y2 - b[i].y1) * k));
+			capture_damage(s, &px);
+			pixman_region32_fini(&px);
+		}
 	}
 }
 
