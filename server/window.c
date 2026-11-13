@@ -722,6 +722,7 @@ window_order(struct ws_server *srv, struct ws_window *w, int op,
 		tiling_changed(srv);
 	w->visible = true;
 	stack_place(srv, w, op, rel);
+	window_place_clear(srv, w);	/* shown for the first time */
 	damage_rect(srv, &w->frame);
 	pointer_recheck(srv);
 	dock_list_changed(srv);

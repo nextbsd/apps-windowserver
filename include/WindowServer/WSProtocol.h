@@ -561,6 +561,22 @@ typedef struct ws_req_cursor {
  * the windows out inside it, and a window minimized into the Dock
  * comes from the Dock's edge.
  *
+ * Windows are kept clear of the Dock and the menu bar strip: when the
+ * usable area changes, each window that was inside it on a side that
+ * now comes in is pushed back inside on that side, as little as it
+ * takes, and shrunk only if it's larger than the usable area (never
+ * below its minimum size, never with WS_WINDOW_FIXED_SIZE); its top
+ * edge always stays inside, so its title bar can be reached. A pushed
+ * window gets its frame from before back once that fits again, unless
+ * it was moved or resized meanwhile. A window shown for the first time
+ * under the Dock or the strip is placed inside the usable area. Windows
+ * the user drags partly under the Dock stay there until the usable
+ * area changes. Owners hear the new frames as WS_EVENT_WINDOW_FRAME.
+ * Tiled, minimized and hidden windows, the Dock's windows, desktop
+ * windows (WS_LEVEL_DESKTOP), app icons, pop-up menus (above
+ * WS_LEVEL_MODAL_PANEL), the Mac menu bar and tools' windows are left
+ * alone; submenus (WS_LEVEL_SUBMENU) aren't placed when shown.
+ *
  * Screen changes (servers with WS_SERVER_SCREEN_CHANGES): when the
  * screen's size or mode changes, every connection gets
  * WS_EVENT_SCREEN_CHANGED with the new ws_screen_info_t, then

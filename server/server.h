@@ -216,6 +216,13 @@ struct ws_window {
 	bool		has_saved_frame;
 	ws_rect_t	saved_frame;	/* its frame before it was tiled */
 	ws_rect_t	tiling_given;	/* the tile frame it was last given */
+	/* kept clear of the Dock (clear.c) */
+	bool		clear_shown;	/* shown once: placed when it was */
+	bool		clear_pushed;	/* pushed: clear_saved is valid */
+	ws_rect_t	clear_saved;	/* its frame before it was pushed */
+	ws_rect_t	clear_usable;	/* the usable area then */
+	ws_rect_t	clear_given;	/* the frame it was pushed to */
+	uint64_t	clear_usec;	/* when */
 	uint32_t	min_width;	/* WS_MSG_WINDOW_SET_SIZE_LIMITS, */
 	uint32_t	min_height;	/* 0 = none */
 	uint32_t	max_width;
@@ -794,6 +801,11 @@ void	windows_keep_on_screen(struct ws_server *srv, uint32_t old_width,
 void	window_restack(struct ws_server *srv, struct ws_window *w);
 void	window_server_frame(struct ws_server *srv, struct ws_window *w,
 	    const ws_rect_t *frame);
+
+/* ---- clear.c ---- */
+void	windows_keep_clear(struct ws_server *srv, const ws_rect_t *old);
+void	window_place_clear(struct ws_server *srv, struct ws_window *w);
+void	window_clear_owner_frame(struct ws_server *srv, struct ws_window *w);
 
 /* ---- tiling.c ---- */
 void	tiling_init(struct ws_server *srv);
