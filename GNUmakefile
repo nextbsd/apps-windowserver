@@ -7,9 +7,13 @@
 #   gmake install         install (honours DESTDIR and the *DIR variables)
 #   gmake check           run the headless tests (tests/headless-test.sh,
 #                         tests/pointer-test.sh, tests/tiling-test.sh,
-#                         tests/drag-test.sh, tests/dock-clear-test.sh)
+#                         tests/drag-test.sh, tests/dock-clear-test.sh,
+#                         tests/capture-test.sh)
 #   gmake check-settings  the settings test against a running headless
 #                         server (WS_SERVICE_NAME=..., tests/settings-test.sh)
+#   gmake agent           ScreenCaptureAgent, the Screen Recording consent
+#                         agent (agent/, needs gnustep-make)
+#   gmake install-agent   install it
 #   gmake clean
 
 CC		?= cc
@@ -56,7 +60,7 @@ LIB_OBJS	= $(LIB_SRCS:%.c=$(B)/%.o)
 HEADERS		= $(wildcard include/WindowServer/*.h)
 
 all: $(B)/WindowServer $(B)/$(LIB_SO) $(B)/$(LIB_NAME).a $(B)/wstest $(B)/wsctl \
-     $(B)/wspointer $(B)/wstiling $(B)/wsdrag $(B)/wsclear \
+     $(B)/wspointer $(B)/wstiling $(B)/wsdrag $(B)/wsclear $(B)/wscapture \
      $(B)/WindowServerClient.pc
 
 $(B)/server/%.o: server/%.c server/server.h $(HEADERS)
@@ -105,6 +109,9 @@ $(B)/wsdrag: $(B)/tools/wsdrag.o $(B)/$(LIB_NAME).a
 $(B)/wsclear: $(B)/tools/wsclear.o $(B)/$(LIB_NAME).a
 	$(CC) $(LDFLAGS) -o $@ $< $(B)/$(LIB_NAME).a $(MACH_LIBS)
 
+$(B)/wscapture: $(B)/tools/wscapture.o $(B)/$(LIB_NAME).a
+	$(CC) $(LDFLAGS) -o $@ $< $(B)/$(LIB_NAME).a $(MACH_LIBS)
+
 $(B)/WindowServerClient.pc: WindowServerClient.pc.in
 	@mkdir -p $(B)
 	# libdir and includedir are written relative to ${prefix} when they're
@@ -126,7 +133,7 @@ install: all
 	$(INSTALL) -m 644 $(HEADERS) $(DESTDIR)$(INCDIR)/WindowServer/
 	$(INSTALL) -m 644 $(B)/WindowServerClient.pc $(DESTDIR)$(PKGCONFIGDIR)/
 	$(INSTALL) -m 755 $(B)/wstest $(B)/wsctl $(B)/wspointer $(B)/wstiling \
-	    $(B)/wsdrag $(B)/wsclear \
+	    $(B)/wsdrag $(B)/wsclear $(B)/wscapture \
 	    scripts/ws-session \
 	    $(DESTDIR)$(TOOLDIR)/
 	$(INSTALL) -m 644 launchd/org.nextbsd.WindowServer.plist $(DESTDIR)$(LAUNCHDDIR)/
@@ -141,11 +148,21 @@ check: all
 	sh tests/tiling-test.sh $(B)
 	sh tests/drag-test.sh $(B)
 	sh tests/dock-clear-test.sh $(B)
+	sh tests/capture-test.sh $(B)
 
 check-settings: all
 	sh tests/settings-test.sh $(B)
 
+# The consent agent is a GNUstep app: built with gnustep-make, apart from
+# the rest, which needs only a C compiler.
+agent: all
+	$(MAKE) -C agent WS_BUILD=$(abspath $(B))
+
+install-agent: agent
+	$(MAKE) -C agent install WS_BUILD=$(abspath $(B))
+
 clean:
 	rm -rf $(B)
+	-[ -z "$(GNUSTEP_MAKEFILES)" ] || $(MAKE) -C agent clean
 
-.PHONY: all install check check-settings clean
+.PHONY: all install check check-settings agent install-agent clean

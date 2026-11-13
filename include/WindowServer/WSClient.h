@@ -342,6 +342,59 @@ typedef struct ws_snapshot {
 int		 ws_snapshot(ws_connection_t *conn, ws_snapshot_t *out);
 void		 ws_snapshot_free(ws_snapshot_t *snap);
 /*
+ * Screen capture (servers with WS_SERVER_CAPTURE, else ENOTSUP; see
+ * "Screen capture" in WSProtocol.h). Nothing comes until the user has
+ * allowed the app (root and an app's own windows are exempt).
+ *
+ * ws_capture_start asks for a stream of the screen (window 0) or of a
+ * window, and returns its id (0 on failure, errno set). flags:
+ * WS_CAPTURE_CURSOR, WS_CAPTURE_ONESHOT; width and height: the output
+ * size, 0 for the source's; max_fps: 0 for no limit. *reply_flags (may
+ * be NULL) gets WS_CAPTURE_ASKING, _NO_AGENT or _EXEMPT. When the
+ * server has no consent agent to ask, the library starts one (see
+ * WSProtocol.h). ws_capture_start_for is the same for a helper that
+ * captures for another program (an X server for an X client): pid and
+ * name are that program's.
+ *
+ * Then ws_dispatch hands over WS_EVENT_CAPTURE_STATE, _BUFFER and
+ * _FRAME. The library maps each buffer itself (u.capture_buffer.fd is
+ * -1 by then); ws_capture_frame_data gives a frame's pixels (XRGB8888)
+ * and stride. Keep a frame as long as needed, then ws_capture_release
+ * it: the server only fills buffers it has back. A buffer's mapping
+ * stays valid until it's released, even after the stream ended or
+ * the size changed.
+ *
+ * ws_capture_image takes one picture (WS_CAPTURE_ONESHOT): it waits up
+ * to timeout_ms (-1: WS_CAPTURE_CONSENT_TIMEOUT seconds) for the user
+ * to answer, then for the frame. EPERM: refused; ETIMEDOUT: no answer.
+ * Free the picture with ws_snapshot_free.
+ *
+ * The consent agent connects with WS_CONNECT_CONSENT, gets
+ * WS_EVENT_CAPTURE_CONSENT and answers with ws_capture_consent
+ * (WS_CONSENT_ALLOW or _DENY). Tools and the agent list the streams
+ * with ws_capture_list and stop them or revoke an app's permission
+ * with ws_capture_revoke (stream, or key with WS_CAPTURE_REVOKE_*).
+ */
+uint32_t	 ws_capture_start(ws_connection_t *conn, uint32_t window,
+    uint32_t flags, uint32_t width, uint32_t height, uint32_t max_fps,
+    uint32_t *reply_flags);
+uint32_t	 ws_capture_start_for(ws_connection_t *conn, uint32_t window,
+    uint32_t flags, uint32_t width, uint32_t height, uint32_t max_fps,
+    int32_t pid, const char *name, uint32_t *reply_flags);
+int		 ws_capture_stop(ws_connection_t *conn, uint32_t stream);
+const void	*ws_capture_frame_data(ws_connection_t *conn,
+    const ws_event_capture_frame_t *frame, uint32_t *stride);
+int		 ws_capture_release(ws_connection_t *conn,
+    const ws_event_capture_frame_t *frame);
+int		 ws_capture_image(ws_connection_t *conn, uint32_t window,
+    uint32_t flags, int timeout_ms, ws_snapshot_t *out);
+int		 ws_capture_consent(ws_connection_t *conn, uint32_t request,
+    uint32_t decision);
+int		 ws_capture_list(ws_connection_t *conn,
+    void (*fn)(const ws_event_capture_info_t *, void *), void *ctx);
+int		 ws_capture_revoke(ws_connection_t *conn, uint32_t stream,
+    uint32_t flags, const char *key);
+/*
  * Calls fn once per window, bottom to top, then returns. Only
  * WS_CONNECT_CONTROL and WS_CONNECT_DOCK connections may list (EPERM
  * otherwise). ws_list_windows_flags takes WS_LIST_* options

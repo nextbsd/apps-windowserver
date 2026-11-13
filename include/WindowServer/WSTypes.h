@@ -172,6 +172,11 @@ extern "C" {
 					   change notices, previews (see
 					   "The Dock" in WSProtocol.h);
 					   not an app */
+#define WS_CONNECT_CONSENT	0x0010	/* the Screen Recording consent
+					   agent (servers with
+					   WS_SERVER_CAPTURE, see "Screen
+					   capture" in WSProtocol.h); not an
+					   app */
 
 /* Server flags in WS_EVENT_WELCOME. */
 #define WS_SERVER_HEADLESS	0x0001
@@ -251,11 +256,70 @@ extern "C" {
 						   WS_MSG_DRAG_*, WS_EVENT_DRAG*,
 						   WS_WINDOW_ACCEPTS_DRAGS ("Drag
 						   and drop" in WSProtocol.h) */
+#define WS_SERVER_CAPTURE	0x08000000 /* screen and window capture with
+						   the Screen Recording consent:
+						   WS_MSG_CAPTURE_*,
+						   WS_EVENT_CAPTURE_* ("Screen
+						   capture" in WSProtocol.h) */
 
 /* WS_MSG_ACTIVATE flags (ws_activate_flags). */
 #define WS_ACTIVATE_RAISE	0x0001	/* also bring the app's windows,
 					   joined connections' included, to
 					   the front */
+
+/*
+ * Screen capture (servers with WS_SERVER_CAPTURE; "Screen capture" in
+ * WSProtocol.h).
+ */
+#define WS_CAPTURE_CURSOR	0x0001	/* frames show the pointer */
+#define WS_CAPTURE_ONESHOT	0x0002	/* one frame, then the stream ends */
+
+/* u.capture.flags in the WS_MSG_CAPTURE_START reply */
+#define WS_CAPTURE_ASKING	0x0001	/* the user is being asked */
+#define WS_CAPTURE_NO_AGENT	0x0002	/* ... but no consent agent is
+					   connected to ask them: start one
+					   (the client library does) */
+#define WS_CAPTURE_EXEMPT	0x0004	/* no consent needed: root, or the
+					   sender's own window */
+
+/* ws_event_capture_state_t.state */
+#define WS_CAPTURE_PENDING	1	/* waiting for the user's answer */
+#define WS_CAPTURE_RUNNING	2	/* frames come */
+#define WS_CAPTURE_DENIED	3	/* refused; the stream is gone */
+#define WS_CAPTURE_STOPPED	4	/* over; the stream is gone */
+
+/* ws_event_capture_frame_t.flags */
+#define WS_CAPTURE_FRAME_FULL	0x0001	/* the whole frame is new (the first
+					   one, or after a size change) */
+
+/* The consent agent's answers (WS_MSG_CAPTURE_CONSENT). */
+#define WS_CONSENT_DENY		0
+#define WS_CONSENT_ALLOW	1
+
+/* ws_event_capture_consent_t.flags */
+#define WS_CONSENT_WINDOW	0x0001	/* one window, not the screen */
+#define WS_CONSENT_ON_BEHALF	0x0002	/* a helper (an X server) asks for
+					   the program it names */
+
+/* WS_MSG_CAPTURE_REVOKE flags */
+#define WS_CAPTURE_REVOKE_FORGET 0x0001	/* the consent agent also forgets the
+					   answer, so the next request asks
+					   again */
+#define WS_CAPTURE_REVOKE_ALL	0x0002	/* every app's, not only `key`'s */
+
+#define WS_CAPTURE_BUFFERS	2	/* frame buffers per stream */
+#define WS_CAPTURE_MAX_DAMAGE	8	/* rectangles in a frame event */
+#define WS_CAPTURE_KEY_MAX	136	/* an app's key: its executable's
+					   path, NUL included */
+#define WS_CAPTURE_NAME_MAX	40	/* the name the prompt shows */
+
+/* The consent agent, started on demand ("Screen capture" in
+   WSProtocol.h). */
+#define WS_CAPTURE_AGENT_SERVICE "org.nextbsd.ScreenCaptureAgent"
+#define WS_CAPTURE_AGENT_PATH	"/System/Library/CoreServices/" \
+				"ScreenCaptureAgent.app/ScreenCaptureAgent"
+/* Environment variable naming another agent to start, or "none". */
+#define WS_CAPTURE_AGENT_ENV	"WS_CAPTURE_AGENT"
 
 /* Where a minimized window goes ("Minimizing" in WSProtocol.h). */
 #define WS_MINIMIZE_DEFAULT	0	/* the server's MinimizeIntoDock */
@@ -379,6 +443,19 @@ enum {
 					   source */
 	WS_EVENT_DRAG_STATE,		/* ws_event_drag_state_t, answers
 					   WS_MSG_DRAG_QUERY */
+	/* WS_SERVER_CAPTURE ("Screen capture" in WSProtocol.h) */
+	WS_EVENT_CAPTURE_STATE,		/* ws_event_capture_state_t */
+	WS_EVENT_CAPTURE_BUFFER,	/* ws_event_capture_buffer_t, with a
+					   memfd */
+	WS_EVENT_CAPTURE_FRAME,		/* ws_event_capture_frame_t */
+	WS_EVENT_CAPTURE_CONSENT,	/* ws_event_capture_consent_t: to the
+					   consent agent */
+	WS_EVENT_CAPTURE_ACTIVITY,	/* ws_event_capture_activity_t: to the
+					   consent agent */
+	WS_EVENT_CAPTURE_INFO,		/* ws_event_capture_info_t, answers
+					   WS_MSG_CAPTURE_LIST */
+	WS_EVENT_CAPTURE_REVOKED,	/* ws_event_capture_revoked_t: to the
+					   consent agent */
 	WS_EVENT_MAX
 };
 
@@ -986,6 +1063,117 @@ typedef struct ws_event_drag_state {
 					   (cut short if long) */
 } ws_event_drag_state_t;
 
+/*
+ * Screen capture (WS_SERVER_CAPTURE, "Screen capture" in WSProtocol.h).
+ *
+ * WS_EVENT_CAPTURE_STATE: a stream's state changed. `error` says why a
+ * stream was refused or ended: EPERM (the user said no, or isn't the
+ * console user), ETIMEDOUT (nobody answered), ECANCELED (the user
+ * stopped it, or revoked the app's permission), ENOENT (its window went
+ * away), 0 (the client stopped it, or a one-shot capture is done).
+ */
+typedef struct ws_event_capture_state {
+	uint32_t	stream;
+	uint32_t	state;		/* WS_CAPTURE_PENDING ... _STOPPED */
+	int32_t		error;		/* errno value, see above */
+	uint32_t	reserved;
+} ws_event_capture_state_t;
+
+/*
+ * WS_EVENT_CAPTURE_BUFFER: one of the stream's frame buffers, a memfd
+ * holding stride * height bytes of XRGB8888, for the client to map
+ * (PROT_READ). Sent before the first frame that uses it, and again
+ * with a new generation when the size changes. The client library maps
+ * it itself and sets `fd` to -1; see ws_capture_frame_data().
+ */
+typedef struct ws_event_capture_buffer {
+	uint32_t	stream;
+	uint32_t	index;		/* 0 .. WS_CAPTURE_BUFFERS - 1 */
+	uint32_t	generation;	/* bumped on every size change */
+	uint32_t	width;
+	uint32_t	height;
+	uint32_t	stride;
+	uint32_t	format;		/* WS_FORMAT_XRGB8888 */
+	int32_t		fd;		/* filled in by the client library */
+} ws_event_capture_buffer_t;
+
+/*
+ * WS_EVENT_CAPTURE_FRAME: buffer `index` holds a new frame, the whole
+ * picture, of which `damage` changed since the frame before (output
+ * coordinates; the bounding box when more than WS_CAPTURE_MAX_DAMAGE
+ * rectangles changed). The buffer is the client's until it sends
+ * WS_MSG_CAPTURE_RELEASE for it.
+ */
+typedef struct ws_event_capture_frame {
+	uint32_t	stream;
+	uint32_t	index;
+	uint32_t	generation;
+	uint32_t	seq;		/* frames of this stream so far */
+	uint32_t	flags;		/* WS_CAPTURE_FRAME_* */
+	uint32_t	ndamage;
+	ws_rect_t	damage[WS_CAPTURE_MAX_DAMAGE];
+} ws_event_capture_frame_t;
+
+/*
+ * WS_EVENT_CAPTURE_CONSENT, to the consent agent: may this program
+ * capture? `key` names it (its executable's path, from the kernel, the
+ * end of it if longer); the agent keeps the user's answers by key.
+ * `name` is the name to show. With WS_CONSENT_ON_BEHALF a helper asks
+ * for another program (an X server for an X client): `pid`, `name` and
+ * `key` are that program's, `helper_pid` and `helper_name` the
+ * helper's. Answer with WS_MSG_CAPTURE_CONSENT naming `request`.
+ */
+typedef struct ws_event_capture_consent {
+	uint32_t	request;
+	int32_t		pid;		/* the program that wants the pixels */
+	uint32_t	uid;
+	uint32_t	window;		/* WS_CONSENT_WINDOW: the window */
+	uint32_t	flags;		/* WS_CONSENT_* */
+	int32_t		helper_pid;	/* WS_CONSENT_ON_BEHALF: the helper */
+	char		name[WS_CAPTURE_NAME_MAX];
+	char		helper_name[32];
+	char		key[WS_CAPTURE_KEY_MAX];
+} ws_event_capture_consent_t;
+
+/*
+ * WS_EVENT_CAPTURE_ACTIVITY, to the consent agent: the streams changed
+ * (it lists them with WS_MSG_CAPTURE_LIST to show who records).
+ */
+typedef struct ws_event_capture_activity {
+	uint32_t	running;	/* streams showing the indicator */
+	uint32_t	pending;	/* streams waiting for an answer */
+} ws_event_capture_activity_t;
+
+/* WS_EVENT_CAPTURE_INFO: one stream, answering WS_MSG_CAPTURE_LIST. */
+#define WS_CAPTURE_INFO_EXEMPT	0x0001	/* no consent needed */
+#define WS_CAPTURE_INFO_ON_BEHALF 0x0002 /* a helper captures for pid */
+#define WS_CAPTURE_INFO_INDICATOR 0x0004 /* counts for the indicator */
+
+typedef struct ws_event_capture_info {
+	uint32_t	stream;
+	uint32_t	client;		/* the connection that asked */
+	int32_t		pid;		/* the program the pixels are for */
+	uint32_t	window;		/* 0 = the screen */
+	uint32_t	state;		/* WS_CAPTURE_* */
+	uint32_t	flags;		/* WS_CAPTURE_INFO_* */
+	uint32_t	width;		/* output size */
+	uint32_t	height;
+	uint32_t	frames;		/* frames sent */
+	uint32_t	capture_flags;	/* WS_CAPTURE_CURSOR, _ONESHOT */
+	char		name[WS_CAPTURE_NAME_MAX];
+	char		key[WS_CAPTURE_KEY_MAX];
+} ws_event_capture_info_t;
+
+/*
+ * WS_EVENT_CAPTURE_REVOKED, to the consent agent: forget the answer
+ * for `key`, or every answer (WS_CAPTURE_REVOKE_ALL).
+ */
+typedef struct ws_event_capture_revoked {
+	uint32_t	flags;		/* WS_CAPTURE_REVOKE_* */
+	uint32_t	reserved;
+	char		key[WS_CAPTURE_KEY_MAX];
+} ws_event_capture_revoked_t;
+
 typedef struct ws_event {
 	ws_event_header_t hdr;
 	union {
@@ -1019,6 +1207,13 @@ typedef struct ws_event {
 		ws_event_drag_status_t	drag_status;
 		ws_event_drag_end_t	drag_end;
 		ws_event_drag_state_t	drag_state;
+		ws_event_capture_state_t capture_state;
+		ws_event_capture_buffer_t capture_buffer;
+		ws_event_capture_frame_t capture_frame;
+		ws_event_capture_consent_t capture_consent;
+		ws_event_capture_activity_t capture_activity;
+		ws_event_capture_info_t	capture_info;
+		ws_event_capture_revoked_t capture_revoked;
 		uint8_t			raw[232];
 	} u;
 } ws_event_t;

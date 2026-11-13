@@ -178,7 +178,28 @@ composite_region(struct ws_server *srv, pixman_region32_t *region)
 	/* a drag's image, above everything but the cursor (drag.c) */
 	drag_composite(srv);
 
-	if (!srv->cursor_hw && srv->cursor_visible && srv->cursor_image != NULL)
+	/* the capture indicator (capture.c), never in captured frames */
+	if (srv->capture_indicator && !srv->capture_hide_overlays) {
+		pixman_color_t ic;
+		ws_rect_t r[4];
+		int i;
+		uint32_t col = WS_CAPTURE_BORDER_COLOR;
+
+		ic.red = (uint16_t)(((col >> 16) & 0xff) * 0x101);
+		ic.green = (uint16_t)(((col >> 8) & 0xff) * 0x101);
+		ic.blue = (uint16_t)((col & 0xff) * 0x101);
+		ic.alpha = 0xffff;
+		fill = pixman_image_create_solid_fill(&ic);
+		capture_indicator_rects(srv, r);
+		for (i = 0; i < 4; i++)
+			pixman_image_composite32(PIXMAN_OP_SRC, fill, NULL,
+			    srv->shadow, 0, 0, 0, 0, r[i].x, r[i].y,
+			    r[i].width, r[i].height);
+		pixman_image_unref(fill);
+	}
+
+	if (!srv->cursor_hw && srv->cursor_visible && srv->cursor_image != NULL &&
+	    !srv->capture_hide_cursor)
 		pixman_image_composite32(PIXMAN_OP_OVER, srv->cursor_image,
 		    NULL, srv->shadow, 0, 0, 0, 0,
 		    srv->cursor_rect.x, srv->cursor_rect.y,
@@ -214,6 +235,7 @@ compositor_repaint(struct ws_server *srv)
 
 	tiles_render(srv);
 	composite_region(srv, &region);
+	capture_screen_damage(srv, &region);
 	for (w = srv->windows; w != NULL; w = w->next)
 		if (w->frame_requested) {
 			w->frame_requested = false;
@@ -225,6 +247,50 @@ compositor_repaint(struct ws_server *srv)
 		srv->present_pending = true;
 	else
 		compositor_present_done(srv);
+}
+
+/* ---- captures (capture.c) ---- */
+
+/* Is the pointer drawn into the shadow (a software cursor)? */
+bool
+compositor_cursor_in_shadow(struct ws_server *srv)
+{
+	return !srv->cursor_hw && srv->cursor_visible &&
+	    srv->cursor_image != NULL && srv->cursor_rect.width > 0;
+}
+
+/*
+ * Captured frames leave out the capture indicator, and the software
+ * cursor unless the stream wants it. Draw the parts of the shadow they
+ * cover again without them (hide), copy, then with them (!hide): the
+ * shadow ends up as it was, and nothing is presented in between.
+ */
+void
+compositor_capture_overlays(struct ws_server *srv, bool hide, bool cursor)
+{
+	pixman_region32_t reg;
+	ws_rect_t r[5];
+	int i, n = 0;
+
+	if (srv->capture_indicator) {
+		capture_indicator_rects(srv, r);
+		n = 4;
+	}
+	if (cursor && compositor_cursor_in_shadow(srv))
+		r[n++] = srv->cursor_rect;
+	srv->capture_hide_overlays = hide;
+	srv->capture_hide_cursor = hide && cursor;
+	for (i = 0; i < n; i++) {
+		if (r[i].width <= 0 || r[i].height <= 0)
+			continue;
+		pixman_region32_init_rect(&reg, r[i].x, r[i].y,
+		    (unsigned)r[i].width, (unsigned)r[i].height);
+		pixman_region32_intersect_rect(&reg, &reg, 0, 0, srv->width,
+		    srv->height);
+		if (pixman_region32_not_empty(&reg))
+			composite_region(srv, &reg);
+		pixman_region32_fini(&reg);
+	}
 }
 
 /* ---- snapshots ---- */

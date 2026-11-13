@@ -10,13 +10,16 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <mach/mach.h>
@@ -29,6 +32,20 @@
 
 #define RPC_TIMEOUT_MS		10000
 #define WELCOME_TIMEOUT_MS	5000
+
+/* A capture stream's frame buffer, mapped (WS_EVENT_CAPTURE_BUFFER). */
+struct ws_capture_map {
+	uint32_t	stream;
+	uint32_t	index;
+	uint32_t	generation;
+	uint32_t	stride;
+	void		*data;
+	size_t		size;
+	int		held;		/* a frame in it is the client's */
+	int		gone;		/* superseded or the stream ended:
+					   unmap when released */
+	struct ws_capture_map *next;
+};
 
 struct ws_connection {
 	mach_port_t	server;
@@ -59,6 +76,8 @@ struct ws_connection {
 	/* descriptors received, in order, not yet claimed by an event */
 	int		fds[8];
 	int		nfds;
+	/* capture streams' buffers */
+	struct ws_capture_map *maps;
 };
 
 struct ws_buffer {
@@ -286,6 +305,8 @@ parse_event(ws_connection_t *c, ws_event_t *ev)
 		ev->u.preview.fd = fd_take(c);
 	else if (ev->hdr.type == WS_EVENT_KEYMAP)
 		ev->u.keymap.fd = fd_take(c);
+	else if (ev->hdr.type == WS_EVENT_CAPTURE_BUFFER)
+		ev->u.capture_buffer.fd = fd_take(c);
 	return 1;
 }
 
@@ -299,6 +320,9 @@ event_close_fd(const ws_event_t *ev)
 		close(ev->u.preview.fd);
 	else if (ev->hdr.type == WS_EVENT_KEYMAP && ev->u.keymap.fd >= 0)
 		close(ev->u.keymap.fd);
+	else if (ev->hdr.type == WS_EVENT_CAPTURE_BUFFER &&
+	    ev->u.capture_buffer.fd >= 0)
+		close(ev->u.capture_buffer.fd);
 }
 
 /* Returns 1 with an event, 0 if nothing is ready (nonblocking), -1 on error. */
@@ -617,6 +641,13 @@ ws_disconnect(ws_connection_t *c)
 		event_close_fd(&ev);
 	while (c->nfds > 0)
 		close(fd_take(c));
+	while (c->maps != NULL) {
+		struct ws_capture_map *m = c->maps;
+
+		c->maps = m->next;
+		munmap(m->data, m->size);
+		free(m);
+	}
 	if (c->sock >= 0)
 		close(c->sock);
 	mach_port_destruct(mach_task_self(), c->reply, 0, 0);
@@ -691,9 +722,14 @@ ws_pending(ws_connection_t *c)
 	return c->rlen >= hdr.size;
 }
 
+static void capture_note(ws_connection_t *c, ws_event_t *ev);
+
 static void
-note_event(ws_connection_t *c, const ws_event_t *ev)
+note_event(ws_connection_t *c, ws_event_t *ev)
 {
+	if (ev->hdr.type >= WS_EVENT_CAPTURE_STATE &&
+	    ev->hdr.type <= WS_EVENT_CAPTURE_FRAME)
+		capture_note(c, ev);
 	if (ev->hdr.type == WS_EVENT_SCREEN_CHANGED &&
 	    ev->u.screen.screen_id == c->screen.screen_id) {
 		c->screen = ev->u.screen;
@@ -1843,6 +1879,13 @@ ws_event_name(uint16_t type)
 		[WS_EVENT_DRAG_STATUS] = "drag-status",
 		[WS_EVENT_DRAG_END] = "drag-end",
 		[WS_EVENT_DRAG_STATE] = "drag-state",
+		[WS_EVENT_CAPTURE_STATE] = "capture-state",
+		[WS_EVENT_CAPTURE_BUFFER] = "capture-buffer",
+		[WS_EVENT_CAPTURE_FRAME] = "capture-frame",
+		[WS_EVENT_CAPTURE_CONSENT] = "capture-consent",
+		[WS_EVENT_CAPTURE_ACTIVITY] = "capture-activity",
+		[WS_EVENT_CAPTURE_INFO] = "capture-info",
+		[WS_EVENT_CAPTURE_REVOKED] = "capture-revoked",
 	};
 
 	if (type < WS_EVENT_MAX && names[type] != NULL)
@@ -2243,4 +2286,417 @@ ws_settings_load_file(ws_connection_t *c, const char *path, uint32_t flags,
 	r = ws_set_settings(c, flags, st->list, n, failed_key, failed_len);
 	free(st);
 	return r;
+}
+
+/* ---- screen capture (WS_SERVER_CAPTURE) ---- */
+
+static int
+need_capture(ws_connection_t *c)
+{
+	if ((c->server_flags & WS_SERVER_CAPTURE) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	return 0;
+}
+
+static void
+map_free(ws_connection_t *c, struct ws_capture_map *m)
+{
+	struct ws_capture_map **pp;
+
+	for (pp = &c->maps; *pp != NULL; pp = &(*pp)->next)
+		if (*pp == m) {
+			*pp = m->next;
+			break;
+		}
+	munmap(m->data, m->size);
+	free(m);
+}
+
+static struct ws_capture_map *
+map_find(ws_connection_t *c, uint32_t stream, uint32_t index,
+    uint32_t generation)
+{
+	struct ws_capture_map *m;
+
+	for (m = c->maps; m != NULL; m = m->next)
+		if (m->stream == stream && m->index == index &&
+		    m->generation == generation)
+			return m;
+	return NULL;
+}
+
+/* Buffers of `stream` (older than `generation`, or all if 0) are done
+   with: unmap them now, or once the client releases them. */
+static void
+maps_retire(ws_connection_t *c, uint32_t stream, uint32_t generation)
+{
+	struct ws_capture_map *m, *next;
+
+	for (m = c->maps; m != NULL; m = next) {
+		next = m->next;
+		if (m->stream != stream ||
+		    (generation != 0 && m->generation >= generation))
+			continue;
+		if (m->held)
+			m->gone = 1;
+		else
+			map_free(c, m);
+	}
+}
+
+/* An event of a capture stream is handed to the client: keep the
+   library's mappings in step. */
+static void
+capture_note(ws_connection_t *c, ws_event_t *ev)
+{
+	ws_event_capture_buffer_t *b = &ev->u.capture_buffer;
+	struct ws_capture_map *m;
+	void *p;
+
+	switch (ev->hdr.type) {
+	case WS_EVENT_CAPTURE_BUFFER:
+		if (b->fd < 0)
+			break;
+		maps_retire(c, b->stream, b->generation);
+		m = calloc(1, sizeof(*m));
+		p = MAP_FAILED;
+		if (m != NULL && b->stride >= b->width * 4 && b->height > 0)
+			p = mmap(NULL, (size_t)b->stride * b->height, PROT_READ,
+			    MAP_SHARED, b->fd, 0);
+		close(b->fd);
+		b->fd = -1;
+		if (p == MAP_FAILED) {
+			free(m);
+			break;
+		}
+		m->stream = b->stream;
+		m->index = b->index;
+		m->generation = b->generation;
+		m->stride = b->stride;
+		m->data = p;
+		m->size = (size_t)b->stride * b->height;
+		m->next = c->maps;
+		c->maps = m;
+		break;
+	case WS_EVENT_CAPTURE_FRAME:
+		m = map_find(c, ev->u.capture_frame.stream,
+		    ev->u.capture_frame.index, ev->u.capture_frame.generation);
+		if (m != NULL)
+			m->held = 1;
+		break;
+	case WS_EVENT_CAPTURE_STATE:
+		if (ev->u.capture_state.state == WS_CAPTURE_DENIED ||
+		    ev->u.capture_state.state == WS_CAPTURE_STOPPED)
+			maps_retire(c, ev->u.capture_state.stream, 0);
+		break;
+	}
+}
+
+/*
+ * Start the consent agent: launchd starts it on demand when its
+ * LaunchAgent is loaded (a message to its Mach service), else run it.
+ * Its own process, in its own session, with no descriptors of ours.
+ */
+static void
+start_agent(void)
+{
+	const char *path = getenv(WS_CAPTURE_AGENT_ENV);
+	const char *home = getenv("HOME");
+	char log[PATH_MAX];
+	mach_msg_header_t h;
+	mach_port_t port;
+	kern_return_t kr;
+	pid_t pid;
+	int fd, lfd;
+
+	if (path != NULL && strcmp(path, "none") == 0)
+		return;
+	if (path == NULL || *path == '\0') {
+		if (bootstrap_look_up(bootstrap_port, WS_CAPTURE_AGENT_SERVICE,
+		    &port) == KERN_SUCCESS) {
+			memset(&h, 0, sizeof(h));
+			h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+			h.msgh_size = sizeof(h);
+			h.msgh_remote_port = port;
+			h.msgh_id = 0;
+			kr = mach_msg(&h, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+			    sizeof(h), 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+			mach_port_deallocate(mach_task_self(), port);
+			if (kr == MACH_MSG_SUCCESS)
+				return;
+			/* a stale name: start it ourselves */
+		}
+		path = WS_CAPTURE_AGENT_PATH;
+	}
+	if (access(path, X_OK) < 0)
+		return;
+	log[0] = '\0';
+	if (home != NULL && *home == '/')
+		snprintf(log, sizeof(log), "%s/Library/Logs/ScreenCaptureAgent.log",
+		    home);
+	pid = fork();
+	if (pid == 0) {
+		(void)setsid();
+		if (fork() != 0)
+			_exit(0);
+		fd = open("/dev/null", O_RDWR);
+		lfd = log[0] ? open(log, O_WRONLY | O_CREAT | O_APPEND, 0600) : -1;
+		if (fd >= 0) {
+			dup2(fd, 0);
+			dup2(lfd >= 0 ? lfd : fd, 1);
+			dup2(lfd >= 0 ? lfd : fd, 2);
+		}
+		closefrom(3);
+		execl(path, path, (char *)NULL);
+		_exit(127);
+	}
+	if (pid > 0)
+		while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+			;
+}
+
+WS_API uint32_t
+ws_capture_start_for(ws_connection_t *c, uint32_t window, uint32_t flags,
+    uint32_t width, uint32_t height, uint32_t max_fps, int32_t pid,
+    const char *name, uint32_t *reply_flags)
+{
+	ws_req_capture_t m;
+	ws_reply_t r;
+
+	if (need_capture(c) < 0)
+		return 0;
+	req_init(c, &m.hdr, WS_MSG_CAPTURE_START, sizeof(m), window);
+	m.flags = flags;
+	m.max_fps = max_fps;
+	m.width = width;
+	m.height = height;
+	m.for_pid = pid;
+	m.reserved = 0;
+	memset(m.for_name, 0, sizeof(m.for_name));
+	if (name != NULL)
+		strlcpy(m.for_name, name, sizeof(m.for_name));
+	if (send_rpc(c, &m.hdr, &r) < 0)
+		return 0;
+	if (reply_flags != NULL)
+		*reply_flags = r.u.capture.flags;
+	if (r.u.capture.flags & WS_CAPTURE_NO_AGENT)
+		start_agent();
+	return r.u.capture.stream;
+}
+
+WS_API uint32_t
+ws_capture_start(ws_connection_t *c, uint32_t window, uint32_t flags,
+    uint32_t width, uint32_t height, uint32_t max_fps, uint32_t *reply_flags)
+{
+	return ws_capture_start_for(c, window, flags, width, height, max_fps,
+	    0, NULL, reply_flags);
+}
+
+WS_API int
+ws_capture_stop(ws_connection_t *c, uint32_t stream)
+{
+	if (need_capture(c) < 0)
+		return -1;
+	return send_int(c, WS_MSG_CAPTURE_STOP, 0, (int32_t)stream);
+}
+
+WS_API const void *
+ws_capture_frame_data(ws_connection_t *c, const ws_event_capture_frame_t *f,
+    uint32_t *stride)
+{
+	struct ws_capture_map *m;
+
+	m = map_find(c, f->stream, f->index, f->generation);
+	if (m == NULL) {
+		errno = ENOENT;
+		return NULL;
+	}
+	if (stride != NULL)
+		*stride = m->stride;
+	return m->data;
+}
+
+WS_API int
+ws_capture_release(ws_connection_t *c, const ws_event_capture_frame_t *f)
+{
+	ws_req_capture_release_t m;
+	struct ws_capture_map *map;
+
+	map = map_find(c, f->stream, f->index, f->generation);
+	if (map != NULL) {
+		map->held = 0;
+		if (map->gone) {
+			map_free(c, map);
+			return 0;	/* the server has forgotten it */
+		}
+	}
+	req_init(c, &m.hdr, WS_MSG_CAPTURE_RELEASE, sizeof(m), 0);
+	m.stream = f->stream;
+	m.index = f->index;
+	m.generation = f->generation;
+	m.reserved = 0;
+	return send_oneway(c, &m.hdr);
+}
+
+WS_API int
+ws_capture_image(ws_connection_t *c, uint32_t window, uint32_t flags,
+    int timeout_ms, ws_snapshot_t *out)
+{
+	struct ws_capture_map *map;
+	ws_event_t ev;
+	uint32_t stream;
+	uint64_t deadline;
+	struct timespec ts;
+	int r, left;
+
+	memset(out, 0, sizeof(*out));
+	stream = ws_capture_start(c, window, flags | WS_CAPTURE_ONESHOT, 0, 0,
+	    0, NULL);
+	if (stream == 0)
+		return -1;
+	if (timeout_ms < 0)
+		timeout_ms = (WS_CAPTURE_CONSENT_TIMEOUT + 10) * 1000;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	deadline = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000 +
+	    (uint64_t)timeout_ms;
+	for (;;) {
+		r = read_event(c, &ev);
+		if (r < 0)
+			return -1;
+		if (r == 0) {
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			left = (int)((int64_t)deadline -
+			    (int64_t)((uint64_t)ts.tv_sec * 1000 +
+			    (uint64_t)ts.tv_nsec / 1000000));
+			if (left <= 0 || (r = wait_readable(c, left)) == 0) {
+				(void)ws_capture_stop(c, stream);
+				errno = ETIMEDOUT;
+				return -1;
+			}
+			if (r < 0)
+				return -1;
+			continue;
+		}
+		if (ev.hdr.type < WS_EVENT_CAPTURE_STATE ||
+		    ev.hdr.type > WS_EVENT_CAPTURE_FRAME ||
+		    ev.u.capture_state.stream != stream) {
+			if (queue_push(c, &ev) < 0)
+				return -1;
+			continue;
+		}
+		capture_note(c, &ev);
+		if (ev.hdr.type == WS_EVENT_CAPTURE_STATE &&
+		    (ev.u.capture_state.state == WS_CAPTURE_DENIED ||
+		    ev.u.capture_state.state == WS_CAPTURE_STOPPED)) {
+			errno = ev.u.capture_state.error ?
+			    ev.u.capture_state.error : EIO;
+			return -1;
+		}
+		if (ev.hdr.type != WS_EVENT_CAPTURE_FRAME)
+			continue;
+		map = map_find(c, stream, ev.u.capture_frame.index,
+		    ev.u.capture_frame.generation);
+		if (map == NULL) {
+			errno = EIO;
+			return -1;
+		}
+		/* the picture is the caller's now (ws_snapshot_free) */
+		out->stride = map->stride;
+		out->width = map->stride / 4;
+		out->height = (uint32_t)(map->size / map->stride);
+		out->format = WS_FORMAT_XRGB8888;
+		out->pixels = map->data;
+		out->map_size = map->size;
+		{
+			struct ws_capture_map **pp;
+
+			for (pp = &c->maps; *pp != NULL; pp = &(*pp)->next)
+				if (*pp == map) {
+					*pp = map->next;
+					break;
+				}
+			free(map);
+		}
+		return 0;
+	}
+}
+
+WS_API int
+ws_capture_consent(ws_connection_t *c, uint32_t request, uint32_t decision)
+{
+	ws_req_capture_consent_t m;
+
+	if (need_capture(c) < 0)
+		return -1;
+	req_init(c, &m.hdr, WS_MSG_CAPTURE_CONSENT, sizeof(m), 0);
+	m.request = request;
+	m.decision = decision;
+	return send_oneway(c, &m.hdr);
+}
+
+WS_API int
+ws_capture_list(ws_connection_t *c,
+    void (*fn)(const ws_event_capture_info_t *, void *), void *ctx)
+{
+	ws_req_header_t h;
+	ws_event_t ev;
+	int r, err = 0;
+
+	if (need_capture(c) < 0)
+		return -1;
+	req_init(c, &h, WS_MSG_CAPTURE_LIST, sizeof(h), 0);
+	if (send_oneway(c, &h) < 0)
+		return -1;
+	for (;;) {
+		r = read_event(c, &ev);
+		if (r < 0)
+			return -1;
+		if (r == 0) {
+			r = wait_readable(c, RPC_TIMEOUT_MS);
+			if (r <= 0) {
+				if (r == 0)
+					errno = ETIMEDOUT;
+				return -1;
+			}
+			continue;
+		}
+		if (ev.hdr.type == WS_EVENT_LIST_END) {
+			if (err != 0) {
+				errno = err;
+				return -1;
+			}
+			return 0;
+		}
+		if (ev.hdr.type == WS_EVENT_CAPTURE_INFO) {
+			if (fn != NULL)
+				fn(&ev.u.capture_info, ctx);
+			continue;
+		}
+		if (ev.hdr.type == WS_EVENT_ERROR &&
+		    ev.u.error.request == WS_MSG_CAPTURE_LIST) {
+			err = ev.u.error.code ? ev.u.error.code : EIO;
+			continue;
+		}
+		if (queue_push(c, &ev) < 0)
+			return -1;
+	}
+}
+
+WS_API int
+ws_capture_revoke(ws_connection_t *c, uint32_t stream, uint32_t flags,
+    const char *key)
+{
+	ws_req_capture_revoke_t m;
+
+	if (need_capture(c) < 0)
+		return -1;
+	req_init(c, &m.hdr, WS_MSG_CAPTURE_REVOKE, sizeof(m), 0);
+	m.stream = stream;
+	m.flags = flags;
+	memset(m.key, 0, sizeof(m.key));
+	if (key != NULL)
+		strlcpy(m.key, key, sizeof(m.key));
+	return send_oneway(c, &m.hdr);
 }
