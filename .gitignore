@@ -1,1 +1,3 @@
 build/
+agent/obj/
+agent/*.app/

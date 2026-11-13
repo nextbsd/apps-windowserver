@@ -79,6 +79,24 @@ handle_hello(struct ws_server *srv, struct ws_mach_item *item)
 			return;
 		}
 	}
+	if (m->flags & WS_CONNECT_CONSENT) {
+		/* The Screen Recording consent agent (capture.c): the
+		 * console user's, one at a time. */
+		int err;
+
+		if (m->flags & (WS_CONNECT_CONTROL | WS_CONNECT_JOIN |
+		    WS_CONNECT_DOCK)) {
+			reply_status(item, m->hdr.seq, EINVAL);
+			return;
+		}
+		if ((err = capture_agent_hello(srv, item->sender_euid)) != 0) {
+			ws_warn("pid %d (uid %d): consent agent refused: %s",
+			    (int)item->sender_pid, (int)item->sender_euid,
+			    strerror(err));
+			reply_status(item, m->hdr.seq, err);
+			return;
+		}
+	}
 	if (m->flags & WS_CONNECT_JOIN) {
 		/* The optional tail must be there, and a tool can't join. */
 		if (item->size < sizeof(*m) || (m->flags & WS_CONNECT_CONTROL)) {
@@ -108,7 +126,7 @@ handle_hello(struct ws_server *srv, struct ws_mach_item *item)
 	c->pid = item->sender_pid;
 	c->uid = item->sender_euid;
 	c->flags = m->flags & (WS_CONNECT_CONTROL | WS_CONNECT_XKB |
-	    WS_CONNECT_DOCK);
+	    WS_CONNECT_DOCK | WS_CONNECT_CONSENT);
 	c->app = app != NULL ? app : c;
 	c->sock = -1;
 	c->hello_usec = ws_now_usec();
@@ -220,9 +238,20 @@ handle_snapshot(struct ws_server *srv, struct ws_client *c,
 	int fd;
 
 	if (!may_inject(srv, item)) {
+		ws_info("snapshot refused to %s (pid %d, uid %d)", c->app_name,
+		    (int)item->sender_pid, (int)item->sender_euid);
 		reply_status(item, seq, EPERM);
 		return;
 	}
+	/* A debugging tool's screenshot, without consent: logged. Tests
+	   on headless servers take many. */
+	if (srv->headless)
+		ws_debug("snapshot for %s (pid %d, uid %d)", c->app_name,
+		    (int)item->sender_pid, (int)item->sender_euid);
+	else
+		ws_info("snapshot for %s (pid %d, uid %d), exempt from "
+		    "consent", c->app_name, (int)item->sender_pid,
+		    (int)item->sender_euid);
 	fd = snapshot_memfd(srv, &stride);
 	if (fd < 0) {
 		reply_status(item, seq, errno);
@@ -321,7 +350,16 @@ min_size(mach_msg_id_t id)
 	case WS_MSG_POINTER_TRACK:
 	case WS_MSG_RESERVE_WINDOW_IDS:
 	case WS_MSG_DRAG_CANCEL:
+	case WS_MSG_CAPTURE_STOP:
 		return sizeof(ws_req_int_t);
+	case WS_MSG_CAPTURE_START:
+		return sizeof(ws_req_capture_t);
+	case WS_MSG_CAPTURE_RELEASE:
+		return sizeof(ws_req_capture_release_t);
+	case WS_MSG_CAPTURE_CONSENT:
+		return sizeof(ws_req_capture_consent_t);
+	case WS_MSG_CAPTURE_REVOKE:
+		return sizeof(ws_req_capture_revoke_t);
 	case WS_MSG_DRAG_BEGIN:
 		return offsetof(ws_req_drag_begin_t, types);
 	case WS_MSG_DRAG_STATUS:
@@ -891,6 +929,60 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 			break;
 		}
 		drag_query(srv, c);
+		break;
+	case WS_MSG_CAPTURE_START: {
+		struct ws_capture *cs = NULL;
+		uint32_t flags = 0;
+		ws_reply_t r;
+		int err;
+
+		err = capture_start(srv, c, (ws_req_capture_t *)(void *)h, &cs,
+		    &flags);
+		if (want_reply) {
+			memset(&r, 0, sizeof(r));
+			r.seq = h->seq;
+			r.status = err;
+			r.u.capture.stream = cs != NULL ? cs->id : 0;
+			r.u.capture.flags = flags;
+			reply_send(item, &r, sizeof(r));
+		} else if (err != 0) {
+			client_error(srv, c, (uint32_t)id, h->window, err,
+			    "capture refused");
+		}
+		if (cs != NULL)
+			capture_begin(srv, cs);
+		return;
+	}
+	case WS_MSG_CAPTURE_STOP:
+		capture_stop_request(srv, c, (uint32_t)value);
+		break;
+	case WS_MSG_CAPTURE_RELEASE:
+		capture_release(srv, c, (ws_req_capture_release_t *)(void *)h);
+		break;
+	case WS_MSG_CAPTURE_CONSENT:
+		capture_consent(srv, c, (ws_req_capture_consent_t *)(void *)h);
+		break;
+	case WS_MSG_CAPTURE_LIST:
+	case WS_MSG_CAPTURE_REVOKE:
+		/* tools and the consent agent, for the console user, as
+		   the window list */
+		if ((c->flags & WS_CONNECT_TOOL) == 0 ||
+		    !dock_may_list(srv, item->sender_euid)) {
+			client_error(srv, c, (uint32_t)id, 0, EPERM,
+			    "capture list or revoke not allowed");
+			if (id == WS_MSG_CAPTURE_LIST) {
+				ws_event_t ev;
+
+				event_init(srv, &ev, WS_EVENT_LIST_END, 0, 0);
+				client_send(srv, c, &ev, -1);
+			}
+			break;
+		}
+		if (id == WS_MSG_CAPTURE_LIST)
+			capture_list(srv, c);
+		else
+			capture_revoke(srv, c,
+			    (ws_req_capture_revoke_t *)(void *)h);
 		break;
 	case WS_MSG_INJECT:
 		if (!may_inject(srv, item)) {

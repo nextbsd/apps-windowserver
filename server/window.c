@@ -576,6 +576,7 @@ window_destroy(struct ws_server *srv, struct ws_window *w)
 	window_unminimize(srv, w);
 	if (w->visible)
 		window_order(srv, w, WS_ORDER_OUT, NULL);
+	capture_window_gone(srv, w);
 	tiling_window_gone(srv, w);
 	if (c->app->key_window == w)
 		set_key_window(srv, c->app, NULL);
@@ -882,6 +883,7 @@ window_commit(struct ws_server *srv, struct ws_window *w, uint32_t flags,
 			pixman_region32_fini(&r);
 		}
 	}
+	capture_window_committed(srv, w, full ? NULL : &w->pending_damage);
 	overview_window_committed(srv, w);
 	tiling_committed(srv, w);
 	if (w->tile != NULL) {

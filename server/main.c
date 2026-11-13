@@ -134,6 +134,7 @@ handle_kevent(struct ws_server *srv, struct kevent *kev)
 			overview_anim_fire(srv);
 		else if (kev->ident == TIMER_DRAG)
 			drag_timer_fire(srv);
+		/* TIMER_CAPTURE: a frame is due; the loop sends it */
 		return;
 	}
 	type = tag < 64 ? (int)tag : *(int *)kev->udata;
@@ -300,6 +301,7 @@ main(int argc, char **argv)
 	srv->running = true;
 	while (srv->running) {
 		compositor_repaint(srv);
+		capture_flush(srv);
 		n = kevent(srv->kq, NULL, 0, events,
 		    (int)(sizeof(events) / sizeof(events[0])), NULL);
 		if (n < 0) {
@@ -325,6 +327,7 @@ out:
 			client_destroy(srv, c);
 		clients_reap(srv);
 	}
+	capture_fini(srv);
 	drag_fini(srv);
 	cursor_fini(srv);
 	overview_fini(srv);

@@ -44,14 +44,16 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_COMMIT_FRAME | WS_SERVER_WINDOW_IDS | \
 				 WS_SERVER_MENU_BAR | WS_SERVER_ACTIVATE_RAISE | \
 				 WS_SERVER_DOCK_NOT_ACTIVE | WS_SERVER_TILING | \
-				 WS_SERVER_DRAG)
+				 WS_SERVER_DRAG | WS_SERVER_CAPTURE)
 
 /* The standard cursors with a built-in image (cursor.c): kinds 0 to
    WS_CURSOR_DRAG_LINK. */
 #define WS_NSTD_CURSORS		(WS_CURSOR_DRAG_LINK + 1)
 
-/* Connections that aren't apps: wsctl and the Dock's window list. */
-#define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK)
+/* Connections that aren't apps: wsctl, the Dock's window list and the
+   Screen Recording consent agent. */
+#define WS_CONNECT_TOOL		(WS_CONNECT_CONTROL | WS_CONNECT_DOCK | \
+				 WS_CONNECT_CONSENT)
 
 /* ---- configuration (config.c) ---- */
 
@@ -319,6 +321,7 @@ enum {
 	TIMER_MOMENTUM,
 	TIMER_OVERVIEW,
 	TIMER_DRAG,
+	TIMER_CAPTURE,
 };
 
 /* The window overview (overview.c). */
@@ -463,6 +466,60 @@ struct ws_drag {
 	uint32_t	late_app;	/* app id, 0 = none */
 	uint64_t	late_usec;
 };
+
+/* A frame buffer of a capture stream (capture.c). */
+struct ws_capture_buf {
+	int		fd;		/* memfd, -1 = none */
+	void		*map;
+	size_t		size;
+	pixman_image_t	*image;		/* x8r8g8b8 over map */
+	bool		busy;		/* the client has it */
+	bool		sent;		/* the client has its fd */
+	pixman_region32_t stale;	/* source coordinates: where it lags */
+	ws_rect_t	cursor;		/* source coordinates: where it shows
+					   the pointer drawn by us, 0x0 = no */
+};
+
+/* A capture stream (WS_MSG_CAPTURE_START, capture.c). */
+struct ws_capture {
+	uint32_t	id;
+	struct ws_client *owner;
+	uint32_t	window;		/* 0 = the screen */
+	uint32_t	flags;		/* WS_CAPTURE_CURSOR, _ONESHOT */
+	uint32_t	state;		/* WS_CAPTURE_* */
+	bool		exempt;		/* no consent needed */
+	bool		indicator;	/* shows the border while it runs */
+	bool		on_behalf;	/* for another program (for_pid) */
+	uint32_t	req_width;	/* asked for, 0 = the source's */
+	uint32_t	req_height;
+	uint32_t	src_width;	/* the source's size the buffers are */
+	uint32_t	src_height;	/* for, 0 = none yet */
+	uint32_t	width;		/* output */
+	uint32_t	height;
+	uint32_t	generation;
+	uint64_t	interval_usec;	/* 1 / max_fps, 0 = no limit */
+	uint64_t	last_usec;	/* the last frame */
+	uint32_t	seq;
+	pid_t		pid;		/* the program the pixels are for */
+	uid_t		uid;
+	pid_t		helper_pid;	/* on_behalf: the asking process */
+	char		name[WS_CAPTURE_NAME_MAX];
+	char		helper_name[32];
+	char		key[WS_CAPTURE_KEY_MAX];
+	uint32_t	request;	/* PENDING: the consent request */
+	bool		asked;		/* PENDING: the agent has it */
+	uint64_t	pending_usec;	/* PENDING since */
+	pixman_region32_t damage;	/* source coordinates, since the last
+					   frame */
+	bool		full;		/* the next frame is all new */
+	ws_rect_t	cursor_rect;	/* WS_CAPTURE_CURSOR: where the pointer
+					   was last seen (source coordinates) */
+	pixman_image_t	*cursor_image;	/* and which image, not owned */
+	struct ws_capture_buf buf[WS_CAPTURE_BUFFERS];
+	struct ws_capture *next;
+};
+
+#define WS_CAPTURE_MAX_REVOKED	16
 
 /* Touchpad scrolling in progress (scroll.c). */
 #define WS_SCROLL_SAMPLES	8
@@ -638,6 +695,20 @@ struct ws_server {
 	struct ws_tiling tiling;
 	/* drag and drop (drag.c) */
 	struct ws_drag	drag;
+	/* screen capture (capture.c) */
+	struct ws_capture *captures;
+	uint32_t	next_capture_id;
+	uint32_t	next_consent_request;
+	struct ws_client *capture_agent; /* WS_CONNECT_CONSENT, or NULL */
+	bool		capture_indicator;	/* the border is drawn */
+	bool		capture_hide_overlays;	/* drawing for a capture: no
+						   border ... */
+	bool		capture_hide_cursor;	/* ... and maybe no pointer */
+	bool		capture_activity_dirty;	/* tell the agent */
+	/* forgotten answers the agent hasn't heard of yet */
+	unsigned	nrevoked;
+	uint32_t	revoked_flags[WS_CAPTURE_MAX_REVOKED];
+	char		revoked[WS_CAPTURE_MAX_REVOKED][WS_CAPTURE_KEY_MAX];
 
 	/* cursor */
 	pixman_image_t	*cursor_std[WS_NSTD_CURSORS]; /* built-in kinds */
@@ -852,6 +923,37 @@ void	drag_window_gone(struct ws_server *srv, struct ws_window *w);
 void	drag_client_gone(struct ws_server *srv, struct ws_client *c);
 void	drag_fini(struct ws_server *srv);
 
+/* ---- capture.c ---- */
+int	capture_start(struct ws_server *srv, struct ws_client *c,
+	    ws_req_capture_t *m, struct ws_capture **out,
+	    uint32_t *reply_flags);
+void	capture_begin(struct ws_server *srv, struct ws_capture *s);
+void	capture_stop_request(struct ws_server *srv, struct ws_client *c,
+	    uint32_t stream);
+void	capture_release(struct ws_server *srv, struct ws_client *c,
+	    const ws_req_capture_release_t *m);
+void	capture_consent(struct ws_server *srv, struct ws_client *c,
+	    const ws_req_capture_consent_t *m);
+void	capture_list(struct ws_server *srv, struct ws_client *c);
+void	capture_revoke(struct ws_server *srv, struct ws_client *c,
+	    const ws_req_capture_revoke_t *m);
+int	capture_agent_hello(struct ws_server *srv, uid_t uid);
+void	capture_client_ready(struct ws_server *srv, struct ws_client *c);
+void	capture_client_gone(struct ws_server *srv, struct ws_client *c);
+void	capture_window_gone(struct ws_server *srv, struct ws_window *w);
+void	capture_window_committed(struct ws_server *srv, struct ws_window *w,
+	    const pixman_region32_t *damage);
+void	capture_screen_damage(struct ws_server *srv,
+	    const pixman_region32_t *region);
+void	capture_flush(struct ws_server *srv);
+void	capture_housekeeping(struct ws_server *srv);
+void	capture_indicator_rects(struct ws_server *srv, ws_rect_t r[4]);
+void	capture_fini(struct ws_server *srv);
+
+/* ---- proc.c ---- */
+int	proc_path(pid_t pid, char *buf, size_t len);
+int	proc_euid(pid_t pid, uid_t *uid);
+
 /* ---- tile.c ---- */
 int	tile_init(struct ws_server *srv);
 void	tile_fini(struct ws_server *srv);
@@ -981,6 +1083,9 @@ void	composite_window(struct ws_server *srv, struct ws_window *w,
 	    const pixman_box32_t *ext, double opacity);
 void	compositor_present_done(struct ws_server *srv);
 int	snapshot_memfd(struct ws_server *srv, uint32_t *stride);
+void	compositor_capture_overlays(struct ws_server *srv, bool hide,
+	    bool cursor);
+bool	compositor_cursor_in_shadow(struct ws_server *srv);
 int	snapshot_write_ppm(struct ws_server *srv, const char *path);
 
 /* ---- headless output (compositor.c) ---- */

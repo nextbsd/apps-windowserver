@@ -40,7 +40,9 @@ libs-base and libs-gui are unmodified. The `nextbsd` backend installs beside the
 | Client library | `/usr/lib/libWindowServerClient.so.1` and `.a` |
 | Headers | `/usr/include/WindowServer/` |
 | pkgconf file | `/usr/libdata/pkgconfig/WindowServerClient.pc` |
-| Test tools | `/usr/libexec/WindowServer/` (`wstest`, `wspointer`, `wstiling`, `wsdrag`, `wsctl`, `ws-session`) |
+| Test tools | `/usr/libexec/WindowServer/` (`wstest`, `wspointer`, `wstiling`, `wsdrag`, `wscapture`, `wsctl`, `ws-session`) |
+| Screen Recording consent agent | `/System/Library/CoreServices/ScreenCaptureAgent.app` (`gmake install-agent`) |
+| Its LaunchAgent | `/System/Library/LaunchAgents/org.nextbsd.ScreenCaptureAgent.plist` |
 | Client socket | `/var/run/WindowServer/ws.sock` |
 | Account | `_windowserver` (uid 88) |
 
@@ -69,6 +71,7 @@ What works, tested headless:
 - Settings that change while the server runs, per console user: keyboard layouts (a list, switched by a request or a shortcut), key repeat, pointer and touchpad settings (see [Settings](#settings)).
 - Window tiling, switched on and off live, with the dwindle and master-and-stack layouts, gaps, an active-window border, floating windows, keys and the pointer (see [Window tiling](#window-tiling)).
 - Drag and drop between apps, mediated by the server, with the image above every window and the Dock and the cursor showing the operation (see [Drag and drop](#drag-and-drop)).
+- Screen and window capture for screen sharing and screenshots, with a Screen Recording consent prompt, an indicator and revocation (see [Screen capture](#screen-capture)).
 
 Written but only compiled:
 
@@ -119,6 +122,8 @@ build/wsctl screen size 1024x600  # change the headless screen's size
 `tests/pointer-test.sh` (also run by `gmake check`) runs `wspointer`, two apps that use what X servers need from WindowServer, and checks windows created without a round trip each, a window's own cursor showing the moment the pointer enters it, input regions (clicks passing through part of a window to the desktop or the window below), pointer grabs (everything to the grabbing app with window 0 outside its windows, `pointer-outside` on an outside press, nothing activated, another app refused; the grab ended by the overview and by another app's activation; popup grabs that end on the first outside press), pointer tracking only while the app is active, warps (only over the app's own window) and queries (only for the active app), and a resize carried in its commit.
 
 `tests/tiling-test.sh` (also run by `gmake check`) runs `wstiling`, two apps whose windows redraw at whatever size they're given, and checks window tiling: stacking by default with the tiling keys reaching the app, tiling switched on live, the dwindle layout's tiles and gaps, the windows' new frames and redraws, a panel and a `WS_WINDOW_NO_TILE` window floating above the tiles, the border, focus, swap, grow and shrink with the keys and `wsctl tiling`, floating a window and tiling it again (with its old frame back meanwhile), a panel refused, dragging a split, dragging a window onto another tile and back onto its own, the master layout, refused settings, a Dock on the right and at the bottom, no gaps, windows hidden, shown, created, minimized and closed, a window whose minimum size is larger than its tile (tiled all the same), one that insists on a larger frame (cut to its tile), one that sizes itself in steps, one that only moves (as an X server's do), a screen change, and tiling switched off with every frame given back.
+
+`tests/capture-test.sh` (also run by `gmake check`) runs `wscapture`, a capture client that also plays the consent agent, and checks screen capture: a stream waiting while no agent is connected, the agent connecting and allowing it, buffers and frames (the first all new, then only W3's rectangle when W3 changes), the indicator border on screen but not in the frames, the pointer only in streams that ask for it, a scaled stream, a window's frames where another window covers it on screen, a helper asking on behalf of another program (and refused when it didn't join an app, or for another user's process), stopping a stream, revoking an app (its streams end and the agent is told to forget it, or told later when it wasn't connected), a refusal, a second agent refused, one-shot captures of the screen and of a window, root's exemption, and streams ending with their clients. Run as root, it runs the clients that need consent as `nobody`.
 
 `tests/drag-test.sh` (also run by `gmake check`) runs `wsdrag`, two apps with six windows, and checks drag and drop: a drag from Alpha onto Beta's window that takes a copy and one inside Alpha that takes a move, the operations each side offers and the modifiers narrowing them, the drag image following the pointer above the windows, the copy and link cursors, the drag state from `wsctl drag`, the release reaching the source before the end of the drag, a window that takes nothing and one that doesn't take drags (the image slides back), Escape cancelling, the overview staying shut during a drag, and who may start one.
 
@@ -352,6 +357,23 @@ WindowServer carries drags between apps the way Darwin's window server does ("Dr
 - on release over a window that takes the drag, sends it the drop and the source `WS_EVENT_DRAG_END` with the operation; anywhere else the image slides back to where it started and the source hears the drag ended with nothing. Escape cancels.
 
 No app gets pointer motion while a drag lasts, and the overview doesn't open. Drags inside one app go through the server too. `wsctl drag` shows the drag under way. X11 windows don't take drags yet: that needs an XDND bridge in the X server.
+
+### Screen capture
+
+Apps can capture the screen, or one window, the way macOS's ScreenCaptureKit and `CGDisplayStream` let them, for screen sharing (Firefox and Jitsi through [XLibre](https://github.com/nextbsd/apps-xlibre)), recorders and screenshot tools, and only after the user has allowed it, as with macOS's Screen Recording permission. Servers that can set `WS_SERVER_CAPTURE`; the details are in "Screen capture" in `WSProtocol.h`.
+
+- **Streams.** `ws_capture_start()` asks for a stream of the screen or of a window (any app's, covered or not), with an optional output size, a frame rate limit and the pointer or not. Frames come in shared-memory buffers (memfds the library maps), only when something changed, with the rectangles that changed, so a client can update incrementally; the client gives each buffer back when it's done. Screen frames show what's on the screen, but never the capture indicator. `ws_capture_image()` takes a single picture (`wsctl capture image`).
+- **Consent.** No pixels before the user says yes. WindowServer draws no text, so a consent agent asks: **ScreenCaptureAgent**, a small GNUstep app in CoreServices (`agent/`), as Darwin's tccd and UserNotificationCenter are. When an app asks and the user hasn't answered for it before, the agent shows "“Firefox” would like to record this screen", with Don't Allow and Allow, and remembers the answer per app, by the app's executable (`~/Library/Preferences/org.nextbsd.ScreenCapture.plist`; `ScreenCaptureAgent --list` prints them). The agent starts on demand: launchd starts it through its LaunchAgent once graphical logins have Aqua sessions, and until then the client library starts it when the server says no agent is connected.
+- **On behalf of X clients.** An X server joined to an app (XLibre.app's Xnextbsd) asks for the X client that reads the screen, so the prompt and the stored answer name Firefox, not XLibre.
+- **Seeing and stopping it.** While anything records, WindowServer draws a thin orange border around the screen, which apps can't draw over or hide, and the agent shows who records, with a Stop button.
+- **Revoking.** `wsctl capture revoke KEY` (or `all`) ends the app's streams and makes the agent forget the answer, so the next request asks again. `wsctl capture stop STREAM` only ends a stream; `wsctl capture` lists them. `defaults delete org.nextbsd.ScreenCapture` forgets every answer.
+- **Who's exempt.** Root and the server's own account (debugging tools such as `wsctl capture image` as root), and an app capturing its own windows. Exempt captures are logged. `wsctl snapshot` (`WS_MSG_SNAPSHOT`) stays a debugging tool for root, the server's own user and headless servers, and is logged too.
+
+![The Screen Recording prompt on a headless WindowServer: "“wscapture” would like to record this screen.", with Don't Allow and Allow](docs/capture-prompt.png)
+
+![While a stream runs: the orange border around the screen and the agent's "Recording: wscapture" panel with its Stop button](docs/capture-indicator.png)
+
+Building the agent needs gnustep-make: `gmake agent` and `gmake install-agent` (as root), after the rest.
 
 ### Settings
 

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Copyright (C) 2026 Joseph Maloney <pkgdemonteam@gmail.com>
+  SPDX-License-Identifier: BSD-2-Clause
+
+  ScreenCaptureAgent, WindowServer's Screen Recording consent agent, as
+  a per-user LaunchAgent started on demand, as Darwin's are: when an app
+  asks WindowServer to capture the screen and no consent agent is
+  connected, libWindowServerClient sends a message to the agent's Mach
+  service, and launchd starts it. Nothing runs at login.
+
+  Aqua sessions only. Until graphical logins get them
+  (nextbsd/nextbsd-userland#372) launchd doesn't load this, and the
+  client library starts the agent itself instead (see "Screen capture"
+  in WindowServer's WSProtocol.h).
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.nextbsd.ScreenCaptureAgent</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/System/Library/CoreServices/ScreenCaptureAgent.app/ScreenCaptureAgent</string>
+		<string>-launchd</string>
+	</array>
+	<key>MachServices</key>
+	<dict>
+		<key>org.nextbsd.ScreenCaptureAgent</key>
+		<true/>
+	</dict>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+</dict>
+</plist>

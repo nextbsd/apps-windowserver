@@ -1,0 +1,11 @@
+{
+	ApplicationName = "ScreenCaptureAgent";
+	ApplicationDescription = "Asks whether an app may record the screen";
+	ApplicationRelease = "1.0";
+	CFBundleIdentifier = "org.nextbsd.ScreenCaptureAgent";
+	NSIcon = "ScreenCaptureAgent.png";
+	LSUIElement = YES;
+	Copyright = "Copyright (C) 2026 Joseph Maloney";
+	CopyrightDescription = "BSD 2-Clause License";
+	URL = "https://github.com/nextbsd/apps-windowserver";
+}

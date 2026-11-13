@@ -274,6 +274,8 @@ conn_readable(struct ws_server *srv, struct ws_conn *conn)
 		keyboard_client_ready(srv, c);
 	if (c->flags & WS_CONNECT_DOCK)
 		dock_client_ready(srv, c);
+	if (c->flags & WS_CONNECT_CONSENT)
+		capture_client_ready(srv, c);
 	ws_info("client %u (%s, pid %d) connected", c->id, c->app_name,
 	    (int)c->pid);
 }
@@ -675,6 +677,7 @@ client_destroy(struct ws_server *srv, struct ws_client *c)
 	pointer_ungrab(srv, c, false);
 	drag_client_gone(srv, c);
 	c->dead = true;
+	capture_client_gone(srv, c);
 	if (srv->kbd_focus == c)
 		srv->kbd_focus = NULL;
 	ws_debug("destroying client %u (%s)", c->id, c->app_name);
@@ -770,4 +773,5 @@ clients_housekeeping(struct ws_server *srv)
 	for (n = srv->conns; n != NULL; n = n->next)
 		if (!n->dead && now - n->accepted_usec > AUTH_TIMEOUT_USEC)
 			conn_close(n);
+	capture_housekeeping(srv);
 }

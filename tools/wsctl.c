@@ -8,7 +8,9 @@
  * connects as a Dock (WS_CONNECT_DOCK) to try the Dock's requests.
  * `wsctl settings` and `wsctl layout` change settings while the server
  * runs, which only the console user may do. `wsctl menubar` connects as
- * an app with a Mac-style menu bar.
+ * an app with a Mac-style menu bar. `wsctl capture` lists, stops and
+ * revokes screen captures, and takes a screenshot through the capture
+ * API, with the user's consent.
  */
 
 #include <errno.h>
@@ -73,7 +75,14 @@ usage(void)
 	    "       wsctl tiling grow|shrink (the focused tile)\n"
 	    "       wsctl tiling float|tile|toggle [WINDOW] (the key window\n"
 	    "                                if none is given)\n"
-	    "       wsctl drag              (the drag and drop under way)\n");
+	    "       wsctl drag              (the drag and drop under way)\n"
+	    "       wsctl capture [list]    (screen and window captures)\n"
+	    "       wsctl capture image [-c] [WINDOW] FILE.ppm\n"
+	    "                                (a screenshot with consent; -c:\n"
+	    "                                with the pointer)\n"
+	    "       wsctl capture stop STREAM|all\n"
+	    "       wsctl capture revoke KEY|all (stop the app's captures and\n"
+	    "                                forget its permission)\n");
 	exit(2);
 }
 
@@ -928,6 +937,87 @@ layout_cmd(ws_connection_t *c, int argc, char **argv)
 	return -1;
 }
 
+static const char *
+capture_state_name(uint32_t state)
+{
+	switch (state) {
+	case WS_CAPTURE_PENDING:
+		return "pending";
+	case WS_CAPTURE_RUNNING:
+		return "running";
+	case WS_CAPTURE_DENIED:
+		return "denied";
+	case WS_CAPTURE_STOPPED:
+		return "stopped";
+	default:
+		return "unknown";
+	}
+}
+
+static void
+print_capture(const ws_event_capture_info_t *i, void *ctx)
+{
+	char what[32];
+
+	(void)ctx;
+	if (i->window != 0)
+		snprintf(what, sizeof(what), "window=%u", i->window);
+	else
+		strlcpy(what, "screen", sizeof(what));
+	printf("stream=%u %s client=%u pid=%d %s%s%s%s%s size=%ux%u "
+	    "frames=%u name=\"%s\" key=%s\n", i->stream,
+	    capture_state_name(i->state), i->client, i->pid, what,
+	    (i->capture_flags & WS_CAPTURE_CURSOR) ? " cursor" : "",
+	    (i->flags & WS_CAPTURE_INFO_EXEMPT) ? " exempt" : "",
+	    (i->flags & WS_CAPTURE_INFO_ON_BEHALF) ? " on-behalf" : "",
+	    (i->flags & WS_CAPTURE_INFO_INDICATOR) ? " indicator" : "",
+	    i->width, i->height, i->frames, i->name, i->key);
+}
+
+/* wsctl capture ... */
+static int
+capture_cmd(ws_connection_t *c, int argc, char **argv)
+{
+	ws_snapshot_t snap;
+	uint32_t window = 0, flags = 0;
+	int i = 3, r;
+
+	if (argc == 2 || (argc == 3 && strcmp(argv[2], "list") == 0))
+		return ws_capture_list(c, print_capture, NULL);
+	if (strcmp(argv[2], "image") == 0 && argc >= 4) {
+		if (strcmp(argv[i], "-c") == 0) {
+			flags |= WS_CAPTURE_CURSOR;
+			i++;
+		}
+		if (argc - i == 2)
+			window = (uint32_t)strtoul(argv[i++], NULL, 0);
+		if (argc - i != 1)
+			usage();
+		r = ws_capture_image(c, window, flags, -1, &snap);
+		if (r == 0) {
+			r = write_ppm(&snap, argv[i]);
+			printf("%s: %ux%u\n", argv[i], snap.width, snap.height);
+			ws_snapshot_free(&snap);
+		}
+		return r;
+	}
+	if (strcmp(argv[2], "stop") == 0 && argc == 4) {
+		if (strcmp(argv[3], "all") == 0)
+			return ws_capture_revoke(c, 0, WS_CAPTURE_REVOKE_ALL, NULL);
+		return ws_capture_revoke(c, (uint32_t)strtoul(argv[3], NULL, 0),
+		    0, NULL);
+	}
+	if (strcmp(argv[2], "revoke") == 0 && argc == 4) {
+		if (strcmp(argv[3], "all") == 0)
+			return ws_capture_revoke(c, 0, WS_CAPTURE_REVOKE_FORGET |
+			    WS_CAPTURE_REVOKE_ALL, NULL);
+		return ws_capture_revoke(c, 0, WS_CAPTURE_REVOKE_FORGET,
+		    argv[3]);
+	}
+	usage();
+	return -1;
+}
+
 static void
 print_device(const ws_event_input_device_t *d, void *ctx)
 {
@@ -1082,6 +1172,10 @@ main(int argc, char **argv)
 			    (st.flags & WS_DRAG_STATE_RELEASED) ? " released" : "",
 			    (st.flags & WS_DRAG_STATE_SLIDING) ? " sliding" : "",
 			    st.sessions, st.types);
+	} else if (strcmp(cmd, "capture") == 0) {
+		r = capture_cmd(c, argc, argv);
+		if (r == 0)
+			r = ws_sync(c);
 	} else if (strcmp(cmd, "devices") == 0 && argc == 2) {
 		r = ws_list_input_devices(c, print_device, NULL);
 	} else {

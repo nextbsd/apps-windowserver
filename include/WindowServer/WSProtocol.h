@@ -130,6 +130,18 @@ enum {
 	WS_MSG_DRAG_STATUS,		/* ws_req_drag_status_t, hdr.window */
 	WS_MSG_DRAG_CANCEL,		/* ws_req_int_t: session */
 	WS_MSG_DRAG_QUERY,		/* tools; answers on the socket */
+	/* servers with WS_SERVER_CAPTURE, see "Screen capture" */
+	WS_MSG_CAPTURE_START,		/* sync, ws_req_capture_t;
+					   u.capture */
+	WS_MSG_CAPTURE_STOP,		/* ws_req_int_t: stream, 0 = all of
+					   the sender's */
+	WS_MSG_CAPTURE_RELEASE,		/* ws_req_capture_release_t */
+	WS_MSG_CAPTURE_CONSENT,		/* the consent agent,
+					   ws_req_capture_consent_t */
+	WS_MSG_CAPTURE_LIST,		/* tools and the consent agent;
+					   answers on the socket */
+	WS_MSG_CAPTURE_REVOKE,		/* tools and the consent agent,
+					   ws_req_capture_revoke_t */
 	WS_MSG_LAST
 };
 
@@ -872,6 +884,152 @@ typedef struct ws_req_drag_status {	/* DRAG_STATUS */
 } ws_req_drag_status_t;
 
 /*
+ * Screen capture (servers with WS_SERVER_CAPTURE), modelled on macOS's
+ * ScreenCaptureKit and CGDisplayStream, with its Screen Recording
+ * permission: no app sees a pixel of the screen, or of another app's
+ * window, until the user has allowed it.
+ *
+ * WS_MSG_CAPTURE_START (sync, ws_req_capture_t) asks for a stream of
+ * the composited screen (hdr.window 0) or of one window (hdr.window,
+ * any app's, whether it's covered or not). Options: an output size
+ * (width, height; 0 = the source's own, and the picture is scaled to
+ * fit exactly), the most frames a second (max_fps, 0 = whenever the
+ * source changes), WS_CAPTURE_CURSOR (frames show the pointer; without
+ * it they never do) and WS_CAPTURE_ONESHOT (one frame, then the stream
+ * ends: a screenshot). The reply's u.capture.stream names the stream;
+ * EINVAL, ENOENT (no such window) and EPERM (see below) fail it. From
+ * then on the stream's events come on the socket:
+ *
+ *   WS_EVENT_CAPTURE_STATE	PENDING while the user is asked, then
+ *				RUNNING, or DENIED. STOPPED when it
+ *				ends. After DENIED and STOPPED the
+ *				stream is gone.
+ *   WS_EVENT_CAPTURE_BUFFER	a frame buffer, a memfd the client maps;
+ *				WS_CAPTURE_BUFFERS of them, sent before
+ *				their first frame and again (a new
+ *				generation) when the source's size
+ *				changes and the output follows it.
+ *   WS_EVENT_CAPTURE_FRAME	a new frame in a buffer, with the
+ *				rectangles that changed since the frame
+ *				before. Frames come only when something
+ *				changed, at most max_fps a second, and
+ *				only into a buffer the client has given
+ *				back: WS_MSG_CAPTURE_RELEASE (stream,
+ *				index, generation) after it's done
+ *				reading. Keeping one buffer while the
+ *				other is filled is the normal case.
+ *
+ * Every frame holds the whole picture as XRGB8888. Screen frames show
+ * what is on the screen, the Dock, menus and the drag image included,
+ * but not the capture indicator; the pointer only with
+ * WS_CAPTURE_CURSOR. Window frames show the window's last committed
+ * buffer, at its frame's size. WS_MSG_CAPTURE_STOP (ws_req_int_t: a
+ * stream, 0 for all of the sender's) ends streams; their owner hears
+ * STOPPED. They also end when the window goes (ENOENT) or the user
+ * stops them (ECANCELED).
+ *
+ * Who may capture:
+ *   - Root, and the server's own account when it dropped to one, are
+ *     exempt: their streams start RUNNING at once, and the server logs
+ *     them. That's for debugging tools (wsctl). WS_MSG_SNAPSHOT
+ *     stays as it was (headless servers, root and the server's own
+ *     user) and is logged too.
+ *   - An app capturing a window of its own app needs nothing.
+ *   - Everyone else needs the user's consent, and must be the console
+ *     user (see "The Dock"), or anyone on a headless server or without a
+ *     loginwindow session; other users get EPERM.
+ *
+ * Consent. The server draws no text, so it asks a consent agent: a
+ * connection with WS_CONNECT_CONSENT, of the console user (the same
+ * check as the Dock role; EPERM otherwise), one at a time (EBUSY while
+ * another is connected). NextBSD's is ScreenCaptureAgent
+ * (agent/ in this repository), a small GNUstep app in CoreServices,
+ * as Darwin's tccd and UserNotificationCenter are. For each stream that
+ * needs consent the agent gets WS_EVENT_CAPTURE_CONSENT, naming the
+ * program by its executable's path (the key) and a name to show, and
+ * answers with WS_MSG_CAPTURE_CONSENT (ws_req_capture_consent_t:
+ * request, WS_CONSENT_ALLOW or _DENY). It remembers the user's answer
+ * per key, so the next request is answered without asking. The stream
+ * meanwhile is PENDING (the reply says WS_CAPTURE_ASKING); with no
+ * agent connected it waits for one, and the reply also says
+ * WS_CAPTURE_NO_AGENT, on which the client library starts one: it looks
+ * up WS_CAPTURE_AGENT_SERVICE, which launchd starts on demand where the
+ * agent's LaunchAgent is loaded, and otherwise runs
+ * WS_CAPTURE_AGENT_PATH itself (or $WS_CAPTURE_AGENT; "none" starts
+ * nothing). A stream nobody answers for in WS_CAPTURE_CONSENT_TIMEOUT
+ * seconds is DENIED with ETIMEDOUT. A refused client keeps getting
+ * nothing; X servers return black.
+ *
+ * On behalf of another program. A helper that captures for another
+ * program, an X server reading the screen for an X client, names that
+ * program in for_pid (and for_name, the name to show, else its
+ * executable's). Only a connection that joined an app (WS_CONNECT_JOIN,
+ * as XLibre.app's Xnextbsd does) may, and only for a process of the
+ * same user (EPERM otherwise). The consent, its key and the prompt are
+ * then that program's ("Firefox", through XLibre), so allowing Firefox
+ * once covers it whichever way it reads the screen. As with the Dock,
+ * the trust boundary is the user: the server checks pids and paths with
+ * the kernel, but can't tell an honest helper of the user's from
+ * another program of the same user's.
+ *
+ * The indicator. While any stream that needed consent (or is root's)
+ * runs, the server draws a WS_CAPTURE_BORDER pixels wide orange border
+ * around the screen, above every window but below the pointer, and
+ * leaves it out of captured frames. The consent agent gets
+ * WS_EVENT_CAPTURE_ACTIVITY whenever the streams change, lists them
+ * with WS_MSG_CAPTURE_LIST (a WS_EVENT_CAPTURE_INFO each, then
+ * WS_EVENT_LIST_END) and shows who records, with a way to stop them.
+ *
+ * Stopping and revoking: WS_MSG_CAPTURE_REVOKE (ws_req_capture_revoke_t),
+ * from tool connections and the consent agent, of the console user (the
+ * check of WS_MSG_LIST_WINDOWS), ends a stream (`stream`), or every
+ * stream of `key`'s program, or all of them (WS_CAPTURE_REVOKE_ALL),
+ * with ECANCELED. With WS_CAPTURE_REVOKE_FORGET the consent agent also
+ * forgets the answer (WS_EVENT_CAPTURE_REVOKED; the server keeps it for
+ * an agent that isn't connected yet), so the next request asks again.
+ * `wsctl capture` does all of this from the command line.
+ */
+#define WS_CAPTURE_CONSENT_TIMEOUT 120	/* seconds */
+#define WS_CAPTURE_BORDER	3	/* the indicator, pixels */
+#define WS_CAPTURE_BORDER_COLOR	0xff9500 /* 0xRRGGBB */
+#define WS_CAPTURE_MAX_FPS	240
+
+typedef struct ws_req_capture {		/* CAPTURE_START */
+	ws_req_header_t	hdr;		/* hdr.window: the window, 0 = the
+					   screen */
+	uint32_t	flags;		/* WS_CAPTURE_CURSOR, _ONESHOT */
+	uint32_t	max_fps;	/* 0 = no limit */
+	uint32_t	width;		/* output size, 0 = the source's */
+	uint32_t	height;
+	int32_t		for_pid;	/* 0 = the sender; else the program a
+					   helper captures for */
+	uint32_t	reserved;
+	char		for_name[WS_CAPTURE_NAME_MAX]; /* its name, "" = its
+					   executable's */
+} ws_req_capture_t;
+
+typedef struct ws_req_capture_release {	/* CAPTURE_RELEASE */
+	ws_req_header_t	hdr;
+	uint32_t	stream;
+	uint32_t	index;
+	uint32_t	generation;
+	uint32_t	reserved;
+} ws_req_capture_release_t;
+
+typedef struct ws_req_capture_consent {	/* CAPTURE_CONSENT */
+	ws_req_header_t	hdr;
+	uint32_t	request;
+	uint32_t	decision;	/* WS_CONSENT_* */
+} ws_req_capture_consent_t;
+
+typedef struct ws_req_capture_revoke {	/* CAPTURE_REVOKE */
+	ws_req_header_t	hdr;
+	uint32_t	stream;		/* one stream, 0 = by key */
+	uint32_t	flags;		/* WS_CAPTURE_REVOKE_* */
+	char		key[WS_CAPTURE_KEY_MAX];
+} ws_req_capture_revoke_t;
+
+/*
  * Settings (servers with WS_SERVER_SETTINGS). WindowServer's settings
  * (README, "Settings") change while it runs, in layers:
  *
@@ -1025,6 +1183,10 @@ typedef struct ws_reply {
 			uint32_t session;	/* DRAG_BEGIN */
 			uint32_t reserved;
 		} drag;
+		struct {
+			uint32_t stream;	/* CAPTURE_START */
+			uint32_t flags;		/* WS_CAPTURE_ASKING ... */
+		} capture;
 		uint8_t	raw[128];
 	} u;
 } ws_reply_t;
