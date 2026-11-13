@@ -81,7 +81,7 @@ usage(void)
 	fprintf(stderr,
 	    "usage: WindowServer [--headless WIDTHxHEIGHT] [--config FILE]\n"
 	    "                    [--socket PATH] [--service NAME]\n"
-	    "                    [--no-drop] [-v]\n");
+	    "                    [--mm WIDTHxHEIGHT] [--no-drop] [-v]\n");
 	exit(2);
 }
 
@@ -191,6 +191,7 @@ main(int argc, char **argv)
 {
 	static const struct option longopts[] = {
 		{ "headless", required_argument, NULL, 'H' },
+		{ "mm", required_argument, NULL, 'm' },
 		{ "config", required_argument, NULL, 'c' },
 		{ "socket", required_argument, NULL, 's' },
 		{ "service", required_argument, NULL, 'S' },
@@ -218,9 +219,17 @@ main(int argc, char **argv)
 	while ((ch = getopt_long(argc, argv, "vh", longopts, NULL)) != -1) {
 		switch (ch) {
 		case 'H':
-			if (parse_size(optarg, &srv->width, &srv->height) < 0)
+			if (parse_size(optarg, &srv->panel_width,
+			    &srv->panel_height) < 0)
 				usage();
 			srv->headless = true;
+			break;
+		case 'm':
+			/* headless: a physical size, as an EDID's (tests) */
+			if (sscanf(optarg, "%ux%u", &srv->mm_width,
+			    &srv->mm_height) != 2)
+				usage();
+			srv->edid_trusted = true;
 			break;
 		case 'c':
 			config_path = optarg;
@@ -281,6 +290,10 @@ main(int argc, char **argv)
 	if (!no_drop && privs_drop(srv) < 0)
 		goto out;
 
+	if (srv->headless && strcmp(srv->cfg.display_store,
+	    "/Library/Preferences/org.nextbsd.windowserver.displays.plist") == 0)
+		srv->cfg.display_store[0] = '\0';	/* tests keep nothing */
+	display_init(srv);
 	if (compositor_init(srv) < 0)
 		goto out;
 	screen_usable_compute(srv, &srv->usable);

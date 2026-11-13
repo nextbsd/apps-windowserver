@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include <WindowServer/WindowServer.h>
@@ -65,6 +66,13 @@ usage(void)
 	    "       wsctl layout list\n"
 	    "       wsctl layout set N|NAME  (make a layout of the list active)\n"
 	    "       wsctl layout watch [SECONDS] (print layout and settings changes)\n"
+	    "       wsctl display           (the display: its \"looks like\"\n"
+	    "                                sizes and the one in use)\n"
+	    "       wsctl display looks-like WxH|default\n"
+	    "                                (this display's size in points,\n"
+	    "                                kept for every user)\n"
+	    "       wsctl display scale auto|1|2|3 (force an integer scale\n"
+	    "                                for the session)\n"
 	    "       wsctl devices           (input devices)\n"
 	    "       wsctl tiling [status]   (the layout: tiled windows, in order)\n"
 	    "       wsctl tiling on|off     (WindowMode tiling or stacking)\n"
@@ -759,6 +767,45 @@ tiling_cmd(ws_connection_t *c, int argc, char **argv)
 	return ws_tiling(c, op, win, arg, NULL, print_tiling_item, NULL);
 }
 
+/* ---- display ("HiDPI" in WSProtocol.h) ---- */
+
+static void
+print_display(const ws_event_setting_t *st, void *ctx)
+{
+	(void)ctx;
+	if (strncmp(st->key, "Display", 7) == 0)
+		printf("%-24s %s\n", st->key, st->value);
+}
+
+static int
+display_cmd(ws_connection_t *c, int argc, char **argv)
+{
+	ws_setting_t s;
+	char key[64] = "";
+
+	if (argc == 2)
+		return ws_get_settings(c, print_display, NULL);
+	if (argc != 4)
+		usage();
+	if (strcmp(argv[2], "looks-like") == 0) {
+		s.key = "DisplayLooksLike";
+		s.type = WS_SETTING_STRING;
+		s.value = strcasecmp(argv[3], "default") == 0 ? "Default" :
+		    argv[3];
+	} else if (strcmp(argv[2], "scale") == 0) {
+		s.key = "DisplayScale";
+		s.type = WS_SETTING_STRING;
+		s.value = strcasecmp(argv[3], "auto") == 0 ? "Auto" : argv[3];
+	} else
+		usage();
+	if (ws_set_settings(c, 0, &s, 1, key, sizeof(key)) < 0) {
+		fprintf(stderr, "wsctl display %s %s: %s\n", argv[2], argv[3],
+		    strerror(errno));
+		return 2;
+	}
+	return ws_sync(c);
+}
+
 /* ---- settings ---- */
 
 static const char *const sources[] = { "built-in", "system", "session" };
@@ -1145,6 +1192,12 @@ main(int argc, char **argv)
 		r = ws_sync(c);
 	} else if (strcmp(cmd, "settings") == 0) {
 		r = settings_cmd(c, argc, argv);
+		if (r == 2) {		/* it said what failed */
+			ws_disconnect(c);
+			return 1;
+		}
+	} else if (strcmp(cmd, "display") == 0) {
+		r = display_cmd(c, argc, argv);
 		if (r == 2) {		/* it said what failed */
 			ws_disconnect(c);
 			return 1;

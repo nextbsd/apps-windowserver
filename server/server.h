@@ -44,7 +44,8 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_COMMIT_FRAME | WS_SERVER_WINDOW_IDS | \
 				 WS_SERVER_MENU_BAR | WS_SERVER_ACTIVATE_RAISE | \
 				 WS_SERVER_DOCK_NOT_ACTIVE | WS_SERVER_TILING | \
-				 WS_SERVER_DRAG | WS_SERVER_CAPTURE)
+				 WS_SERVER_DRAG | WS_SERVER_CAPTURE | \
+				 WS_SERVER_SCALE)
 
 /* The standard cursors with a built-in image (cursor.c): kinds 0 to
    WS_CURSOR_DRAG_LINK. */
@@ -110,6 +111,15 @@ struct ws_config {
 	char	tiling_new_window_splits[16]; /* largest, pointer or focused */
 	bool	tiling_focus_follows_mouse; /* the tile under the pointer
 					   has the focus */
+	/* HiDPI (display.c) */
+	char	display_scale[8];	/* Auto, 1, 2 or 3 */
+	char	display_default_looks_like[16]; /* Default or WxH: for
+					   displays without the user's
+					   choice */
+	char	display_panel_mode[24];	/* Preferred or WxH[@Hz]: the DRM
+					   mode the panel runs at */
+	char	display_store[128];	/* where the per-display choices
+					   are kept */
 };
 
 /* What a live change to a key needs (config.c's key table). */
@@ -118,8 +128,9 @@ struct ws_config {
 #define CONFIG_KEYMAP	0x04	/* the keymap is compiled again */
 #define CONFIG_REPEAT	0x08	/* XKB clients hear the repeat values */
 #define CONFIG_TILING	0x10	/* window tiling follows (tiling.c) */
+#define CONFIG_DISPLAY	0x20	/* the display mode follows (display.c) */
 #define CONFIG_SETTABLE	(CONFIG_LIVE | CONFIG_DEVICE | CONFIG_KEYMAP | \
-			 CONFIG_REPEAT | CONFIG_TILING)
+			 CONFIG_REPEAT | CONFIG_TILING | CONFIG_DISPLAY)
 
 #define CONFIG_MAX_KEYS	64
 
@@ -441,6 +452,7 @@ struct ws_drag {
 	uint32_t	types_len;
 	uint32_t	ntypes;
 	pixman_image_t	*image;		/* the drag image, or NULL */
+	uint32_t	image_scale;	/* its pixels per point */
 	int32_t		hot_x;
 	int32_t		hot_y;
 	ws_rect_t	image_rect;	/* where it is on screen */
@@ -593,9 +605,28 @@ struct ws_server {
 	bool		running;
 	int		kq;
 
-	/* screen */
+	/* screen: width x height points, scale backing pixels per point
+	   (display.c) */
 	uint32_t	width;
 	uint32_t	height;
+	uint32_t	scale;
+	uint32_t	back_width;	/* the shadow: points times scale */
+	uint32_t	back_height;
+	uint32_t	panel_width;	/* the display's mode, pixels */
+	uint32_t	panel_height;
+	pixman_image_t	*panel;		/* the shadow scaled to the panel,
+					   when the sizes differ, else NULL */
+	pixman_image_t	*out;		/* what the panel shows: panel or
+					   shadow (not owned) */
+	bool		screen_internal; /* a laptop's own panel */
+	bool		edid_trusted;	/* mm_width/height are real */
+	char		display_id[48];	/* EDID vendor-product-serial */
+	char		display_name[32];
+	unsigned	nmodes;		/* "looks like" choices, points */
+	struct { uint32_t w, h; } modes[WS_MAX_DISPLAY_MODES];
+	unsigned	mode_default;	/* index in modes */
+	uint32_t	chosen_w;	/* the user's choice for this */
+	uint32_t	chosen_h;	/* display, 0 = the default */
 	uint32_t	refresh_mhz;
 	uint32_t	mm_width;
 	uint32_t	mm_height;
@@ -713,8 +744,9 @@ struct ws_server {
 	/* cursor */
 	pixman_image_t	*cursor_std[WS_NSTD_CURSORS]; /* built-in kinds */
 	pixman_image_t	*cursor_image;	/* current, not owned */
-	int		cursor_hot_x;
+	int		cursor_hot_x;	/* points */
 	int		cursor_hot_y;
+	uint32_t	cursor_image_scale; /* its pixels per point */
 	bool		cursor_visible;
 	bool		cursor_hw;	/* hardware plane in use */
 	ws_rect_t	cursor_rect;	/* software cursor on screen */
@@ -771,6 +803,19 @@ struct ws_server {
 	uid_t		run_uid;
 	gid_t		run_gid;
 };
+
+/* ---- display.c ---- */
+void	display_set_edid(struct ws_server *srv, const uint8_t *edid,
+	    size_t len);
+void	display_init(struct ws_server *srv);
+int	display_apply(struct ws_server *srv, bool force);
+int	display_set_looks_like(struct ws_server *srv, const char *value);
+bool	display_looks_like_ok(struct ws_server *srv, const char *value);
+void	display_store_chown(struct ws_server *srv, uid_t uid, gid_t gid);
+int	display_info(struct ws_server *srv, unsigned i, char *key,
+	    size_t klen, char *value, size_t vlen);
+bool	display_scale_ok(const char *value);
+bool	display_default_ok(const char *value);
 
 /* ---- main.c ---- */
 void	ws_kq_add_fd(struct ws_server *srv, int fd, int filter, void *udata);
@@ -956,6 +1001,7 @@ int	proc_euid(pid_t pid, uid_t *uid);
 
 /* ---- tile.c ---- */
 int	tile_init(struct ws_server *srv);
+int	tile_rescale(struct ws_server *srv);
 void	tile_fini(struct ws_server *srv);
 void	tile_free(struct ws_window *t);
 void	tiles_render(struct ws_server *srv);
@@ -1066,6 +1112,7 @@ void	keyboard_focus_update(struct ws_server *srv);
 
 /* ---- cursor.c ---- */
 int	cursor_init(struct ws_server *srv);
+int	cursor_rescale(struct ws_server *srv);
 void	cursor_fini(struct ws_server *srv);
 void	cursor_update(struct ws_server *srv);
 void	cursor_moved(struct ws_server *srv);
@@ -1075,8 +1122,16 @@ int	cursor_window_set(struct ws_server *srv, struct ws_window *w,
 
 /* ---- compositor.c ---- */
 int	compositor_init(struct ws_server *srv);
-int	compositor_resize(struct ws_server *srv, uint32_t width,
-	    uint32_t height);
+int	compositor_resize(struct ws_server *srv);
+void	shadow_image(struct ws_server *srv, pixman_op_t op,
+	    pixman_image_t *src, uint32_t src_scale, pixman_image_t *mask,
+	    int32_t x, int32_t y, int32_t w, int32_t h);
+void	shadow_scaled(struct ws_server *srv, pixman_image_t *src, int sw,
+	    int sh, ws_rect_t r, pixman_image_t *mask);
+void	shadow_fill(struct ws_server *srv, const pixman_color_t *color,
+	    int32_t x, int32_t y, int32_t w, int32_t h);
+double	panel_x(struct ws_server *srv, double x);
+double	panel_y(struct ws_server *srv, double y);
 void	compositor_fini(struct ws_server *srv);
 void	compositor_repaint(struct ws_server *srv);
 void	composite_window(struct ws_server *srv, struct ws_window *w,

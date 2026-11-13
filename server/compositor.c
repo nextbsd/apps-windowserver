@@ -6,12 +6,19 @@
  * shadow image, but only inside the damaged region. The output backend
  * then copies the same region to the screen (DRM dumb buffer) or does
  * nothing (headless: the shadow is the screen).
+ *
+ * HiDPI (display.c): positions are points, the shadow is the backing
+ * store, scale pixels per point. Images are drawn at their own pixels
+ * per point (shadow_image); one of another scale is scaled. When the
+ * backing store isn't the panel's size, the damaged part is scaled
+ * into srv->panel too, which is what the output shows (srv->out).
  */
 
 #include <sys/mman.h>
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,41 +26,244 @@
 
 #include "server.h"
 
+static void draw_cursor(struct ws_server *srv);
+
+/* Make the shadow (and the panel image) for the current sizes. */
+static int
+images_make(struct ws_server *srv)
+{
+	pixman_image_t *shadow, *panel = NULL;
+
+	shadow = pixman_image_create_bits(PIXMAN_x8r8g8b8,
+	    (int)srv->back_width, (int)srv->back_height, NULL, 0);
+	if (shadow == NULL) {
+		ws_err("can't allocate a %ux%u shadow image", srv->back_width,
+		    srv->back_height);
+		return -1;
+	}
+	if (srv->back_width != srv->panel_width ||
+	    srv->back_height != srv->panel_height) {
+		panel = pixman_image_create_bits(PIXMAN_x8r8g8b8,
+		    (int)srv->panel_width, (int)srv->panel_height, NULL, 0);
+		if (panel == NULL) {
+			ws_err("can't allocate a %ux%u panel image",
+			    srv->panel_width, srv->panel_height);
+			pixman_image_unref(shadow);
+			return -1;
+		}
+	}
+	if (srv->shadow != NULL)
+		pixman_image_unref(srv->shadow);
+	if (srv->panel != NULL)
+		pixman_image_unref(srv->panel);
+	srv->shadow = shadow;
+	srv->panel = panel;
+	srv->out = panel != NULL ? panel : shadow;
+	return 0;
+}
+
 int
 compositor_init(struct ws_server *srv)
 {
-	srv->shadow = pixman_image_create_bits(PIXMAN_x8r8g8b8,
-	    (int)srv->width, (int)srv->height, NULL, 0);
-	if (srv->shadow == NULL) {
-		ws_err("can't allocate a %ux%u shadow image", srv->width,
-		    srv->height);
+	if (images_make(srv) < 0)
 		return -1;
-	}
 	pixman_region32_init(&srv->damage);
 	damage_all(srv);
 	return 0;
 }
 
-/* The screen is now width x height: a new shadow image, all damaged. */
+/* The points, scale or panel changed (display.c): new images, all
+   damaged. */
 int
-compositor_resize(struct ws_server *srv, uint32_t width, uint32_t height)
+compositor_resize(struct ws_server *srv)
 {
-	pixman_image_t *img;
-
-	img = pixman_image_create_bits(PIXMAN_x8r8g8b8, (int)width,
-	    (int)height, NULL, 0);
-	if (img == NULL) {
-		ws_err("can't allocate a %ux%u shadow image", width, height);
+	if (images_make(srv) < 0)
 		return -1;
-	}
-	if (srv->shadow != NULL)
-		pixman_image_unref(srv->shadow);
-	srv->shadow = img;
-	srv->width = width;
-	srv->height = height;
 	pixman_region32_clear(&srv->damage);
 	damage_all(srv);
 	return 0;
+}
+
+/* ---- drawing in points ---- */
+
+/* The panel's pixel for a point (hardware cursor, captures). */
+double
+panel_x(struct ws_server *srv, double x)
+{
+	return x * srv->panel_width / (srv->width ? srv->width : 1);
+}
+
+double
+panel_y(struct ws_server *srv, double y)
+{
+	return y * srv->panel_height / (srv->height ? srv->height : 1);
+}
+
+/*
+ * Draw w x h points of src, an image with src_scale pixels per point,
+ * with its top-left corner at x, y. Another scale than the screen's is
+ * scaled: up by whole steps pixel for pixel (a 1x X window stays
+ * crisp, only bigger), otherwise bilinear.
+ */
+void
+shadow_image(struct ws_server *srv, pixman_op_t op, pixman_image_t *src,
+    uint32_t src_scale, pixman_image_t *mask, int32_t x, int32_t y,
+    int32_t w, int32_t h)
+{
+	int32_t s = (int32_t)srv->scale;
+	pixman_transform_t t;
+
+	if (w <= 0 || h <= 0)
+		return;
+	if (src_scale == 0)
+		src_scale = 1;
+	if ((int32_t)src_scale == s) {
+		pixman_image_composite32(op, src, mask, srv->shadow, 0, 0, 0, 0,
+		    x * s, y * s, w * s, h * s);
+		return;
+	}
+	pixman_transform_init_scale(&t,
+	    pixman_double_to_fixed((double)src_scale / s),
+	    pixman_double_to_fixed((double)src_scale / s));
+	pixman_image_set_transform(src, &t);
+	pixman_image_set_filter(src, s % (int32_t)src_scale == 0 ?
+	    PIXMAN_FILTER_NEAREST : PIXMAN_FILTER_BILINEAR, NULL, 0);
+	pixman_image_composite32(op, src, mask, srv->shadow, 0, 0, 0, 0,
+	    x * s, y * s, w * s, h * s);
+	pixman_image_set_transform(src, NULL);
+	pixman_image_set_filter(src, PIXMAN_FILTER_NEAREST, NULL, 0);
+}
+
+/* Draw sw x sh pixels of src into r (points), bilinear, with a mask. */
+void
+shadow_scaled(struct ws_server *srv, pixman_image_t *src, int sw, int sh,
+    ws_rect_t r, pixman_image_t *mask)
+{
+	int32_t s = (int32_t)srv->scale;
+	pixman_transform_t tr;
+
+	if (r.width <= 0 || r.height <= 0 || sw <= 0 || sh <= 0)
+		return;
+	pixman_transform_init_scale(&tr,
+	    pixman_double_to_fixed((double)sw / (r.width * s)),
+	    pixman_double_to_fixed((double)sh / (r.height * s)));
+	pixman_image_set_transform(src, &tr);
+	pixman_image_set_filter(src, PIXMAN_FILTER_BILINEAR, NULL, 0);
+	pixman_image_set_repeat(src, PIXMAN_REPEAT_PAD);
+	pixman_image_composite32(PIXMAN_OP_OVER, src, mask, srv->shadow, 0, 0,
+	    0, 0, r.x * s, r.y * s, r.width * s, r.height * s);
+	pixman_image_set_transform(src, NULL);
+	pixman_image_set_filter(src, PIXMAN_FILTER_NEAREST, NULL, 0);
+	pixman_image_set_repeat(src, PIXMAN_REPEAT_NONE);
+}
+
+/* Fill w x h points at x, y with a colour (OVER). */
+void
+shadow_fill(struct ws_server *srv, const pixman_color_t *color, int32_t x,
+    int32_t y, int32_t w, int32_t h)
+{
+	int32_t s = (int32_t)srv->scale;
+	pixman_image_t *solid;
+
+	if (w <= 0 || h <= 0)
+		return;
+	solid = pixman_image_create_solid_fill(color);
+	if (solid == NULL)
+		return;
+	pixman_image_composite32(color->alpha == 0xffff ? PIXMAN_OP_SRC :
+	    PIXMAN_OP_OVER, solid, NULL, srv->shadow, 0, 0, 0, 0, x * s, y * s,
+	    w * s, h * s);
+	pixman_image_unref(solid);
+}
+
+/* A region in points as backing pixels. */
+static void
+region_to_back(struct ws_server *srv, pixman_region32_t *in,
+    pixman_region32_t *out)
+{
+	int32_t s = (int32_t)srv->scale;
+	pixman_box32_t *b;
+	int i, n;
+
+	pixman_region32_init(out);
+	b = pixman_region32_rectangles(in, &n);
+	for (i = 0; i < n; i++)
+		pixman_region32_union_rect(out, out, b[i].x1 * s, b[i].y1 * s,
+		    (unsigned)((b[i].x2 - b[i].x1) * s),
+		    (unsigned)((b[i].y2 - b[i].y1) * s));
+}
+
+/* Backing pixels as panel pixels, rounded out (and a pixel more for the
+   filter). */
+static void
+region_to_panel(struct ws_server *srv, pixman_region32_t *in,
+    pixman_region32_t *out)
+{
+	int64_t bw = srv->back_width, bh = srv->back_height;
+	int64_t pw = srv->panel_width, ph = srv->panel_height;
+	int64_t x1, y1, x2, y2;
+	pixman_box32_t *b;
+	int i, n;
+
+	pixman_region32_init(out);
+	b = pixman_region32_rectangles(in, &n);
+	for (i = 0; i < n; i++) {
+		x1 = b[i].x1 * pw / bw - 1;
+		y1 = b[i].y1 * ph / bh - 1;
+		x2 = (b[i].x2 * pw + bw - 1) / bw + 1;
+		y2 = (b[i].y2 * ph + bh - 1) / bh + 1;
+		if (x1 < 0)
+			x1 = 0;
+		if (y1 < 0)
+			y1 = 0;
+		if (x2 > pw)
+			x2 = pw;
+		if (y2 > ph)
+			y2 = ph;
+		if (x2 > x1 && y2 > y1)
+			pixman_region32_union_rect(out, out, (int)x1, (int)y1,
+			    (unsigned)(x2 - x1), (unsigned)(y2 - y1));
+	}
+}
+
+/* Scale `region` (panel pixels) of the shadow into the panel image. */
+static void
+resample(struct ws_server *srv, pixman_region32_t *region)
+{
+	double fx = (double)srv->back_width / srv->panel_width;
+	double fy = (double)srv->back_height / srv->panel_height;
+	pixman_fixed_t *params = NULL;
+	pixman_transform_t t;
+	pixman_box32_t *ext;
+	int n;
+
+	if (!pixman_region32_not_empty(region))
+		return;
+	ext = pixman_region32_extents(region);
+	pixman_transform_init_scale(&t, pixman_double_to_fixed(fx),
+	    pixman_double_to_fixed(fy));
+	pixman_image_set_transform(srv->shadow, &t);
+	if (fx > 1.5 || fy > 1.5)
+		params = pixman_filter_create_separable_convolution(&n,
+		    pixman_double_to_fixed(fx), pixman_double_to_fixed(fy),
+		    PIXMAN_KERNEL_LINEAR, PIXMAN_KERNEL_LINEAR,
+		    PIXMAN_KERNEL_BOX, PIXMAN_KERNEL_BOX, 1, 1);
+	if (params != NULL) {
+		pixman_image_set_filter(srv->shadow,
+		    PIXMAN_FILTER_SEPARABLE_CONVOLUTION, params, n);
+		free(params);
+	} else
+		pixman_image_set_filter(srv->shadow, PIXMAN_FILTER_BILINEAR,
+		    NULL, 0);
+	pixman_image_set_repeat(srv->shadow, PIXMAN_REPEAT_PAD);
+	pixman_image_set_clip_region32(srv->panel, region);
+	pixman_image_composite32(PIXMAN_OP_SRC, srv->shadow, NULL, srv->panel,
+	    ext->x1, ext->y1, 0, 0, ext->x1, ext->y1, ext->x2 - ext->x1,
+	    ext->y2 - ext->y1);
+	pixman_image_set_clip_region32(srv->panel, NULL);
+	pixman_image_set_transform(srv->shadow, NULL);
+	pixman_image_set_filter(srv->shadow, PIXMAN_FILTER_NEAREST, NULL, 0);
+	pixman_image_set_repeat(srv->shadow, PIXMAN_REPEAT_NONE);
 }
 
 void
@@ -62,7 +272,39 @@ compositor_fini(struct ws_server *srv)
 	pixman_region32_fini(&srv->damage);
 	if (srv->shadow != NULL)
 		pixman_image_unref(srv->shadow);
-	srv->shadow = NULL;
+	if (srv->panel != NULL)
+		pixman_image_unref(srv->panel);
+	srv->shadow = srv->panel = srv->out = NULL;
+}
+
+/* The software cursor, at the pointer's backing pixel. */
+static void
+draw_cursor(struct ws_server *srv)
+{
+	int32_t s = (int32_t)srv->scale;
+	uint32_t is = srv->cursor_image_scale ? srv->cursor_image_scale : 1;
+	int32_t x = (int32_t)floor(srv->ptr_x * s) - srv->cursor_hot_x * s;
+	int32_t y = (int32_t)floor(srv->ptr_y * s) - srv->cursor_hot_y * s;
+	int32_t w = pixman_image_get_width(srv->cursor_image);
+	int32_t h = pixman_image_get_height(srv->cursor_image);
+	pixman_transform_t t;
+
+	if ((int32_t)is == s) {
+		pixman_image_composite32(PIXMAN_OP_OVER, srv->cursor_image,
+		    NULL, srv->shadow, 0, 0, 0, 0, x, y, w, h);
+		return;
+	}
+	pixman_transform_init_scale(&t, pixman_double_to_fixed((double)is / s),
+	    pixman_double_to_fixed((double)is / s));
+	pixman_image_set_transform(srv->cursor_image, &t);
+	pixman_image_set_filter(srv->cursor_image, s % (int32_t)is == 0 ?
+	    PIXMAN_FILTER_NEAREST : PIXMAN_FILTER_BILINEAR, NULL, 0);
+	pixman_image_composite32(PIXMAN_OP_OVER, srv->cursor_image, NULL,
+	    srv->shadow, 0, 0, 0, 0, x, y, w * s / (int32_t)is,
+	    h * s / (int32_t)is);
+	pixman_image_set_transform(srv->cursor_image, NULL);
+	pixman_image_set_filter(srv->cursor_image, PIXMAN_FILTER_NEAREST,
+	    NULL, 0);
 }
 
 static void
@@ -112,10 +354,9 @@ composite_window(struct ws_server *srv, struct ws_window *w,
 	if (w->tile_for != NULL) {
 		/* a minimized window's tile (tile.c) */
 		if (w->tile_image != NULL)
-			pixman_image_composite32(PIXMAN_OP_OVER,
-			    w->tile_image, mask, srv->shadow, 0, 0, 0,
-			    0, w->frame.x, w->frame.y, w->frame.width,
-			    w->frame.height);
+			shadow_image(srv, PIXMAN_OP_OVER, w->tile_image,
+			    srv->scale, mask, w->frame.x, w->frame.y,
+			    w->frame.width, w->frame.height);
 		goto out;
 	}
 	if (b == NULL || w->frame.width <= 0 || w->frame.height <= 0)
@@ -130,28 +371,32 @@ composite_window(struct ws_server *srv, struct ws_window *w,
 	    w->frame.x + bw <= ext->x1 || w->frame.y + bh <= ext->y1)
 		goto out;
 	src = b->image;
-	pixman_image_composite32(
+	shadow_image(srv,
 	    mask == NULL && ((w->flags & WS_WINDOW_OPAQUE) ||
 	    b->format == WS_FORMAT_XRGB8888) ? PIXMAN_OP_SRC :
 	    PIXMAN_OP_OVER,
-	    src, mask, srv->shadow, 0, 0, 0, 0,
-	    w->frame.x, w->frame.y, bw, bh);
+	    src, b->scale, mask, w->frame.x, w->frame.y, bw, bh);
 out:
 	if (mask != NULL)
 		pixman_image_unref(mask);
 }
 
+/* Composite `region` (points) into the shadow; `back` gets it in
+   backing pixels. */
 static void
-composite_region(struct ws_server *srv, pixman_region32_t *region)
+composite_region(struct ws_server *srv, pixman_region32_t *region,
+    pixman_region32_t *back)
 {
 	pixman_color_t bg;
 	pixman_image_t *fill;
-	pixman_box32_t *ext;
+	pixman_box32_t *ext, *bext;
 	struct ws_window *w;
 	uint32_t c = srv->cfg.background;
 
-	pixman_image_set_clip_region32(srv->shadow, region);
+	region_to_back(srv, region, back);
+	pixman_image_set_clip_region32(srv->shadow, back);
 	ext = pixman_region32_extents(region);
+	bext = pixman_region32_extents(back);
 
 	bg.red = (uint16_t)(((c >> 16) & 0xff) * 0x101);
 	bg.green = (uint16_t)(((c >> 8) & 0xff) * 0x101);
@@ -159,7 +404,8 @@ composite_region(struct ws_server *srv, pixman_region32_t *region)
 	bg.alpha = 0xffff;
 	fill = pixman_image_create_solid_fill(&bg);
 	pixman_image_composite32(PIXMAN_OP_SRC, fill, NULL, srv->shadow,
-	    0, 0, 0, 0, ext->x1, ext->y1, ext->x2 - ext->x1, ext->y2 - ext->y1);
+	    0, 0, 0, 0, bext->x1, bext->y1, bext->x2 - bext->x1,
+	    bext->y2 - bext->y1);
 	pixman_image_unref(fill);
 
 	if (srv->ov.state != WS_OVERVIEW_STATE_CLOSED) {
@@ -189,30 +435,41 @@ composite_region(struct ws_server *srv, pixman_region32_t *region)
 		ic.green = (uint16_t)(((col >> 8) & 0xff) * 0x101);
 		ic.blue = (uint16_t)((col & 0xff) * 0x101);
 		ic.alpha = 0xffff;
-		fill = pixman_image_create_solid_fill(&ic);
 		capture_indicator_rects(srv, r);
 		for (i = 0; i < 4; i++)
-			pixman_image_composite32(PIXMAN_OP_SRC, fill, NULL,
-			    srv->shadow, 0, 0, 0, 0, r[i].x, r[i].y,
-			    r[i].width, r[i].height);
-		pixman_image_unref(fill);
+			shadow_fill(srv, &ic, r[i].x, r[i].y, r[i].width,
+			    r[i].height);
 	}
 
 	if (!srv->cursor_hw && srv->cursor_visible && srv->cursor_image != NULL &&
 	    !srv->capture_hide_cursor)
-		pixman_image_composite32(PIXMAN_OP_OVER, srv->cursor_image,
-		    NULL, srv->shadow, 0, 0, 0, 0,
-		    srv->cursor_rect.x, srv->cursor_rect.y,
-		    srv->cursor_rect.width, srv->cursor_rect.height);
+		draw_cursor(srv);
 
 	pixman_image_set_clip_region32(srv->shadow, NULL);
+}
+
+/* Composite `region` (points), and scale it to the panel if the panel
+   is another size; `out` gets what changed in srv->out's pixels. */
+static void
+repaint_region(struct ws_server *srv, pixman_region32_t *region,
+    pixman_region32_t *out)
+{
+	pixman_region32_t back;
+
+	composite_region(srv, region, &back);
+	if (srv->panel != NULL) {
+		region_to_panel(srv, &back, out);
+		resample(srv, out);
+		pixman_region32_fini(&back);
+	} else
+		*out = back;
 }
 
 /* Recomposite the damaged region and hand it to the output. */
 void
 compositor_repaint(struct ws_server *srv)
 {
-	pixman_region32_t region;
+	pixman_region32_t region, out;
 	struct ws_window *w;
 	bool async;
 
@@ -234,14 +491,15 @@ compositor_repaint(struct ws_server *srv)
 	pixman_region32_clear(&srv->damage);
 
 	tiles_render(srv);
-	composite_region(srv, &region);
-	capture_screen_damage(srv, &region);
+	repaint_region(srv, &region, &out);
+	capture_screen_damage(srv, &out);
 	for (w = srv->windows; w != NULL; w = w->next)
 		if (w->frame_requested) {
 			w->frame_requested = false;
 			w->frame_inflight = true;
 		}
-	async = srv->output->present(srv, &region);
+	async = srv->output->present(srv, &out);
+	pixman_region32_fini(&out);
 	pixman_region32_fini(&region);
 	if (async)
 		srv->present_pending = true;
@@ -268,7 +526,7 @@ compositor_cursor_in_shadow(struct ws_server *srv)
 void
 compositor_capture_overlays(struct ws_server *srv, bool hide, bool cursor)
 {
-	pixman_region32_t reg;
+	pixman_region32_t reg, out;
 	ws_rect_t r[5];
 	int i, n = 0;
 
@@ -287,8 +545,10 @@ compositor_capture_overlays(struct ws_server *srv, bool hide, bool cursor)
 		    (unsigned)r[i].width, (unsigned)r[i].height);
 		pixman_region32_intersect_rect(&reg, &reg, 0, 0, srv->width,
 		    srv->height);
-		if (pixman_region32_not_empty(&reg))
-			composite_region(srv, &reg);
+		if (pixman_region32_not_empty(&reg)) {
+			repaint_region(srv, &reg, &out);
+			pixman_region32_fini(&out);
+		}
 		pixman_region32_fini(&reg);
 	}
 }
@@ -299,8 +559,8 @@ compositor_capture_overlays(struct ws_server *srv, bool hide, bool cursor)
 int
 snapshot_memfd(struct ws_server *srv, uint32_t *stride_out)
 {
-	uint32_t stride = srv->width * 4;
-	size_t size = (size_t)stride * srv->height;
+	uint32_t stride = srv->panel_width * 4;
+	size_t size = (size_t)stride * srv->panel_height;
 	pixman_image_t *dst;
 	void *p;
 	int fd;
@@ -318,11 +578,11 @@ snapshot_memfd(struct ws_server *srv, uint32_t *stride_out)
 		close(fd);
 		return -1;
 	}
-	dst = pixman_image_create_bits(PIXMAN_x8r8g8b8, (int)srv->width,
-	    (int)srv->height, p, (int)stride);
+	dst = pixman_image_create_bits(PIXMAN_x8r8g8b8, (int)srv->panel_width,
+	    (int)srv->panel_height, p, (int)stride);
 	if (dst != NULL) {
-		pixman_image_composite32(PIXMAN_OP_SRC, srv->shadow, NULL, dst,
-		    0, 0, 0, 0, 0, 0, srv->width, srv->height);
+		pixman_image_composite32(PIXMAN_OP_SRC, srv->out, NULL, dst,
+		    0, 0, 0, 0, 0, 0, srv->panel_width, srv->panel_height);
 		pixman_image_unref(dst);
 	}
 	munmap(p, size);
@@ -342,23 +602,23 @@ snapshot_write_ppm(struct ws_server *srv, const char *path)
 	f = fopen(path, "wb");
 	if (f == NULL)
 		return -1;
-	row = malloc((size_t)srv->width * 3);
+	row = malloc((size_t)srv->panel_width * 3);
 	if (row == NULL) {
 		fclose(f);
 		return -1;
 	}
-	px = pixman_image_get_data(srv->shadow);
-	stride = (uint32_t)pixman_image_get_stride(srv->shadow) / 4;
-	fprintf(f, "P6\n%u %u\n255\n", srv->width, srv->height);
-	for (y = 0; y < srv->height; y++) {
-		for (x = 0; x < srv->width; x++) {
+	px = pixman_image_get_data(srv->out);
+	stride = (uint32_t)pixman_image_get_stride(srv->out) / 4;
+	fprintf(f, "P6\n%u %u\n255\n", srv->panel_width, srv->panel_height);
+	for (y = 0; y < srv->panel_height; y++) {
+		for (x = 0; x < srv->panel_width; x++) {
 			uint32_t p = px[y * stride + x];
 
 			row[x * 3] = (unsigned char)(p >> 16);
 			row[x * 3 + 1] = (unsigned char)(p >> 8);
 			row[x * 3 + 2] = (unsigned char)p;
 		}
-		fwrite(row, 3, srv->width, f);
+		fwrite(row, 3, srv->panel_width, f);
 	}
 	free(row);
 	return fclose(f);

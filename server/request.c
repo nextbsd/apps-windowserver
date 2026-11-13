@@ -259,8 +259,8 @@ handle_snapshot(struct ws_server *srv, struct ws_client *c,
 	}
 	reply_status(item, seq, 0);
 	event_init(srv, &ev, WS_EVENT_SNAPSHOT, sizeof(ev.u.snapshot), 0);
-	ev.u.snapshot.width = srv->width;
-	ev.u.snapshot.height = srv->height;
+	ev.u.snapshot.width = srv->panel_width;	/* pixels */
+	ev.u.snapshot.height = srv->panel_height;
 	ev.u.snapshot.stride = stride;
 	ev.u.snapshot.format = WS_FORMAT_XRGB8888;
 	ev.u.snapshot.fd = -1;

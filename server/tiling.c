@@ -875,6 +875,12 @@ tiling_draw_border(struct ws_server *srv, struct ws_window *w)
 	b[2] = (pixman_box32_t){ f->x - bw, f->y, f->x, f->y + f->height };
 	b[3] = (pixman_box32_t){ f->x + f->width, f->y, f->x + f->width + bw,
 	    f->y + f->height };
+	for (int i = 0; i < 4; i++) {	/* points to backing pixels */
+		b[i].x1 *= (int32_t)srv->scale;
+		b[i].y1 *= (int32_t)srv->scale;
+		b[i].x2 *= (int32_t)srv->scale;
+		b[i].y2 *= (int32_t)srv->scale;
+	}
 	pixman_image_fill_boxes(PIXMAN_OP_SRC, srv->shadow, &col, 4, b);
 }
 

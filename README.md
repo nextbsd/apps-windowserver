@@ -86,7 +86,7 @@ Not done yet:
 - Waiting for the GPU kext's IOKit match, and display hotplug through IOKit.
 - Touch, tablets, gestures other than swipes up and down, and switches. Per-device keyboard settings.
 - Skipping windows hidden behind opaque ones while compositing.
-- GPU compositing (EGL/GBM), several displays, HiDPI.
+- GPU compositing (EGL/GBM), several displays (HiDPI is per display, but there's one display for now).
 - A focus-stealing policy: today any app can make itself active.
 - loginwindow, the lock shield and the app switcher. Their window levels are reserved.
 
@@ -294,6 +294,17 @@ The usable area is the part of the screen windows should use: the screen minus t
 - **The menu bar strip.** In the Mac menu style (`NBMenuStyle` `macmenubar`, nextbsd/libs-back#3) each GNUstep app draws its main menu as a bar along the top, and tells the server its height with `WS_MSG_SET_MENU_BAR` (`ws_set_menu_bar()`, 0 for no bar; servers with `WS_SERVER_MENU_BAR`). Only the **active app** sets the strip: every app draws its own bar, so there's no separate menu-bar process to trust, and the active app's bar is the one on top. Its report counts when it becomes active; an active app that never reported (an X11 app, an app without a main menu) leaves the strip of the last active app that did, which may still change or clear it, so the strip doesn't come and go with the focus; when that app goes away there is none. Other inactive apps' reports wait until they're activated. Tools and Docks get `EPERM`, and a bar taller than a quarter of the screen `EINVAL`. The welcome and `WS_EVENT_USABLE_AREA` carry the strip's height (`menu_bar`, `ws_menu_bar_height()`), so a top Dock can sit directly below the bar; its `WS_MSG_DOCK_SET_EDGE` thickness counts from there. Window tiling keeps both strips free. Details in "The menu bar strip" in `WSProtocol.h`.
 
 `wsctl screen` prints the screen's size, its usable area and the menu bar strip, `wsctl menubar HEIGHT [SECONDS] [inactive]` connects as an app with a menu bar that high (active unless `inactive`) and prints the usable area that follows, `wsctl screen size WxH` changes a headless screen's size and prints the events that follow, and `wsctl screen watch [SECONDS]` prints screen and usable-area changes as they come.
+
+### HiDPI
+
+Servers with `WS_SERVER_SCALE` lay the screen out in **points** and draw it at a **backing scale**, as macOS does Retina displays. `ws_screen_info_t.width`/`height` are points and `.scale` (1, 2 or 3) the backing pixels per point, in the welcome and in `WS_EVENT_SCREEN_CHANGED`; frames, damage, pointer coordinates (with sub-point precision), the usable area and hot spots are all points. A window of W x H points attaches a W·scale x H·scale buffer made with that scale (`ws_buffer_create`'s last argument) and is drawn sharp; a buffer of another scale is scaled to the window's size, so older clients show at the right size, just less sharp. `WS_PROTOCOL_VERSION` stays 1.
+
+- **"Looks like" sizes.** Apps only ever draw at an integer scale. A "looks like" size that isn't the panel divided by an integer is composited at 2x of that size and the frame is scaled to the panel: looks like 2048 x 1152 on a 3840 x 2160 panel is a 4096 x 2304 backing store shown at 3840 x 2160. A 4K panel offers 1920 x 1080, 2048 x 1152, 2560 x 1440, 3008 x 1692 and 3840 x 2160 (1x).
+- **The default.** 1x for ordinary displays (below about 125 ppi, or under 2560 pixels wide); exactly 2x for HiDPI ones, as macOS does: a 32" 4K monitor looks like 1920 x 1080. When the EDID's physical size is missing or made up (virtual machines: QEMU reports about 100 dpi whatever the size), it goes by the pixels: 3840 x 2160 or larger is 2x.
+- **Choosing.** The user's choice is kept per display (EDID vendor-product-serial) for every user in `/Library/Preferences/org.nextbsd.windowserver.displays.plist`, which WindowServer writes. Any console user may change it, with no password: Displays.app (nextbsd/apps-settings), `wsctl display looks-like WxH|default`, or the `DisplayLooksLike` setting through `WS_MSG_SET_SETTINGS`. It applies at once. `DisplayDefaultLooksLike` in `org.nextbsd.WindowServer.plist` is the system's choice for displays the user hasn't picked one for, `DisplayScale` (`Auto`, 1, 2, 3; `wsctl display scale`) forces an integer scale, and `DisplayPanelMode` (`Preferred` or `WxH[@Hz]`) the panel's mode. `wsctl display` lists the display, its sizes and the one in use (the read-only `Display*` entries of `WS_MSG_GET_SETTINGS`).
+- **WindowServer's own drawing** follows the scale: the built-in cursors, minimize tiles, overview previews, the capture border; screenshots and screen captures are the panel's pixels.
+
+Details in "HiDPI" in `WSProtocol.h`.
 
 ### Window tiling
 

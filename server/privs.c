@@ -43,6 +43,7 @@ privs_drop(struct ws_server *srv)
 	if (ngroups == 0 || groups[0] != pw->pw_gid)
 		groups[ngroups++] = pw->pw_gid;
 
+	display_store_chown(srv, pw->pw_uid, groups[0]);
 	if (srv->socket_dir_created &&
 	    chown(srv->socket_dir, pw->pw_uid, groups[0]) < 0)
 		ws_warn("chown %s: %s", srv->socket_dir, strerror(errno));

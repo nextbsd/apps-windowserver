@@ -106,8 +106,10 @@ image_place(struct ws_server *srv, double x, double y)
 	}
 	d->image_rect.x = (int32_t)lround(x);
 	d->image_rect.y = (int32_t)lround(y);
-	d->image_rect.width = pixman_image_get_width(d->image);
-	d->image_rect.height = pixman_image_get_height(d->image);
+	d->image_rect.width = pixman_image_get_width(d->image) /
+	    (int32_t)d->image_scale;
+	d->image_rect.height = pixman_image_get_height(d->image) /
+	    (int32_t)d->image_scale;
 	damage_rect(srv, &d->image_rect);
 }
 
@@ -133,9 +135,9 @@ drag_composite(struct ws_server *srv)
 	a.red = a.green = a.blue = 0;
 	a.alpha = (uint16_t)(DRAG_IMAGE_OPACITY * 0xffff);
 	mask = pixman_image_create_solid_fill(&a);
-	pixman_image_composite32(PIXMAN_OP_OVER, d->image, mask, srv->shadow,
-	    0, 0, 0, 0, d->image_rect.x, d->image_rect.y,
-	    d->image_rect.width, d->image_rect.height);
+	shadow_image(srv, PIXMAN_OP_OVER, d->image, d->image_scale, mask,
+	    d->image_rect.x, d->image_rect.y, d->image_rect.width,
+	    d->image_rect.height);
 	if (mask != NULL)
 		pixman_image_unref(mask);
 }
@@ -145,11 +147,11 @@ static int
 image_copy(struct ws_buffer *b, pixman_image_t **out)
 {
 	pixman_image_t *img, *src;
-	int w = (int)(b->width / b->scale), h = (int)(b->height / b->scale);
+	int w = (int)b->width, h = (int)b->height;	/* all its pixels */
 
 	*out = NULL;
-	if (w <= 0 || h <= 0 || w > WS_MAX_DRAG_IMAGE ||
-	    h > WS_MAX_DRAG_IMAGE)
+	if (w <= 0 || h <= 0 || w / (int)b->scale > WS_MAX_DRAG_IMAGE ||
+	    h / (int)b->scale > WS_MAX_DRAG_IMAGE)
 		return EINVAL;
 	img = pixman_image_create_bits(PIXMAN_a8r8g8b8, w, h, NULL, 0);
 	src = pixman_image_create_bits(b->format == WS_FORMAT_XRGB8888 ?
@@ -504,6 +506,7 @@ drag_begin(struct ws_server *srv, struct ws_client *c,
 			return;
 		}
 		err = image_copy(b, &img);
+		d->image_scale = b->scale;
 		if (err != 0) {
 			reply_session(item, m->hdr.seq, err, 0);
 			return;
