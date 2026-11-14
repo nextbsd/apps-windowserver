@@ -373,10 +373,7 @@ tile_render(struct ws_server *srv, struct ws_window *t)
 			dh = 1;
 		/* A view of the buffer's pixels without the compositor's
 		 * own transform. */
-		src = pixman_image_create_bits(b->format == WS_FORMAT_XRGB8888 ?
-		    PIXMAN_x8r8g8b8 : PIXMAN_a8r8g8b8, (int)b->width,
-		    (int)b->height, pixman_image_get_data(b->image),
-		    (int)b->stride);
+		src = buffer_view_image(srv, b);
 		if (src != NULL) {
 			tile_scale(src, t->tile_image, (s - dw) / 2,
 			    (s - dh) / 2, dw, dh, cw, ch);
@@ -435,10 +432,7 @@ tile_set_app_icon(struct ws_server *srv, struct ws_client *c,
 			return EINVAL;
 		img = pixman_image_create_bits(PIXMAN_a8r8g8b8, (int)b->width,
 		    (int)b->height, NULL, 0);
-		src = pixman_image_create_bits(b->format == WS_FORMAT_XRGB8888 ?
-		    PIXMAN_x8r8g8b8 : PIXMAN_a8r8g8b8, (int)b->width,
-		    (int)b->height, pixman_image_get_data(b->image),
-		    (int)b->stride);
+		src = buffer_view_image(srv, b);
 		if (img == NULL || src == NULL) {
 			if (img != NULL)
 				pixman_image_unref(img);

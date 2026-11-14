@@ -263,8 +263,8 @@ conn_readable(struct ws_server *srv, struct ws_conn *conn)
 	event_init(srv, &ev, WS_EVENT_WELCOME, sizeof(ev.u.welcome), 0);
 	ev.u.welcome.client_id = c->id;
 	ev.u.welcome.protocol_version = WS_PROTOCOL_VERSION;
-	ev.u.welcome.server_flags = (srv->headless ? WS_SERVER_HEADLESS : 0) |
-	    (srv->cursor_hw ? WS_SERVER_HW_CURSOR : 0) | WS_SERVER_FEATURES;
+	ev.u.welcome.server_flags = server_flags(srv) |
+	    (srv->cursor_hw ? WS_SERVER_HW_CURSOR : 0);
 	ev.u.welcome.screen_count = 1;
 	screen_info(srv, &ev.u.welcome.screen);
 	ev.u.welcome.usable = srv->usable;
@@ -451,14 +451,129 @@ client_buffer(struct ws_client *c, uint32_t id)
 void
 buffer_unref(struct ws_server *srv, struct ws_buffer *b)
 {
-	(void)srv;
 	if (b == NULL || --b->refs > 0)
 		return;
+	if (b->dmabuf) {
+		if (srv->renderer->buffer_gone != NULL)
+			srv->renderer->buffer_gone(srv, b);
+		close(b->fd);
+	}
+	if (b->readback != NULL)
+		pixman_image_unref(b->readback);
 	if (b->image != NULL)
 		pixman_image_unref(b->image);
 	if (b->map != NULL && b->map != MAP_FAILED)
 		munmap(b->map, b->map_size);
 	free(b);
+}
+
+/*
+ * The buffer's pixels for the CPU: its own image, or for a GPU buffer
+ * what the renderer reads back of it (once per commit), or NULL.
+ */
+pixman_image_t *
+buffer_pixels(struct ws_server *srv, struct ws_buffer *b)
+{
+	if (b == NULL || !b->dmabuf)
+		return b != NULL ? b->image : NULL;
+	if (b->readback != NULL && b->readback_gen == b->gen)
+		return b->readback;
+	if (srv->renderer->buffer_read == NULL)
+		return NULL;
+	if (b->readback != NULL)
+		pixman_image_unref(b->readback);
+	b->readback = srv->renderer->buffer_read(srv, b);
+	b->readback_gen = b->gen;
+	return b->readback;
+}
+
+/* A new view of the buffer's pixels (buffer_pixels) in its own
+   format, without the compositor's transform; the caller unrefs it. */
+pixman_image_t *
+buffer_view_image(struct ws_server *srv, struct ws_buffer *b)
+{
+	pixman_image_t *img = buffer_pixels(srv, b);
+
+	if (img == NULL)
+		return NULL;
+	return pixman_image_create_bits(b->format == WS_FORMAT_XRGB8888 ?
+	    PIXMAN_x8r8g8b8 : PIXMAN_a8r8g8b8, (int)b->width, (int)b->height,
+	    pixman_image_get_data(img), pixman_image_get_stride(img));
+}
+
+/* What this server does, for the hello and the welcome. */
+uint32_t
+server_flags(struct ws_server *srv)
+{
+	return (srv->headless ? WS_SERVER_HEADLESS : 0) | WS_SERVER_FEATURES |
+	    (srv->renderer != NULL && srv->renderer->buffer_import != NULL ?
+	    WS_SERVER_DMABUF : 0);
+}
+
+/* Is buffer id new for client c? Says why not. */
+static bool
+buffer_id_free(struct ws_server *srv, struct ws_client *c, uint32_t type,
+    uint32_t id)
+{
+	if (id == 0 || client_buffer(c, id) != NULL) {
+		client_error(srv, c, type, 0, EEXIST,
+		    "bad or duplicate buffer id");
+		return false;
+	}
+	return true;
+}
+
+static void
+buffer_create_dmabuf(struct ws_server *srv, struct ws_client *c,
+    const ws_sock_buffer_dmabuf_t *m, int fd)
+{
+	struct ws_buffer *b;
+
+	if (!buffer_id_free(srv, c, WS_SOCK_BUFFER_CREATE_DMABUF, m->buffer_id))
+		return;
+	if (srv->renderer->buffer_import == NULL) {
+		client_error(srv, c, WS_SOCK_BUFFER_CREATE_DMABUF, 0, ENOTSUP,
+		    "this server doesn't composite on a GPU");
+		return;
+	}
+	if ((m->format != WS_FORMAT_ARGB8888 &&
+	    m->format != WS_FORMAT_XRGB8888) || m->width == 0 ||
+	    m->height == 0 || m->width > 16384 || m->height > 16384 ||
+	    m->stride == 0) {
+		client_error(srv, c, WS_SOCK_BUFFER_CREATE_DMABUF, 0, EINVAL,
+		    "bad buffer geometry or format");
+		return;
+	}
+	b = calloc(1, sizeof(*b));
+	if (b == NULL)
+		return;
+	b->id = m->buffer_id;
+	b->owner = c;
+	b->width = m->width;
+	b->height = m->height;
+	b->stride = m->stride;
+	b->offset = m->offset;
+	b->modifier = m->modifier;
+	b->scale = m->scale ? m->scale : 1;
+	if (b->scale > 4)
+		b->scale = 4;
+	b->format = m->format;
+	b->dmabuf = true;
+	b->fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	if (b->fd < 0 || !srv->renderer->buffer_import(srv, b)) {
+		client_error(srv, c, WS_SOCK_BUFFER_CREATE_DMABUF, 0, EINVAL,
+		    "the GPU can't use this buffer");
+		if (b->fd >= 0)
+			close(b->fd);
+		free(b);
+		return;
+	}
+	b->refs = 1;
+	b->client_ref = true;
+	b->next = c->buffers;
+	c->buffers = b;
+	ws_debug("client %u: GPU buffer %u %ux%u modifier 0x%llx", c->id,
+	    b->id, b->width, b->height, (unsigned long long)b->modifier);
 }
 
 static void
@@ -556,6 +671,7 @@ client_parse(struct ws_server *srv, struct ws_client *c)
 {
 	ws_sock_header_t hdr;
 	ws_sock_buffer_t bm;
+	ws_sock_buffer_dmabuf_t dm;
 	int fd;
 
 	while (!c->dead && c->rlen >= sizeof(hdr)) {
@@ -576,6 +692,17 @@ client_parse(struct ws_server *srv, struct ws_client *c)
 				    "buffer message without a descriptor");
 			else {
 				buffer_create(srv, c, &bm, fd);
+				close(fd);
+			}
+		} else if (hdr.type == WS_SOCK_BUFFER_CREATE_DMABUF &&
+		    hdr.size == sizeof(dm)) {
+			memcpy(&dm, c->rbuf, sizeof(dm));
+			fd = client_fd_take(c);
+			if (fd < 0)
+				client_error(srv, c, hdr.type, 0, EBADF,
+				    "buffer message without a descriptor");
+			else {
+				buffer_create_dmabuf(srv, c, &dm, fd);
 				close(fd);
 			}
 		} else {

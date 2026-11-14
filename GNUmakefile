@@ -46,9 +46,12 @@ PKG_LIBS	:= $(shell $(PKG_CONFIG) --libs $(PKGS))
 GLES_PKGS	= egl gbm glesv2
 GLES		?= $(shell $(PKG_CONFIG) --exists $(GLES_PKGS) && echo yes)
 ifeq ($(GLES),yes)
-PKG_CFLAGS	+= -DWS_HAVE_GLES $(shell $(PKG_CONFIG) --cflags $(GLES_PKGS))
-PKG_LIBS	+= $(shell $(PKG_CONFIG) --libs $(GLES_PKGS)) \
+GLES_CFLAGS	:= $(shell $(PKG_CONFIG) --cflags $(GLES_PKGS) libdrm)
+GLES_LIBS	:= $(shell $(PKG_CONFIG) --libs $(GLES_PKGS)) \
 		   -Wl,-rpath,$(shell $(PKG_CONFIG) --variable=libdir egl)
+PKG_CFLAGS	+= -DWS_HAVE_GLES $(GLES_CFLAGS)
+PKG_LIBS	+= $(GLES_LIBS)
+GLES_TOOLS	= $(B)/wsgldemo
 endif
 
 WARN		= -Wall -Wextra -Wshadow -Wpointer-arith \
@@ -72,7 +75,7 @@ HEADERS		= $(wildcard include/WindowServer/*.h)
 
 all: $(B)/WindowServer $(B)/$(LIB_SO) $(B)/$(LIB_NAME).a $(B)/wstest $(B)/wsctl \
      $(B)/wspointer $(B)/wstiling $(B)/wsdrag $(B)/wsclear $(B)/wscapture \
-     $(B)/WindowServerClient.pc
+     $(B)/WindowServerClient.pc $(GLES_TOOLS)
 
 $(B)/server/%.o: server/%.c server/server.h $(HEADERS)
 	@mkdir -p $(dir $@)
@@ -122,6 +125,14 @@ $(B)/wsclear: $(B)/tools/wsclear.o $(B)/$(LIB_NAME).a
 
 $(B)/wscapture: $(B)/tools/wscapture.o $(B)/$(LIB_NAME).a
 	$(CC) $(LDFLAGS) -o $@ $< $(B)/$(LIB_NAME).a $(MACH_LIBS)
+
+# A GPU-buffer client (WS_SERVER_DMABUF), built with the GPU renderer.
+$(B)/tools/wsgldemo.o: tools/wsgldemo.c $(HEADERS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(GLES_CFLAGS) -c -o $@ $<
+
+$(B)/wsgldemo: $(B)/tools/wsgldemo.o $(B)/$(LIB_NAME).a
+	$(CC) $(LDFLAGS) -o $@ $< $(B)/$(LIB_NAME).a $(GLES_LIBS) $(MACH_LIBS)
 
 $(B)/WindowServerClient.pc: WindowServerClient.pc.in
 	@mkdir -p $(B)

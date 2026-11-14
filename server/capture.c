@@ -569,7 +569,10 @@ capture_fill(struct ws_server *srv, struct ws_capture *s, int i)
 		if (w != NULL && w->buffer != NULL) {
 			pixman_region32_intersect_rect(&region, &region, 0, 0,
 			    w->buffer->width, w->buffer->height);
-			copy_region(s, b, w->buffer->image, 0, 0, &region);
+			pixman_image_t *src = buffer_pixels(srv, w->buffer);
+
+			if (src != NULL)
+				copy_region(s, b, src, 0, 0, &region);
 		}
 	}
 	memset(&b->cursor, 0, sizeof(b->cursor));

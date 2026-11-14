@@ -137,7 +137,7 @@ drag_composite(struct ws_server *srv)
 
 /* A copy of the client's buffer, so the client may destroy it. */
 static int
-image_copy(struct ws_buffer *b, pixman_image_t **out)
+image_copy(struct ws_server *srv, struct ws_buffer *b, pixman_image_t **out)
 {
 	pixman_image_t *img, *src;
 	int w = (int)b->width, h = (int)b->height;	/* all its pixels */
@@ -147,9 +147,7 @@ image_copy(struct ws_buffer *b, pixman_image_t **out)
 	    h / (int)b->scale > WS_MAX_DRAG_IMAGE)
 		return EINVAL;
 	img = pixman_image_create_bits(PIXMAN_a8r8g8b8, w, h, NULL, 0);
-	src = pixman_image_create_bits(b->format == WS_FORMAT_XRGB8888 ?
-	    PIXMAN_x8r8g8b8 : PIXMAN_a8r8g8b8, (int)b->width, (int)b->height,
-	    pixman_image_get_data(b->image), (int)b->stride);
+	src = buffer_view_image(srv, b);
 	if (img == NULL || src == NULL) {
 		if (img != NULL)
 			pixman_image_unref(img);
@@ -498,7 +496,7 @@ drag_begin(struct ws_server *srv, struct ws_client *c,
 			reply_session(item, m->hdr.seq, ENOENT, 0);
 			return;
 		}
-		err = image_copy(b, &img);
+		err = image_copy(srv, b, &img);
 		d->image_scale = b->scale;
 		if (err != 0) {
 			reply_session(item, m->hdr.seq, err, 0);

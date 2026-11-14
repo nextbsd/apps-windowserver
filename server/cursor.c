@@ -459,7 +459,7 @@ cursor_update(struct ws_server *srv)
 		visible = true;
 	}
 	if (kind == WS_CURSOR_CUSTOM && buf != NULL) {
-		img = buf->image;
+		img = buf->image;	/* NULL for a GPU buffer: the arrow */
 		iscale = buf->scale ? buf->scale : 1;	/* hot spot: points */
 	} else {
 		/* A kind this server doesn't know gets the arrow. */

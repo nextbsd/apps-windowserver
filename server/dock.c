@@ -549,9 +549,7 @@ dock_preview_memfd(struct ws_server *srv, struct ws_window *w, int max,
 		goto fail;
 	dst = pixman_image_create_bits(PIXMAN_a8r8g8b8, dw, dh, p,
 	    (int)*stride);
-	src = pixman_image_create_bits(b->format == WS_FORMAT_XRGB8888 ?
-	    PIXMAN_x8r8g8b8 : PIXMAN_a8r8g8b8, (int)b->width, (int)b->height,
-	    pixman_image_get_data(b->image), (int)b->stride);
+	src = buffer_view_image(srv, b);
 	if (dst != NULL && src != NULL)
 		tile_scale(src, dst, 0, 0, dw, dh, cw, ch);
 	if (src != NULL)

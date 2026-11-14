@@ -885,6 +885,8 @@ window_commit(struct ws_server *srv, struct ws_window *w, uint32_t flags,
 			pixman_region32_fini(&r);
 		}
 	}
+	if (w->buffer != NULL)
+		w->buffer->gen++;	/* what it shows may have changed */
 	if (srv->renderer->window_commit != NULL)
 		srv->renderer->window_commit(srv, w,
 		    full ? NULL : &w->pending_damage);
