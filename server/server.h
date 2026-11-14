@@ -648,6 +648,9 @@ struct ws_renderer_ops {
 	void	(*buffer_gone)(struct ws_server *srv, struct ws_buffer *b);
 	pixman_image_t *(*buffer_read)(struct ws_server *srv,
 		    struct ws_buffer *b);
+	/* A renderer without srv->out (NULL: none): the screen in panel
+	 * pixels for captures, brought up to date; NULL when it can't. */
+	pixman_image_t *(*screen_read)(struct ws_server *srv);
 };
 
 struct ws_mach_item {

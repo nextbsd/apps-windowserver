@@ -9,8 +9,10 @@
  * Each frame is drawn into a GBM surface the size of the panel; when it
  * ends, the DRM output flips to that buffer (gles_scanout) and the
  * buffer before it goes back to GBM once the flip is done
- * (gles_presented). Nothing here reads pixels back: srv->out stays NULL,
- * and captures and snapshots need the pixman renderer for now (T8).
+ * (gles_presented). srv->out stays NULL: the GBM buffers can't be read
+ * back here (Mesa can't map a scanout buffer). Captures of the screen
+ * read it with gles_screen_read instead (T8); snapshots still need the
+ * pixman renderer.
  *
  * gles_open() runs as root, before privileges are dropped, because
  * eglInitialize is where Mesa opens the render node.
@@ -29,8 +31,15 @@
  * times slower. CPU users of such a window's pixels (tiles, previews,
  * window captures) get them read back on the GPU (gles_buffer_read).
  *
+ * Screen captures (T8): while something reads the screen, every draw is
+ * done a second time into a texture of the panel's size, with the same
+ * clip but only this frame's own damage, so the texture always holds
+ * the whole screen. gles_screen_read reads back where it changed since
+ * the last read, into a CPU image. Nobody reading for a few seconds
+ * stops it.
+ *
  * Still to come (nextbsd/nextbsd#642): a backing store of another size
- * than the panel (T7) and readback of the screen (T8).
+ * than the panel (T7).
  */
 
 #include <dirent.h>
@@ -124,6 +133,17 @@ struct gles {
 	unsigned long	vframes, vbad;
 	EGLint		egl_age;	/* what EGL said this frame */
 	struct { struct gbm_bo *bo; unsigned long frame; } seen[8];
+	/* screen captures (T8): the second copy of the screen, and what
+	   of it the CPU image lacks */
+	bool		cap_on;
+	bool		cap_fresh;	/* not drawn whole yet */
+	uint64_t	cap_used;	/* ws_now_usec() of the last read */
+	GLuint		cap_fbo, cap_tex;
+	pixman_region32_t cap_clip;	/* this frame's, backing pixels */
+	pixman_region32_t cap_dirty;	/* not read back, backing pixels */
+	pixman_image_t	*cap_img;	/* x8r8g8b8, the panel's size */
+	uint8_t		*cap_rows;	/* glReadPixels lands here */
+	bool		read_bgra;	/* GL_EXT_read_format_bgra */
 	struct gbm_bo	*front;		/* on screen */
 	struct gbm_bo	*retired;	/* on screen until the last flip */
 	struct gbm_bo	*pending;	/* flipped to, not yet on screen */
@@ -427,6 +447,7 @@ gles_init(struct ws_server *srv)
 	gl.bgra = ext != NULL && has_ext(ext, "GL_EXT_texture_format_BGRA8888");
 	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &gl.max_tex);
 	gl.verify = getenv("WS_GL_VERIFY") != NULL;
+	gl.read_bgra = ext != NULL && has_ext(ext, "GL_EXT_read_format_bgra");
 	gl.unpack_row = ext != NULL && has_ext(ext, "GL_EXT_unpack_subimage");
 	gl.buffer_age = has_ext(eglQueryString(gl.dpy, EGL_EXTENSIONS),
 	    "EGL_EXT_buffer_age");
@@ -451,6 +472,9 @@ gles_init(struct ws_server *srv)
 	pixman_region32_init(&gl.clip);
 	pixman_region32_init(&gl.frame_damage);
 	pixman_region32_init(&gl.mclip);
+	pixman_region32_init(&gl.cap_clip);
+	pixman_region32_init(&gl.cap_dirty);
+	gl.cap_on = false;
 	if (gl.verify) {
 		glGenTextures(1, &gl.mirror_tex);
 		glBindTexture(GL_TEXTURE_2D, gl.mirror_tex);
@@ -497,6 +521,134 @@ fail:
 
 static void gles_window_gone(struct ws_server *srv, struct ws_window *w);
 
+/* ---- screen captures (T8) ---- */
+
+/* A capture reads nothing for this long: stop the second copy. */
+#define GLES_CAP_IDLE_USEC	3000000
+
+static void
+cap_stop(void)
+{
+	if (gl.cap_fbo != 0)
+		glDeleteFramebuffers(1, &gl.cap_fbo);
+	if (gl.cap_tex != 0)
+		glDeleteTextures(1, &gl.cap_tex);
+	gl.cap_fbo = gl.cap_tex = 0;
+	if (gl.cap_img != NULL)
+		pixman_image_unref(gl.cap_img);
+	gl.cap_img = NULL;
+	free(gl.cap_rows);
+	gl.cap_rows = NULL;
+	if (gl.cap_on)
+		ws_info("renderer: screen capture copy stopped");
+	gl.cap_on = false;
+}
+
+static bool
+cap_start(void)
+{
+	gl.cap_img = pixman_image_create_bits(PIXMAN_x8r8g8b8,
+	    (int)gl.width, (int)gl.height, NULL, 0);
+	gl.cap_rows = malloc((size_t)gl.width * gl.height * 4);
+	if (gl.cap_img == NULL || gl.cap_rows == NULL) {
+		cap_stop();
+		return false;
+	}
+	glGenTextures(1, &gl.cap_tex);
+	glBindTexture(GL_TEXTURE_2D, gl.cap_tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)gl.width,
+	    (GLsizei)gl.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glGenFramebuffers(1, &gl.cap_fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl.cap_fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+	    GL_TEXTURE_2D, gl.cap_tex, 0);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
+	    GL_FRAMEBUFFER_COMPLETE) {
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		ws_warn("renderer: no framebuffer for screen captures");
+		cap_stop();
+		return false;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	pixman_region32_clear(&gl.cap_dirty);
+	gl.cap_on = true;
+	gl.cap_fresh = true;
+	ws_info("renderer: screen capture copy started (%ux%u, %s readback)",
+	    gl.width, gl.height, gl.read_bgra ? "BGRA" : "RGBA");
+	return true;
+}
+
+/* frame's own damage (points) at scale s, within back: the pixels a
+   copy that has every earlier frame lacks */
+static void
+own_clip(pixman_region32_t *dst, pixman_region32_t *back, int s)
+{
+	pixman_box32_t *b;
+	int i, n;
+
+	pixman_region32_clear(dst);
+	b = pixman_region32_rectangles(&gl.frame_damage, &n);
+	for (i = 0; i < n; i++)
+		pixman_region32_union_rect(dst, dst, b[i].x1 * s, b[i].y1 * s,
+		    (unsigned)((b[i].x2 - b[i].x1) * s),
+		    (unsigned)((b[i].y2 - b[i].y1) * s));
+	pixman_region32_intersect(dst, dst, back);
+}
+
+/* The screen for captures: what changed read back, in panel pixels. */
+static pixman_image_t *
+gles_screen_read(struct ws_server *srv)
+{
+	pixman_box32_t *b;
+	uint32_t *img;
+	uint8_t *src;
+	int i, n, x, y, w, h, stride;
+
+	if (gl.ctx == EGL_NO_CONTEXT)
+		return NULL;
+	gl.cap_used = ws_now_usec();
+	if (!gl.cap_on) {
+		if (!cap_start())
+			return NULL;
+		damage_all(srv);	/* the next frame draws it whole */
+		return gl.cap_img;	/* black until then */
+	}
+	if (!pixman_region32_not_empty(&gl.cap_dirty))
+		return gl.cap_img;
+	img = pixman_image_get_data(gl.cap_img);
+	stride = pixman_image_get_stride(gl.cap_img) / 4;
+	glBindFramebuffer(GL_FRAMEBUFFER, gl.cap_fbo);
+	glPixelStorei(GL_PACK_ALIGNMENT, 4);
+	b = pixman_region32_rectangles(&gl.cap_dirty, &n);
+	for (i = 0; i < n; i++) {
+		w = b[i].x2 - b[i].x1;
+		h = b[i].y2 - b[i].y1;
+		if (w <= 0 || h <= 0)
+			continue;
+		/* GL rows are bottom up */
+		glReadPixels(b[i].x1, (GLint)gl.height - b[i].y2, w, h,
+		    gl.read_bgra ? GL_BGRA_EXT : GL_RGBA, GL_UNSIGNED_BYTE,
+		    gl.cap_rows);
+		for (y = 0; y < h; y++) {
+			uint32_t *dst = img + (size_t)(b[i].y2 - 1 - y) *
+			    stride + b[i].x1;
+
+			src = gl.cap_rows + (size_t)y * w * 4;
+			if (gl.read_bgra) {
+				memcpy(dst, src, (size_t)w * 4);
+				continue;
+			}
+			for (x = 0; x < w; x++)	/* RGBA bytes to ARGB */
+				dst[x] = (uint32_t)src[x * 4] << 16 |
+				    (uint32_t)src[x * 4 + 1] << 8 |
+				    src[x * 4 + 2];
+		}
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	pixman_region32_clear(&gl.cap_dirty);
+	return gl.cap_img;
+}
+
 static void
 gles_fini(struct ws_server *srv)
 {
@@ -506,6 +658,9 @@ gles_fini(struct ws_server *srv)
 	for (w = srv->windows; w != NULL; w = w->next)
 		gles_window_gone(srv, w);
 	if (gl.prog_tex != 0) {
+		cap_stop();
+		pixman_region32_fini(&gl.cap_clip);
+		pixman_region32_fini(&gl.cap_dirty);
 		pixman_region32_fini(&gl.clip);
 		for (i = 0; i < GLES_HISTORY; i++)
 			pixman_region32_fini(&gl.history[i]);
@@ -559,6 +714,12 @@ gles_repaint(struct ws_server *srv, pixman_region32_t *region)
 	    EGL_BUFFER_AGE_EXT, &age))
 		age = 0;
 	gl.egl_age = age;
+	if (gl.cap_on && gl.cap_fresh) {
+		/* the capture copy starts empty: draw it all once */
+		pixman_region32_union_rect(region, region, 0, 0, srv->width,
+		    srv->height);
+		gl.cap_fresh = false;
+	}
 	if (gl.verify) {
 		/* the buffer this frame lands in: the one drawn `age` frames
 		   ago, or with age 0 one not among the last few */
@@ -606,6 +767,8 @@ gles_begin(struct ws_server *srv, pixman_region32_t *back)
 
 	pixman_region32_copy(&gl.clip, back);
 	glEnable(GL_SCISSOR_TEST);
+	if (gl.cap_on)
+		own_clip(&gl.cap_clip, back, s);
 	if (gl.verify) {
 		pixman_region32_clear(&gl.mclip);
 		b = pixman_region32_rectangles(&gl.frame_damage, &n);
@@ -844,6 +1007,12 @@ gles_draw(struct ws_server *srv, const struct ws_draw *d)
 	else
 		glDisable(GL_BLEND);
 	clipped(d->x, d->y, d->w, d->h);
+	if (gl.cap_on) {
+		/* the capture copy: the same draw, this frame's damage */
+		glBindFramebuffer(GL_FRAMEBUFFER, gl.cap_fbo);
+		clipped_in(&gl.cap_clip, d->x, d->y, d->w, d->h);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	}
 	if (gl.verify) {
 		/* the simulated GBM buffer: the same draw, same clip */
 		glBindFramebuffer(GL_FRAMEBUFFER, gl.sim_fbo[gl.sim_cur]);
@@ -894,6 +1063,13 @@ gles_fill(struct ws_server *srv, const pixman_color_t *color,
 		pos[6] = boxes[i].x2; pos[7] = boxes[i].y2;
 		clipped(boxes[i].x1, boxes[i].y1, boxes[i].x2 - boxes[i].x1,
 		    boxes[i].y2 - boxes[i].y1);
+		if (gl.cap_on) {
+			glBindFramebuffer(GL_FRAMEBUFFER, gl.cap_fbo);
+			clipped_in(&gl.cap_clip, boxes[i].x1, boxes[i].y1,
+			    boxes[i].x2 - boxes[i].x1,
+			    boxes[i].y2 - boxes[i].y1);
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		}
 		if (gl.verify) {
 			glBindFramebuffer(GL_FRAMEBUFFER,
 			    gl.sim_fbo[gl.sim_cur]);
@@ -984,6 +1160,12 @@ gles_end(struct ws_server *srv, pixman_region32_t *back,
 	(void)back;
 	if (gl.verify)
 		verify_frame();
+	if (gl.cap_on) {
+		pixman_region32_union(&gl.cap_dirty, &gl.cap_dirty,
+		    &gl.cap_clip);
+		if (ws_now_usec() - gl.cap_used > GLES_CAP_IDLE_USEC)
+			cap_stop();
+	}
 
 	glDisable(GL_SCISSOR_TEST);
 	pixman_region32_clear(&gl.clip);
@@ -1327,4 +1509,5 @@ const struct ws_renderer_ops gles_renderer_ops = {
 	.buffer_import = gles_buffer_import,
 	.buffer_gone = gles_buffer_gone,
 	.buffer_read = gles_buffer_read,
+	.screen_read = gles_screen_read,
 };
