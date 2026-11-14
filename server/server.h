@@ -541,6 +541,7 @@ struct ws_capture {
 	ws_rect_t	cursor_rect;	/* WS_CAPTURE_CURSOR: where the pointer
 					   was last seen (source coordinates) */
 	pixman_image_t	*cursor_image;	/* and which image, not owned */
+	uint64_t	screen_serial;	/* screen_read's, at the last frame */
 	struct ws_capture_buf buf[WS_CAPTURE_BUFFERS];
 	struct ws_capture *next;
 };
@@ -649,8 +650,13 @@ struct ws_renderer_ops {
 	pixman_image_t *(*buffer_read)(struct ws_server *srv,
 		    struct ws_buffer *b);
 	/* A renderer without srv->out (NULL: none): the screen in panel
-	 * pixels for captures, brought up to date; NULL when it can't. */
-	pixman_image_t *(*screen_read)(struct ws_server *srv);
+	 * pixels for captures, as up to date as it can be without waiting
+	 * for the GPU (wait: brought all up to date); NULL when it can't.
+	 * *behind gets where the image is older than the screen, to read
+	 * again later; *serial changes whenever the image does, and is 0
+	 * while it has nothing of the screen yet. */
+	pixman_image_t *(*screen_read)(struct ws_server *srv, bool wait,
+		    pixman_region32_t *behind, uint64_t *serial);
 };
 
 struct ws_mach_item {
