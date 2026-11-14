@@ -84,7 +84,28 @@ struct gles {
 	GLint		fill_screen, fill_color;
 	GLuint		tex;		/* reused for every image (T3) */
 	pixman_region32_t clip;		/* begin..end, backing pixels */
+	/*
+	 * WS_GL_VERIFY: a second copy of the screen, kept the slow sure
+	 * way (only each frame's own damage drawn, every image uploaded
+	 * whole), compared with each frame before it is shown.
+	 */
+	bool		verify;
+	GLuint		mirror_fbo, mirror_tex;
+	/* the GBM buffers can't be read back (Mesa can't map a scanout
+	   buffer here), so they are simulated: one texture each, drawn
+	   exactly as the frame drawn into that buffer */
+#define GLES_SIM 4
+	GLuint		sim_fbo[GLES_SIM], sim_tex[GLES_SIM];
+	int		sim_of[64];	/* frame % 64 -> its sim buffer */
+	int		sim_cur;
+	pixman_region32_t frame_damage;	/* points, before buffer age */
+	pixman_region32_t mclip;	/* the mirror's clip, backing pixels */
+	uint8_t		*vpix[2];
+	unsigned long	vframes, vbad;
+	EGLint		egl_age;	/* what EGL said this frame */
+	struct { struct gbm_bo *bo; unsigned long frame; } seen[8];
 	struct gbm_bo	*front;		/* on screen */
+	struct gbm_bo	*retired;	/* on screen until the last flip */
 	struct gbm_bo	*pending;	/* flipped to, not yet on screen */
 };
 
@@ -332,6 +353,7 @@ gles_init(struct ws_server *srv)
 	ext = (const char *)glGetString(GL_EXTENSIONS);
 	gl.bgra = ext != NULL && has_ext(ext, "GL_EXT_texture_format_BGRA8888");
 	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &gl.max_tex);
+	gl.verify = getenv("WS_GL_VERIFY") != NULL;
 	gl.unpack_row = ext != NULL && has_ext(ext, "GL_EXT_unpack_subimage");
 	gl.buffer_age = has_ext(eglQueryString(gl.dpy, EGL_EXTENSIONS),
 	    "EGL_EXT_buffer_age");
@@ -353,6 +375,37 @@ gles_init(struct ws_server *srv)
 	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 	glViewport(0, 0, (GLsizei)gl.width, (GLsizei)gl.height);
 	pixman_region32_init(&gl.clip);
+	pixman_region32_init(&gl.frame_damage);
+	pixman_region32_init(&gl.mclip);
+	if (gl.verify) {
+		glGenTextures(1, &gl.mirror_tex);
+		glBindTexture(GL_TEXTURE_2D, gl.mirror_tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)gl.width,
+		    (GLsizei)gl.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glGenFramebuffers(1, &gl.mirror_fbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, gl.mirror_fbo);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		    GL_TEXTURE_2D, gl.mirror_tex, 0);
+		for (i = 0; i < GLES_SIM; i++) {
+			glGenTextures(1, &gl.sim_tex[i]);
+			glBindTexture(GL_TEXTURE_2D, gl.sim_tex[i]);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+			    (GLsizei)gl.width, (GLsizei)gl.height, 0, GL_RGBA,
+			    GL_UNSIGNED_BYTE, NULL);
+			glGenFramebuffers(1, &gl.sim_fbo[i]);
+			glBindFramebuffer(GL_FRAMEBUFFER, gl.sim_fbo[i]);
+			glFramebufferTexture2D(GL_FRAMEBUFFER,
+			    GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+			    gl.sim_tex[i], 0);
+			glClearColor(1, 0, 1, 1);	/* garbage: magenta */
+			glClear(GL_COLOR_BUFFER_BIT);
+		}
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		memset(gl.sim_of, -1, sizeof(gl.sim_of));
+		gl.vpix[0] = malloc((size_t)gl.width * gl.height * 4);
+		gl.vpix[1] = malloc((size_t)gl.width * gl.height * 4);
+		ws_warn("renderer: WS_GL_VERIFY: every frame is checked, slowly");
+	}
 	for (i = 0; i < GLES_HISTORY; i++)
 		pixman_region32_init(&gl.history[i]);
 	gl.nhistory = 0;
@@ -389,6 +442,9 @@ gles_fini(struct ws_server *srv)
 			gbm_surface_release_buffer(gl.surface, gl.pending);
 		if (gl.front != NULL)
 			gbm_surface_release_buffer(gl.surface, gl.front);
+		if (gl.retired != NULL)
+			gbm_surface_release_buffer(gl.surface, gl.retired);
+		gl.retired = NULL;
 	}
 	gl.pending = gl.front = NULL;
 	if (gl.egl_surface != EGL_NO_SURFACE)
@@ -426,6 +482,20 @@ gles_repaint(struct ws_server *srv, pixman_region32_t *region)
 	if (gl.buffer_age && !eglQuerySurface(gl.dpy, gl.egl_surface,
 	    EGL_BUFFER_AGE_EXT, &age))
 		age = 0;
+	gl.egl_age = age;
+	if (gl.verify) {
+		/* the buffer this frame lands in: the one drawn `age` frames
+		   ago, or with age 0 one not among the last few */
+		unsigned long f = gl.vframes + 1;
+		int k = age > 0 && f >= (unsigned long)age ?
+		    gl.sim_of[(f - (unsigned long)age) % 64] : -1;
+
+		if (k < 0)
+			k = (int)(f % GLES_SIM);
+		gl.sim_cur = k;
+		gl.sim_of[f % 64] = k;
+	}
+	pixman_region32_copy(&gl.frame_damage, region);
 	/* remember this frame's own damage, newest first */
 	pixman_region32_fini(&gl.history[GLES_HISTORY - 1]);
 	memmove(&gl.history[1], &gl.history[0],
@@ -441,26 +511,48 @@ gles_repaint(struct ws_server *srv, pixman_region32_t *region)
 	}
 	if (gl.nhistory < GLES_HISTORY - 1)
 		gl.nhistory++;
+	if (gl.verify) {
+		pixman_box32_t *e1 = pixman_region32_extents(&gl.frame_damage);
+		pixman_box32_t *e2 = pixman_region32_extents(region);
+
+		ws_debug("renderer: frame %lu age %d nhist %d own %d,%d-%d,%d "
+		    "drawn %d,%d-%d,%d", gl.vframes + 1, age, gl.nhistory,
+		    e1->x1, e1->y1, e1->x2, e1->y2, e2->x1, e2->y1, e2->x2,
+		    e2->y2);
+	}
 }
 
 static void
 gles_begin(struct ws_server *srv, pixman_region32_t *back)
 {
-	(void)srv;
+	pixman_box32_t *b;
+	int i, n, s = (int)srv->scale;
+
 	pixman_region32_copy(&gl.clip, back);
 	glEnable(GL_SCISSOR_TEST);
+	if (gl.verify) {
+		pixman_region32_clear(&gl.mclip);
+		b = pixman_region32_rectangles(&gl.frame_damage, &n);
+		for (i = 0; i < n; i++)
+			pixman_region32_union_rect(&gl.mclip, &gl.mclip,
+			    b[i].x1 * s, b[i].y1 * s,
+			    (unsigned)((b[i].x2 - b[i].x1) * s),
+			    (unsigned)((b[i].y2 - b[i].y1) * s));
+		pixman_region32_intersect(&gl.mclip, &gl.mclip, back);
+	}
 }
 
-/* Run draw() once per clip rectangle that meets x, y, w, h. */
+/* Draw once per rectangle of `clip` that meets x, y, w, h. */
 static void
-clipped(int32_t x, int32_t y, int32_t w, int32_t h)
+clipped_in(pixman_region32_t *clip, int32_t x, int32_t y, int32_t w,
+    int32_t h)
 {
 	pixman_region32_t r;
 	pixman_box32_t *b;
 	int i, n;
 
 	pixman_region32_init_rect(&r, x, y, (unsigned)w, (unsigned)h);
-	pixman_region32_intersect(&r, &r, &gl.clip);
+	pixman_region32_intersect(&r, &r, clip);
 	b = pixman_region32_rectangles(&r, &n);
 	for (i = 0; i < n; i++) {
 		glScissor(b[i].x1, (GLint)gl.height - b[i].y2,
@@ -468,6 +560,12 @@ clipped(int32_t x, int32_t y, int32_t w, int32_t h)
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	}
 	pixman_region32_fini(&r);
+}
+
+static void
+clipped(int32_t x, int32_t y, int32_t w, int32_t h)
+{
+	clipped_in(&gl.clip, x, y, w, h);
 }
 
 /* Upload an a8r8g8b8 or x8r8g8b8 image (another format is converted). */
@@ -655,6 +753,22 @@ gles_draw(struct ws_server *srv, const struct ws_draw *d)
 	else
 		glDisable(GL_BLEND);
 	clipped(d->x, d->y, d->w, d->h);
+	if (gl.verify) {
+		/* the simulated GBM buffer: the same draw, same clip */
+		glBindFramebuffer(GL_FRAMEBUFFER, gl.sim_fbo[gl.sim_cur]);
+		clipped(d->x, d->y, d->w, d->h);
+		/* the mirror: the image uploaded whole, this frame's damage */
+		glBindFramebuffer(GL_FRAMEBUFFER, gl.mirror_fbo);
+		glBindTexture(GL_TEXTURE_2D, gl.tex);
+		if (upload(d->src, &tw, &th)) {
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+			    d->smooth ? GL_LINEAR : GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+			    d->smooth ? GL_LINEAR : GL_NEAREST);
+			clipped_in(&gl.mclip, d->x, d->y, d->w, d->h);
+		}
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	}
 }
 
 static void
@@ -685,7 +799,87 @@ gles_fill(struct ws_server *srv, const pixman_color_t *color,
 		pos[6] = boxes[i].x2; pos[7] = boxes[i].y2;
 		clipped(boxes[i].x1, boxes[i].y1, boxes[i].x2 - boxes[i].x1,
 		    boxes[i].y2 - boxes[i].y1);
+		if (gl.verify) {
+			glBindFramebuffer(GL_FRAMEBUFFER,
+			    gl.sim_fbo[gl.sim_cur]);
+			clipped(boxes[i].x1, boxes[i].y1, boxes[i].x2 - boxes[i].x1,
+			    boxes[i].y2 - boxes[i].y1);
+			glBindFramebuffer(GL_FRAMEBUFFER, gl.mirror_fbo);
+			clipped_in(&gl.mclip, boxes[i].x1, boxes[i].y1,
+			    boxes[i].x2 - boxes[i].x1,
+			    boxes[i].y2 - boxes[i].y1);
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		}
 	}
+}
+
+/* WS_GL_VERIFY: does the frame about to be shown match the mirror? */
+static void
+verify_frame(void)
+{
+	uint32_t *a = (uint32_t *)gl.vpix[0], *m = (uint32_t *)gl.vpix[1];
+	uint32_t x, y, bad = 0, x1 = gl.width, y1 = gl.height, x2 = 0, y2 = 0;
+	EGLint age = -1;
+
+	if (a == NULL || m == NULL)
+		return;
+	glDisable(GL_SCISSOR_TEST);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl.sim_fbo[gl.sim_cur]);
+	glReadPixels(0, 0, (GLsizei)gl.width, (GLsizei)gl.height, GL_RGBA,
+	    GL_UNSIGNED_BYTE, a);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl.mirror_fbo);
+	glReadPixels(0, 0, (GLsizei)gl.width, (GLsizei)gl.height, GL_RGBA,
+	    GL_UNSIGNED_BYTE, m);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	for (y = 0; y < gl.height; y++)
+		for (x = 0; x < gl.width; x++) {
+			/* the screen has no alpha; the mirror texture does */
+			if (((a[y * gl.width + x] ^ m[y * gl.width + x]) &
+			    0x00ffffff) == 0)
+				continue;
+			bad++;
+			if (x < x1) x1 = x;
+			if (x > x2) x2 = x;
+			if (y < y1) y1 = y;
+			if (y > y2) y2 = y;
+		}
+	gl.vframes++;
+	if (gl.buffer_age)
+		eglQuerySurface(gl.dpy, gl.egl_surface, EGL_BUFFER_AGE_EXT, &age);
+	if (bad != 0 && gl.vbad < 2) {
+		/* the first two: both images of the area, as PPM */
+		char path[64];
+		FILE *f;
+		int k;
+		uint32_t xx, yy, *img;
+
+		for (k = 0; k < 2; k++) {
+			img = k == 0 ? a : m;
+			snprintf(path, sizeof(path), "/tmp/verify-%lu-%s.ppm",
+			    gl.vbad, k == 0 ? "screen" : "mirror");
+			if ((f = fopen(path, "wb")) == NULL)
+				continue;
+			fprintf(f, "P6\n%u %u\n255\n", x2 - x1 + 1, y2 - y1 + 1);
+			for (yy = y2 + 1; yy-- > y1;)
+				for (xx = x1; xx <= x2; xx++) {
+					uint32_t p = img[yy * gl.width + xx];
+
+					fputc((int)(p & 0xff), f);
+					fputc((int)((p >> 8) & 0xff), f);
+					fputc((int)((p >> 16) & 0xff), f);
+				}
+			fclose(f);
+		}
+	}
+	if (bad != 0) {
+		gl.vbad++;
+		/* GL rows are bottom up: say them top down */
+		ws_warn("renderer: VERIFY frame %lu: %u pixels differ in "
+		    "%u,%u %ux%u (age %d)", gl.vframes, bad, x1,
+		    gl.height - 1 - y2, x2 - x1 + 1, y2 - y1 + 1, age);
+	} else if (gl.vframes % 300 == 0)
+		ws_info("renderer: VERIFY %lu frames, %lu bad", gl.vframes,
+		    gl.vbad);
 }
 
 static void
@@ -693,6 +887,9 @@ gles_end(struct ws_server *srv, pixman_region32_t *back,
     pixman_region32_t *out)
 {
 	(void)back;
+	if (gl.verify)
+		verify_frame();
+
 	glDisable(GL_SCISSOR_TEST);
 	pixman_region32_clear(&gl.clip);
 	if (!eglSwapBuffers(gl.dpy, gl.egl_surface))
@@ -761,6 +958,28 @@ gles_scanout(struct ws_server *srv, uint32_t *fb_id)
 		}
 		gbm_bo_set_user_data(bo, (void *)(uintptr_t)fb, fb_free);
 	}
+	if (gl.verify) {
+		/* the age this buffer really had, against what EGL said */
+		int j, k = -1, ns = (int)(sizeof(gl.seen) / sizeof(gl.seen[0]));
+		long real = 0;
+
+		for (j = 0; j < ns; j++)
+			if (gl.seen[j].bo == bo)
+				k = j;
+		if (k >= 0)
+			real = (long)(gl.vframes - gl.seen[k].frame);
+		else
+			for (k = 0; k < ns && gl.seen[k].bo != NULL; k++)
+				;
+		if (k < ns) {
+			gl.seen[k].bo = bo;
+			gl.seen[k].frame = gl.vframes;
+		}
+		if (real != gl.egl_age)
+			ws_warn("renderer: VERIFY frame %lu: buffer %p was %ld "
+			    "frames old, EGL said %d", gl.vframes, (void *)bo,
+			    real, gl.egl_age);
+	}
 	gl.pending = bo;
 	*fb_id = fb;
 	return true;
@@ -773,8 +992,14 @@ gles_presented(struct ws_server *srv)
 	(void)srv;
 	if (gl.pending == NULL)
 		return;
-	if (gl.front != NULL)
-		gbm_surface_release_buffer(gl.surface, gl.front);
+	/*
+	 * The buffer the flip left may still be scanned out for a moment
+	 * after the flip's event (the vc4 HVS latches later): drawing
+	 * into it then shows half a frame. Keep it one more flip.
+	 */
+	if (gl.retired != NULL)
+		gbm_surface_release_buffer(gl.surface, gl.retired);
+	gl.retired = gl.front;
 	gl.front = gl.pending;
 	gl.pending = NULL;
 }
