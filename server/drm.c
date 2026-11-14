@@ -5,10 +5,12 @@
  * DRM/KMS output: legacy modesetting with two dumb buffers and page
  * flips, plus the hardware cursor plane when the driver has one.
  *
- * The compositor keeps the screen in a shadow image in system memory;
- * present() copies only damaged rectangles into the back buffer (each
- * dumb buffer remembers what it missed), then flips. Reading from dumb
- * buffers, which may be write-combined, is avoided.
+ * With the pixman renderer the screen is a shadow image in system
+ * memory; present() copies only damaged rectangles into the back buffer
+ * (each dumb buffer remembers what it missed), then flips. Reading from
+ * dumb buffers, which may be write-combined, is avoided. A renderer with
+ * its own scanout buffers (GLES on GBM) hands present() a framebuffer
+ * to flip to instead.
  */
 
 #include <sys/types.h>
@@ -217,7 +219,7 @@ fb_copy(struct ws_server *srv, struct drm_fb *fb)
 {
 	pixman_box32_t *ext;
 
-	if (!pixman_region32_not_empty(&fb->missing))
+	if (srv->out == NULL || !pixman_region32_not_empty(&fb->missing))
 		return;
 	pixman_image_set_clip_region32(fb->image, &fb->missing);
 	ext = pixman_region32_extents(&fb->missing);
@@ -259,7 +261,10 @@ flip_handler(int fd, unsigned int seq, unsigned int sec, unsigned int usec,
 	(void)seq;
 	(void)sec;
 	(void)usec;
-	drm.front ^= 1;
+	if (srv->renderer->presented != NULL)
+		srv->renderer->presented(srv);
+	else
+		drm.front ^= 1;
 	compositor_present_done(srv);
 }
 
@@ -275,30 +280,44 @@ drm_readable(struct ws_server *srv)
 	drmHandleEvent(drm.fd, &ctx);
 }
 
+/* Show framebuffer fb_id: a flip if the driver can, else SetCrtc. */
 static bool
-drm_present(struct ws_server *srv, pixman_region32_t *damage)
+show(struct ws_server *srv, uint32_t fb_id)
 {
-	struct drm_fb *back = &drm.fb[drm.front ^ 1];
 	int r;
 
-	pixman_region32_union(&drm.fb[0].missing, &drm.fb[0].missing, damage);
-	pixman_region32_union(&drm.fb[1].missing, &drm.fb[1].missing, damage);
-	fb_copy(srv, back);
 	if (drm.flip_ok) {
-		r = drmModePageFlip(drm.fd, drm.crtc_id, back->fb_id,
+		r = drmModePageFlip(drm.fd, drm.crtc_id, fb_id,
 		    DRM_MODE_PAGE_FLIP_EVENT, srv);
 		if (r == 0)
 			return true;	/* flip_handler finishes the frame */
 		ws_warn("drmModePageFlip: %s; using SetCrtc", strerror(-r));
 		drm.flip_ok = false;
 	}
-	r = drmModeSetCrtc(drm.fd, drm.crtc_id, back->fb_id, 0, 0,
+	r = drmModeSetCrtc(drm.fd, drm.crtc_id, fb_id, 0, 0,
 	    &drm.connector_id, 1, &drm.mode);
 	if (r != 0)
 		ws_warn("drmModeSetCrtc: %s", strerror(-r));
+	else if (srv->renderer->presented != NULL)
+		srv->renderer->presented(srv);
 	else
 		drm.front ^= 1;
 	return false;
+}
+
+static bool
+drm_present(struct ws_server *srv, pixman_region32_t *damage)
+{
+	struct drm_fb *back = &drm.fb[drm.front ^ 1];
+	uint32_t fb_id;
+
+	if (srv->renderer->scanout != NULL)
+		return srv->renderer->scanout(srv, &fb_id) &&
+		    show(srv, fb_id);
+	pixman_region32_union(&drm.fb[0].missing, &drm.fb[0].missing, damage);
+	pixman_region32_union(&drm.fb[1].missing, &drm.fb[1].missing, damage);
+	fb_copy(srv, back);
+	return show(srv, back->fb_id);
 }
 
 /* ---- hardware cursor ---- */
@@ -519,6 +538,11 @@ drm_open(struct ws_server *srv)
 	drm.flip_ok = true;
 	if (srv->cfg.hardware_cursor)
 		cursor_setup();
+#ifdef WS_HAVE_GLES
+	/* As root: EGL opens the render node (render_gles.c). */
+	if (gles_open(srv, drm.fd))
+		srv->renderer = &gles_renderer_ops;
+#endif
 	srv->output = &drm_output_ops;
 	ws_info("%s: %ux%u@%u connector %u crtc %u%s", drm.path,
 	    srv->panel_width, srv->panel_height, drm.mode.vrefresh, drm.connector_id, drm.crtc_id,

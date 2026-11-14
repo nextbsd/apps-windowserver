@@ -560,7 +560,8 @@ capture_fill(struct ws_server *srv, struct ws_capture *s, int i)
 		   we draw it below) */
 		compositor_capture_overlays(srv, true,
 		    (s->flags & WS_CAPTURE_CURSOR) == 0);
-		copy_region(s, b, srv->out, 0, 0, &region);
+		if (srv->out != NULL)	/* a renderer that reads back (T8) */
+			copy_region(s, b, srv->out, 0, 0, &region);
 		compositor_capture_overlays(srv, false,
 		    (s->flags & WS_CAPTURE_CURSOR) == 0);
 	} else {

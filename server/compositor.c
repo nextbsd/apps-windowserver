@@ -30,13 +30,28 @@
 
 static void draw_cursor(struct ws_server *srv);
 
-int
-compositor_init(struct ws_server *srv)
+/* The renderer for the current sizes; a GPU one that can't falls back
+   to pixman. */
+static int
+renderer_init(struct ws_server *srv)
 {
 	if (srv->renderer == NULL)
 		srv->renderer = &pixman_renderer_ops;
-	if (srv->renderer->init(srv) < 0)
+	if (srv->renderer->init(srv) == 0)
+		return 0;
+	if (srv->renderer == &pixman_renderer_ops)
 		return -1;
+	srv->renderer->fini(srv);
+	srv->renderer = &pixman_renderer_ops;
+	return srv->renderer->init(srv);
+}
+
+int
+compositor_init(struct ws_server *srv)
+{
+	if (renderer_init(srv) < 0)
+		return -1;
+	ws_info("renderer: %s", srv->renderer->name);
 	pixman_region32_init(&srv->damage);
 	damage_all(srv);
 	return 0;
@@ -47,7 +62,7 @@ compositor_init(struct ws_server *srv)
 int
 compositor_resize(struct ws_server *srv)
 {
-	if (srv->renderer->init(srv) < 0)
+	if (renderer_init(srv) < 0)
 		return -1;
 	pixman_region32_clear(&srv->damage);
 	damage_all(srv);
@@ -398,6 +413,8 @@ compositor_repaint(struct ws_server *srv)
 	pixman_region32_init(&region);
 	pixman_region32_copy(&region, &srv->damage);
 	pixman_region32_clear(&srv->damage);
+	if (srv->renderer->repaint != NULL)
+		srv->renderer->repaint(srv, &region);
 
 	tiles_render(srv);
 	repaint_region(srv, &region, &out);
@@ -439,6 +456,8 @@ compositor_capture_overlays(struct ws_server *srv, bool hide, bool cursor)
 	ws_rect_t r[5];
 	int i, n = 0;
 
+	if (srv->out == NULL)
+		return;		/* no readback from this renderer yet */
 	if (srv->capture_indicator) {
 		capture_indicator_rects(srv, r);
 		n = 4;
@@ -475,6 +494,8 @@ snapshot_memfd(struct ws_server *srv, uint32_t *stride_out)
 	int fd;
 
 	compositor_repaint(srv);
+	if (srv->out == NULL)
+		return -1;
 	fd = memfd_create("WindowServer-snapshot", MFD_CLOEXEC);
 	if (fd < 0)
 		return -1;
@@ -508,6 +529,8 @@ snapshot_write_ppm(struct ws_server *srv, const char *path)
 	FILE *f;
 
 	compositor_repaint(srv);
+	if (srv->out == NULL)
+		return -1;
 	f = fopen(path, "wb");
 	if (f == NULL)
 		return -1;

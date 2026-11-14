@@ -76,6 +76,7 @@ static const struct ckey keys[] = {
 	{ "BackgroundColor", C_COLOR, offsetof(struct ws_config, background),
 	  sizeof(uint32_t), 0 },
 	S("DRMDevice", drm_device, 0),
+	S("Renderer", renderer, 0),
 	S("SocketPath", socket_path, 0),
 	S("ServiceName", service_name, 0),
 	S("User", user, 0),
@@ -140,6 +141,7 @@ config_defaults(struct ws_config *cfg)
 	cfg->natural_scrolling = false;
 	cfg->allow_terminate = true;
 	cfg->hardware_cursor = true;
+	strlcpy(cfg->renderer, "pixman", sizeof(cfg->renderer));
 	/* Black where no window is. Desktop pictures come from a desktop-level
 	   window (InnerSpace, or a Dock/Workspace desktop), as on macOS. */
 	cfg->background = 0x000000;

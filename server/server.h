@@ -88,6 +88,7 @@ struct ws_config {
 	bool	hardware_cursor;
 	uint32_t background;		/* 0xRRGGBB */
 	char	drm_device[64];		/* "" = first card with a display */
+	char	renderer[16];		/* pixman, gles2 or auto (E38) */
 	char	socket_path[WS_MAX_SOCKET_PATH];
 	char	service_name[128];
 	char	user[32];		/* account to drop to */
@@ -603,6 +604,9 @@ struct ws_renderer_ops {
 	 * they change (display.c). */
 	int	(*init)(struct ws_server *srv);
 	void	(*fini)(struct ws_server *srv);
+	/* Grow `region` (points) to what this frame has to draw; NULL
+	 * when the screen keeps what was drawn before. */
+	void	(*repaint)(struct ws_server *srv, pixman_region32_t *region);
 	void	(*begin)(struct ws_server *srv, pixman_region32_t *back);
 	void	(*draw)(struct ws_server *srv, const struct ws_draw *d);
 	/* Opaque colours replace, translucent ones blend (OVER). */
@@ -611,6 +615,11 @@ struct ws_renderer_ops {
 	/* Done drawing `back`; `out` gets what changed in panel pixels. */
 	void	(*end)(struct ws_server *srv, pixman_region32_t *back,
 		    pixman_region32_t *out);
+	/* A renderer with its own scanout buffers (NULL: the output
+	 * copies srv->out): the DRM framebuffer of the frame just ended,
+	 * and word that the flip to it is done. */
+	bool	(*scanout)(struct ws_server *srv, uint32_t *fb_id);
+	void	(*presented)(struct ws_server *srv);
 };
 
 struct ws_mach_item {
@@ -1196,6 +1205,12 @@ extern const struct ws_output_ops headless_output_ops;
 
 /* ---- render_pixman.c ---- */
 extern const struct ws_renderer_ops pixman_renderer_ops;
+
+/* ---- render_gles.c (built when EGL, GBM and GLES2 are found) ---- */
+#ifdef WS_HAVE_GLES
+bool	gles_open(struct ws_server *srv, int drm_fd);
+extern const struct ws_renderer_ops gles_renderer_ops;
+#endif
 
 /* ---- drm.c ---- */
 int	drm_open(struct ws_server *srv);

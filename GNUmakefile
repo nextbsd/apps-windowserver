@@ -41,6 +41,16 @@ PKGS		= libdrm libinput libudev xkbcommon pixman-1
 PKG_CFLAGS	:= $(shell $(PKG_CONFIG) --cflags $(PKGS))
 PKG_LIBS	:= $(shell $(PKG_CONFIG) --libs $(PKGS))
 
+# The GPU renderer (server/render_gles.c), when EGL, GBM and GLES2 are
+# there; without them the server is pixman only. GLES=no leaves it out.
+GLES_PKGS	= egl gbm glesv2
+GLES		?= $(shell $(PKG_CONFIG) --exists $(GLES_PKGS) && echo yes)
+ifeq ($(GLES),yes)
+PKG_CFLAGS	+= -DWS_HAVE_GLES $(shell $(PKG_CONFIG) --cflags $(GLES_PKGS))
+PKG_LIBS	+= $(shell $(PKG_CONFIG) --libs $(GLES_PKGS)) \
+		   -Wl,-rpath,$(shell $(PKG_CONFIG) --variable=libdir egl)
+endif
+
 WARN		= -Wall -Wextra -Wshadow -Wpointer-arith \
 		  -Wstrict-prototypes -Wmissing-prototypes
 CFLAGS		?= -O2 -g
@@ -52,7 +62,8 @@ LIB_NAME	= libWindowServerClient
 LIB_SO		= $(LIB_NAME).so.$(LIB_MAJOR)
 
 B		= build
-SERVER_SRCS	= $(wildcard server/*.c)
+SERVER_SRCS	= $(filter-out $(if $(filter yes,$(GLES)),,server/render_gles.c), \
+		  $(wildcard server/*.c))
 SERVER_OBJS	= $(SERVER_SRCS:%.c=$(B)/%.o)
 LIB_SRCS	= lib/wsclient.c
 LIB_PIC_OBJS	= $(LIB_SRCS:%.c=$(B)/pic/%.o)
