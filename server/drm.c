@@ -11,6 +11,10 @@
  * dumb buffers, which may be write-combined, is avoided. A renderer with
  * its own scanout buffers (GLES on GBM) hands present() a framebuffer
  * to flip to instead.
+ *
+ * WS_FLIP_STATS=1 logs, every 5 seconds of flipping, how evenly the
+ * flips reached the screen (flip_stats), which is how smooth a window
+ * drag looks: the GPU-priority measure of #74.
  */
 
 #include <sys/types.h>
@@ -252,6 +256,56 @@ modeset(struct ws_server *srv)
 
 /* ---- page flips ---- */
 
+/*
+ * WS_FLIP_STATS: the gaps between flips, from the kernel's vblank
+ * timestamps. A gap over 1.5 refresh periods is a missed vblank ("late");
+ * one over 250 ms is the screen sitting idle, not a slow frame, and isn't
+ * counted.
+ */
+static struct {
+	int		on;		/* -1: not read yet */
+	uint64_t	last, start;	/* usec */
+	uint64_t	sum, max;	/* usec */
+	unsigned long	n, late;
+} flips_seen = { .on = -1 };
+
+static void
+flip_stats(struct ws_server *srv, unsigned int sec, unsigned int usec)
+{
+	uint64_t t, gap, period;
+
+	if (flips_seen.on < 0)
+		flips_seen.on = getenv("WS_FLIP_STATS") != NULL;
+	if (!flips_seen.on)
+		return;
+	t = sec != 0 || usec != 0 ? (uint64_t)sec * 1000000 + usec :
+	    ws_now_usec();
+	if (flips_seen.last != 0 && t > flips_seen.last &&
+	    (gap = t - flips_seen.last) < 250000) {
+		if (flips_seen.n == 0)
+			flips_seen.start = flips_seen.last;
+		flips_seen.n++;
+		flips_seen.sum += gap;
+		if (gap > flips_seen.max)
+			flips_seen.max = gap;
+		period = srv->refresh_mhz != 0 ?
+		    1000000000ULL / srv->refresh_mhz : 16667;
+		if (gap * 2 > period * 3)
+			flips_seen.late++;
+	}
+	flips_seen.last = t;
+	if (flips_seen.n != 0 && t - flips_seen.start >= 5000000) {
+		ws_info("flips: %lu in %.1f s (%.1f/s), gap mean %.1f ms, "
+		    "max %.1f ms, %lu late (over 1.5 vblanks)", flips_seen.n,
+		    (double)(t - flips_seen.start) / 1e6,
+		    flips_seen.n * 1e6 / (double)(t - flips_seen.start),
+		    (double)flips_seen.sum / flips_seen.n / 1000.0,
+		    (double)flips_seen.max / 1000.0, flips_seen.late);
+		flips_seen.n = flips_seen.late = 0;
+		flips_seen.sum = flips_seen.max = 0;
+	}
+}
+
 static void
 flip_handler(int fd, unsigned int seq, unsigned int sec, unsigned int usec,
     void *data)
@@ -260,8 +314,7 @@ flip_handler(int fd, unsigned int seq, unsigned int sec, unsigned int usec,
 
 	(void)fd;
 	(void)seq;
-	(void)sec;
-	(void)usec;
+	flip_stats(srv, sec, usec);
 	if (srv->renderer->presented != NULL)
 		srv->renderer->presented(srv);
 	else
