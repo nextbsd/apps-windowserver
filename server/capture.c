@@ -1189,17 +1189,34 @@ capture_client_gone(struct ws_server *srv, struct ws_client *c)
 		capture_changed(srv);
 }
 
-/* Every 2 s: nobody answers forever. */
+/*
+ * Every 2 s: nobody answers forever. With no consent agent connected a
+ * stream gives up sooner, and says why: the agent is missing or didn't
+ * start.
+ */
 void
 capture_housekeeping(struct ws_server *srv)
 {
 	struct ws_capture *s, *next;
-	uint64_t now = ws_now_usec();
+	uint64_t now = ws_now_usec(), waited;
+	bool no_agent = srv->capture_agent == NULL ||
+	    srv->capture_agent->sock < 0;
 
 	for (s = srv->captures; s != NULL; s = next) {
 		next = s->next;
-		if (s->state == WS_CAPTURE_PENDING &&
-		    now - s->pending_usec >
+		if (s->state != WS_CAPTURE_PENDING)
+			continue;
+		waited = now - s->pending_usec;
+		if (no_agent &&
+		    waited > (uint64_t)WS_CAPTURE_AGENT_TIMEOUT * 1000000) {
+			ws_warn("capture: no consent agent connected in %d s "
+			    "for stream %u (%s, pid %d); is %s installed, "
+			    "or its LaunchAgent %s loaded?",
+			    WS_CAPTURE_AGENT_TIMEOUT, s->id, s->name,
+			    (int)s->pid, WS_CAPTURE_AGENT_PATH,
+			    WS_CAPTURE_AGENT_SERVICE);
+			capture_end(srv, s, WS_CAPTURE_DENIED, ETIMEDOUT);
+		} else if (waited >
 		    (uint64_t)WS_CAPTURE_CONSENT_TIMEOUT * 1000000)
 			capture_end(srv, s, WS_CAPTURE_DENIED, ETIMEDOUT);
 	}

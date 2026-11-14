@@ -1007,7 +1007,9 @@ typedef struct ws_req_drag_status {	/* DRAG_STATUS */
  * agent's LaunchAgent is loaded, and otherwise runs
  * WS_CAPTURE_AGENT_PATH itself (or $WS_CAPTURE_AGENT; "none" starts
  * nothing). A stream nobody answers for in WS_CAPTURE_CONSENT_TIMEOUT
- * seconds is DENIED with ETIMEDOUT. A refused client keeps getting
+ * seconds is DENIED with ETIMEDOUT, and so is one still waiting for an
+ * agent to connect after WS_CAPTURE_AGENT_TIMEOUT seconds (the server
+ * logs that no agent came). A refused client keeps getting
  * nothing; X servers return black.
  *
  * On behalf of another program. A helper that captures for another
@@ -1040,6 +1042,7 @@ typedef struct ws_req_drag_status {	/* DRAG_STATUS */
  * `wsctl capture` does all of this from the command line.
  */
 #define WS_CAPTURE_CONSENT_TIMEOUT 120	/* seconds */
+#define WS_CAPTURE_AGENT_TIMEOUT 30	/* seconds, with no agent */
 #define WS_CAPTURE_BORDER	3	/* the indicator, pixels */
 #define WS_CAPTURE_BORDER_COLOR	0xff9500 /* 0xRRGGBB */
 #define WS_CAPTURE_MAX_FPS	240
