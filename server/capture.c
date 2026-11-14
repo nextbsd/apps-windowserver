@@ -30,6 +30,8 @@
 #include "server.h"
 
 #define WS_CAPTURE_MAX_SIZE	16384
+/* The renderer's screen readback is behind: look again this soon (ms) */
+#define WS_CAPTURE_READBACK_MS	4
 
 /* ---- processes ---- */
 
@@ -531,9 +533,14 @@ send_frame(struct ws_server *srv, struct ws_capture *s, int i)
 	client_send(srv, s->owner, &ev, -1);
 }
 
-/* Fill buffer i of s with what changed since it was filled last. */
+/*
+ * Fill buffer i of s with what changed since it was filled last. A
+ * stream of the screen copies from screen (NULL: nothing to copy), and
+ * where that is behind the screen, the buffer is still stale.
+ */
 static void
-capture_fill(struct ws_server *srv, struct ws_capture *s, int i)
+capture_fill(struct ws_server *srv, struct ws_capture *s, int i,
+    pixman_image_t *screen, pixman_region32_t *behind)
 {
 	struct ws_capture_buf *b = &s->buf[i];
 	struct ws_window *w;
@@ -560,12 +567,6 @@ capture_fill(struct ws_server *srv, struct ws_capture *s, int i)
 		   we draw it below) */
 		compositor_capture_overlays(srv, true,
 		    (s->flags & WS_CAPTURE_CURSOR) == 0);
-		pixman_image_t *screen = srv->out;
-
-		/* the GPU renderer reads the screen back (T8) */
-		if (screen == NULL && srv->renderer != NULL &&
-		    srv->renderer->screen_read != NULL)
-			screen = srv->renderer->screen_read(srv);
 		if (screen != NULL)
 			copy_region(s, b, screen, 0, 0, &region);
 		compositor_capture_overlays(srv, false,
@@ -588,12 +589,19 @@ capture_fill(struct ws_server *srv, struct ws_capture *s, int i)
 	}
 	pixman_region32_fini(&region);
 	pixman_region32_clear(&b->stale);
+	if (s->window == 0 && behind != NULL)
+		pixman_region32_intersect_rect(&b->stale, behind, 0, 0,
+		    s->src_width, s->src_height);
 }
 
 static void
 capture_flush_one(struct ws_server *srv, struct ws_capture *s,
     uint64_t now, int *wait_ms)
 {
+	pixman_region32_t behind, fresh;
+	pixman_image_t *screen;
+	bool oneshot = (s->flags & WS_CAPTURE_ONESHOT) != 0;
+	uint64_t serial = 0;
 	uint32_t w, h;
 	ws_rect_t cur;
 	int i;
@@ -642,12 +650,44 @@ capture_flush_one(struct ws_server *srv, struct ws_capture *s,
 			break;
 	if (i == WS_CAPTURE_BUFFERS)
 		return;			/* waiting for a release */
-	capture_fill(srv, s, i);
+	pixman_region32_init(&behind);
+	pixman_region32_init(&fresh);
+	screen = s->window == 0 ? srv->out : NULL;
+	if (s->window == 0 && screen == NULL && srv->renderer != NULL &&
+	    srv->renderer->screen_read != NULL) {
+		/* the GPU renderer reads the screen back (T8), a frame
+		   behind (a one-shot waits for it) */
+		screen = srv->renderer->screen_read(srv, oneshot, &behind,
+		    &serial);
+		pixman_region32_intersect_rect(&behind, &behind, 0, 0,
+		    s->src_width, s->src_height);
+		pixman_region32_subtract(&fresh, &s->damage, &behind);
+		if (screen != NULL && pixman_region32_not_empty(&behind) &&
+		    (serial == 0 || oneshot || (serial == s->screen_serial &&
+		    !pixman_region32_not_empty(&fresh)))) {
+			/* nothing new to send until the readback lands (none
+			   at all at first); a one-shot takes only a whole
+			   screen */
+			if (*wait_ms < 0 || WS_CAPTURE_READBACK_MS < *wait_ms)
+				*wait_ms = WS_CAPTURE_READBACK_MS;
+			pixman_region32_fini(&fresh);
+			pixman_region32_fini(&behind);
+			return;
+		}
+		s->screen_serial = serial;
+	}
+	capture_fill(srv, s, i, screen, &behind);
 	if (!s->buf[i].sent)
 		send_buffer(srv, s, i);
 	send_frame(srv, s, i);
 	s->buf[i].busy = true;
-	pixman_region32_clear(&s->damage);
+	/* what's behind goes in a later frame */
+	pixman_region32_copy(&s->damage, &behind);
+	if (pixman_region32_not_empty(&behind) &&
+	    (*wait_ms < 0 || WS_CAPTURE_READBACK_MS < *wait_ms))
+		*wait_ms = WS_CAPTURE_READBACK_MS;
+	pixman_region32_fini(&fresh);
+	pixman_region32_fini(&behind);
 	s->full = false;
 	s->last_usec = now;
 	if (s->flags & WS_CAPTURE_ONESHOT)
