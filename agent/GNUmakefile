@@ -40,6 +40,14 @@ ScreenCaptureAgent_C_FILES = \
 WS_BUILD ?= ../build
 ADDITIONAL_CPPFLAGS += -I../include
 ADDITIONAL_LIB_DIRS += -L$(WS_BUILD)
+# NextBSD's blocks runtime is /usr/lib/system/libsystem_blocks.so, so the
+# -lBlocksRuntime gnustep-make links finds only the link-only symlink that
+# nextbsd-gnustep's core-libs script makes in /Developer/Link. Look there
+# too, so a plain gmake works outside that script's LIBRARY_PATH (#76). It
+# is a link-time path only: no rpath, the soname is what runs.
+ifneq ($(wildcard /Developer/Link/libBlocksRuntime.so),)
+ADDITIONAL_LIB_DIRS += -L/Developer/Link
+endif
 ADDITIONAL_OBJCFLAGS += -fobjc-arc -fblocks -Wall -Wno-import
 ADDITIONAL_CFLAGS += -Wall
 ADDITIONAL_GUI_LIBS += -lWindowServerClient -L/usr/lib/system -llaunch \
