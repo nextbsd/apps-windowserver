@@ -119,15 +119,15 @@ panel_y(struct ws_server *srv, double y)
  * scaled: up by whole steps pixel for pixel (a 1x X window stays
  * crisp, only bigger), otherwise bilinear.
  */
-void
-shadow_image(struct ws_server *srv, bool blend, pixman_image_t *src,
-    uint32_t src_scale, double opacity, int32_t x, int32_t y, int32_t w,
-    int32_t h)
+static void
+draw_image(struct ws_server *srv, struct ws_window *win, bool blend,
+    pixman_image_t *src, uint32_t src_scale, double opacity, int32_t x,
+    int32_t y, int32_t w, int32_t h)
 {
 	int32_t s = (int32_t)srv->scale;
-	struct ws_draw d = { .src = src, .x = x * s, .y = y * s, .w = w * s,
-	    .h = h * s, .fx = 1.0, .fy = 1.0, .blend = blend,
-	    .opacity = opacity };
+	struct ws_draw d = { .src = src, .window = win, .x = x * s,
+	    .y = y * s, .w = w * s, .h = h * s, .fx = 1.0, .fy = 1.0,
+	    .blend = blend, .opacity = opacity };
 
 	if (w <= 0 || h <= 0)
 		return;
@@ -138,6 +138,14 @@ shadow_image(struct ws_server *srv, bool blend, pixman_image_t *src,
 		d.smooth = s % (int32_t)src_scale != 0;
 	}
 	srv->renderer->draw(srv, &d);
+}
+
+void
+shadow_image(struct ws_server *srv, bool blend, pixman_image_t *src,
+    uint32_t src_scale, double opacity, int32_t x, int32_t y, int32_t w,
+    int32_t h)
+{
+	draw_image(srv, NULL, blend, src, src_scale, opacity, x, y, w, h);
 }
 
 /* Draw sw x sh pixels of src into r (points), bilinear, with an
@@ -282,7 +290,7 @@ composite_window(struct ws_server *srv, struct ws_window *w,
 	if (w->frame.x >= ext->x2 || w->frame.y >= ext->y2 ||
 	    w->frame.x + bw <= ext->x1 || w->frame.y + bh <= ext->y1)
 		return;
-	shadow_image(srv, opacity < 1.0 || ((w->flags & WS_WINDOW_OPAQUE) == 0 &&
+	draw_image(srv, w, opacity < 1.0 || ((w->flags & WS_WINDOW_OPAQUE) == 0 &&
 	    b->format != WS_FORMAT_XRGB8888), b->image, b->scale, opacity,
 	    w->frame.x, w->frame.y, bw, bh);
 }

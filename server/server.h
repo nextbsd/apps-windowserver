@@ -180,6 +180,7 @@ struct ws_window {
 	char		title[WS_MAX_TITLE];
 	bool		visible;
 	struct ws_buffer *buffer;	/* committed */
+	void		*render;	/* the renderer's (render_gles.c) */
 	struct ws_buffer *pending;	/* attached, not yet committed */
 	bool		pending_attach;
 	pixman_region32_t pending_damage; /* window-local */
@@ -587,6 +588,7 @@ struct ws_output_ops {
  */
 struct ws_draw {
 	pixman_image_t	*src;
+	struct ws_window *window;	/* src is this window's buffer */
 	int32_t		x, y, w, h;
 	double		fx, fy;
 	bool		smooth;		/* bilinear, else nearest (only
@@ -624,6 +626,11 @@ struct ws_renderer_ops {
 	 * and word that the flip to it is done. */
 	bool	(*scanout)(struct ws_server *srv, uint32_t *fb_id);
 	void	(*presented)(struct ws_server *srv);
+	/* A window's buffer changed: `damage` (window-local points), or
+	 * all of it when NULL. And the window is gone. */
+	void	(*window_commit)(struct ws_server *srv, struct ws_window *w,
+		    pixman_region32_t *damage);
+	void	(*window_gone)(struct ws_server *srv, struct ws_window *w);
 };
 
 struct ws_mach_item {

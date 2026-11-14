@@ -15,10 +15,16 @@
  * gles_open() runs as root, before privileges are dropped, because
  * eglInitialize is where Mesa opens the render node.
  *
- * Still to come (nextbsd/nextbsd#642): uploading only what changed and
- * one texture per window (T4); repainting only the damage, by buffer
- * age (T5) -- until then every frame repaints, and uploads, everything;
- * a backing store of another size than the panel (T7).
+ * Each window has its own texture, and a commit uploads only what it
+ * damaged (gles_window_commit marks it, the next draw uploads it). Other
+ * images (tiles, the cursor, drag images, overview previews) are still
+ * uploaded whole each time they're drawn (T6).
+ *
+ * With EGL_EXT_buffer_age a frame repaints only what changed since the
+ * GBM buffer it draws into was last on screen; without it, everything.
+ *
+ * Still to come (nextbsd/nextbsd#642): a backing store of another size
+ * than the panel (T7) and readback (T8).
  */
 
 #include <stdio.h>
@@ -38,7 +44,24 @@
 
 #ifndef GL_UNPACK_ROW_LENGTH_EXT
 #define GL_UNPACK_ROW_LENGTH_EXT	0x0CF2
+#define GL_UNPACK_SKIP_ROWS_EXT		0x0CF3
+#define GL_UNPACK_SKIP_PIXELS_EXT	0x0CF4
 #endif
+#ifndef EGL_BUFFER_AGE_EXT
+#define EGL_BUFFER_AGE_EXT		0x313D
+#endif
+
+/* Damage of the frames before this one, newest first (buffer age). */
+#define GLES_HISTORY	4
+
+/* A window's texture: its buffer's pixels, as of `dirty` (window-local
+   points) being uploaded. */
+struct gles_window {
+	GLuint		tex;
+	int		tw, th;
+	bool		all;		/* upload everything */
+	pixman_region32_t dirty;
+};
 
 struct gles {
 	struct gbm_device *gbm;
@@ -51,6 +74,9 @@ struct gles {
 	GLint		max_tex;	/* GL_MAX_TEXTURE_SIZE */
 	bool		bgra;		/* GL_EXT_texture_format_BGRA8888 */
 	bool		unpack_row;	/* GL_EXT_unpack_subimage */
+	bool		buffer_age;	/* EGL_EXT_buffer_age */
+	pixman_region32_t history[GLES_HISTORY];	/* points */
+	int		nhistory;
 	GLuint		prog_tex, prog_fill;
 	GLint		tex_screen, tex_opacity, tex_opaque, tex_swizzle;
 	GLint		fill_screen, fill_color;
@@ -257,6 +283,7 @@ gles_init(struct ws_server *srv)
 {
 	EGLint ctx_attr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
 	const char *ext, *renderer;
+	int i;
 
 	/* The backing store as big as the panel only, until T7. */
 	if (srv->back_width != srv->panel_width ||
@@ -304,6 +331,8 @@ gles_init(struct ws_server *srv)
 	gl.bgra = ext != NULL && has_ext(ext, "GL_EXT_texture_format_BGRA8888");
 	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &gl.max_tex);
 	gl.unpack_row = ext != NULL && has_ext(ext, "GL_EXT_unpack_subimage");
+	gl.buffer_age = has_ext(eglQueryString(gl.dpy, EGL_EXTENSIONS),
+	    "EGL_EXT_buffer_age");
 	gl.prog_tex = program(vs_tex, fs_tex);
 	gl.prog_fill = program(vs_fill, fs_fill);
 	if (gl.prog_tex == 0 || gl.prog_fill == 0)
@@ -322,19 +351,34 @@ gles_init(struct ws_server *srv)
 	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 	glViewport(0, 0, (GLsizei)gl.width, (GLsizei)gl.height);
 	pixman_region32_init(&gl.clip);
-	ws_info("renderer: gles2 on %s, %ux%u%s%s", renderer, gl.width,
+	for (i = 0; i < GLES_HISTORY; i++)
+		pixman_region32_init(&gl.history[i]);
+	gl.nhistory = 0;
+	ws_info("renderer: gles2 on %s, %ux%u%s%s%s", renderer, gl.width,
 	    gl.height, gl.bgra ? ", BGRA textures" : "",
-	    gl.unpack_row ? ", row length" : "");
+	    gl.unpack_row ? ", row length" : "",
+	    gl.buffer_age ? ", buffer age" : "");
 	return 0;
 fail:
 	gles_fini(srv);
 	return -1;
 }
 
+static void gles_window_gone(struct ws_server *srv, struct ws_window *w);
+
 static void
 gles_fini(struct ws_server *srv)
 {
-	(void)srv;
+	struct ws_window *w;
+	int i;
+
+	for (w = srv->windows; w != NULL; w = w->next)
+		gles_window_gone(srv, w);
+	if (gl.prog_tex != 0) {
+		pixman_region32_fini(&gl.clip);
+		for (i = 0; i < GLES_HISTORY; i++)
+			pixman_region32_fini(&gl.history[i]);
+	}
 	if (gl.dpy != EGL_NO_DISPLAY)
 		eglMakeCurrent(gl.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
 		    EGL_NO_CONTEXT);
@@ -366,12 +410,35 @@ gles_fini(struct ws_server *srv)
 
 /* ---- drawing ---- */
 
-/* Until buffer age (T5), a GBM buffer holds an old frame: draw it all. */
+/*
+ * The GBM buffer this frame draws into last showed the frame `age`
+ * frames ago (0: unknown), so it lacks what changed since then: this
+ * frame's damage and that of the age - 1 frames before it.
+ */
 static void
 gles_repaint(struct ws_server *srv, pixman_region32_t *region)
 {
-	pixman_region32_union_rect(region, region, 0, 0, srv->width,
-	    srv->height);
+	EGLint age = 0;
+	int i;
+
+	if (gl.buffer_age && !eglQuerySurface(gl.dpy, gl.egl_surface,
+	    EGL_BUFFER_AGE_EXT, &age))
+		age = 0;
+	/* remember this frame's own damage, newest first */
+	pixman_region32_fini(&gl.history[GLES_HISTORY - 1]);
+	memmove(&gl.history[1], &gl.history[0],
+	    sizeof(gl.history[0]) * (GLES_HISTORY - 1));
+	pixman_region32_init(&gl.history[0]);
+	pixman_region32_copy(&gl.history[0], region);
+	if (age == 0 || age - 1 > gl.nhistory) {
+		pixman_region32_union_rect(region, region, 0, 0, srv->width,
+		    srv->height);
+	} else {
+		for (i = 1; i < age; i++)
+			pixman_region32_union(region, region, &gl.history[i]);
+	}
+	if (gl.nhistory < GLES_HISTORY - 1)
+		gl.nhistory++;
 }
 
 static void
@@ -453,6 +520,85 @@ upload(pixman_image_t *img, int *tw, int *th)
 	return true;
 }
 
+/* Upload the rectangle x, y, w, h (pixels) of a 32-bit image into the
+   bound texture, which is already the image's size. */
+static void
+upload_rect(pixman_image_t *img, int x, int y, int w, int h)
+{
+	uint8_t *data = (uint8_t *)pixman_image_get_data(img);
+	int stride = pixman_image_get_stride(img), row;
+	GLenum f = gl.bgra ? GL_BGRA_EXT : GL_RGBA;
+
+	if (gl.unpack_row) {
+		glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT, stride / 4);
+		glPixelStorei(GL_UNPACK_SKIP_PIXELS_EXT, x);
+		glPixelStorei(GL_UNPACK_SKIP_ROWS_EXT, y);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, f,
+		    GL_UNSIGNED_BYTE, data);
+		glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT, 0);
+		glPixelStorei(GL_UNPACK_SKIP_PIXELS_EXT, 0);
+		glPixelStorei(GL_UNPACK_SKIP_ROWS_EXT, 0);
+		return;
+	}
+	for (row = y; row < y + h; row++)
+		glTexSubImage2D(GL_TEXTURE_2D, 0, x, row, w, 1, f,
+		    GL_UNSIGNED_BYTE, data + (size_t)row * stride +
+		    (size_t)x * 4);
+}
+
+/* Bring window w's texture up to date with its buffer; bind it. */
+static bool
+window_texture(struct ws_window *w, pixman_image_t *img, int *tw, int *th)
+{
+	struct gles_window *gw = w->render;
+	int iw = pixman_image_get_width(img), ih = pixman_image_get_height(img);
+	int s = w->buffer != NULL && w->buffer->scale ? (int)w->buffer->scale :
+	    1;
+	pixman_box32_t *b;
+	int i, n, x1, y1, x2, y2;
+
+	if (gw == NULL) {
+		gw = calloc(1, sizeof(*gw));
+		if (gw == NULL)
+			return false;
+		pixman_region32_init(&gw->dirty);
+		gw->all = true;
+		w->render = gw;
+	}
+	if (gw->tex == 0) {
+		glGenTextures(1, &gw->tex);
+		glBindTexture(GL_TEXTURE_2D, gw->tex);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+		    GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+		    GL_CLAMP_TO_EDGE);
+		gw->all = true;
+	} else
+		glBindTexture(GL_TEXTURE_2D, gw->tex);
+	if (gw->tw != iw || gw->th != ih)
+		gw->all = true;
+	if (gw->all) {
+		if (!upload(img, &gw->tw, &gw->th))
+			return false;
+	} else {
+		/* only what the client damaged, in buffer pixels */
+		b = pixman_region32_rectangles(&gw->dirty, &n);
+		for (i = 0; i < n; i++) {
+			x1 = b[i].x1 * s < 0 ? 0 : b[i].x1 * s;
+			y1 = b[i].y1 * s < 0 ? 0 : b[i].y1 * s;
+			x2 = b[i].x2 * s > iw ? iw : b[i].x2 * s;
+			y2 = b[i].y2 * s > ih ? ih : b[i].y2 * s;
+			if (x2 > x1 && y2 > y1)
+				upload_rect(img, x1, y1, x2 - x1, y2 - y1);
+		}
+	}
+	gw->all = false;
+	pixman_region32_clear(&gw->dirty);
+	*tw = gw->tw;
+	*th = gw->th;
+	return true;
+}
+
 static void
 gles_draw(struct ws_server *srv, const struct ws_draw *d)
 {
@@ -464,9 +610,16 @@ gles_draw(struct ws_server *srv, const struct ws_draw *d)
 	(void)srv;
 	if (d->w <= 0 || d->h <= 0 || d->opacity <= 0.0)
 		return;
-	glBindTexture(GL_TEXTURE_2D, gl.tex);
-	if (!upload(d->src, &tw, &th))
-		return;
+	if (d->window != NULL &&
+	    (pixman_image_get_format(d->src) == PIXMAN_a8r8g8b8 ||
+	    pixman_image_get_format(d->src) == PIXMAN_x8r8g8b8)) {
+		if (!window_texture(d->window, d->src, &tw, &th))
+			return;
+	} else {
+		glBindTexture(GL_TEXTURE_2D, gl.tex);
+		if (!upload(d->src, &tw, &th))
+			return;
+	}
 	/* the source pixels this covers, as texture coordinates */
 	u2 = (GLfloat)(d->w * d->fx / tw);
 	v2 = (GLfloat)(d->h * d->fy / th);
@@ -619,6 +772,38 @@ gles_presented(struct ws_server *srv)
 	gl.pending = NULL;
 }
 
+/* ---- windows ---- */
+
+static void
+gles_window_commit(struct ws_server *srv, struct ws_window *w,
+    pixman_region32_t *damage)
+{
+	struct gles_window *gw = w->render;
+
+	(void)srv;
+	if (gw == NULL)
+		return;		/* no texture yet: the first draw makes it */
+	if (damage == NULL)
+		gw->all = true;
+	else
+		pixman_region32_union(&gw->dirty, &gw->dirty, damage);
+}
+
+static void
+gles_window_gone(struct ws_server *srv, struct ws_window *w)
+{
+	struct gles_window *gw = w->render;
+
+	(void)srv;
+	if (gw == NULL)
+		return;
+	if (gw->tex != 0)
+		glDeleteTextures(1, &gw->tex);
+	pixman_region32_fini(&gw->dirty);
+	free(gw);
+	w->render = NULL;
+}
+
 const struct ws_renderer_ops gles_renderer_ops = {
 	.name = "gles2",
 	.init = gles_init,
@@ -630,4 +815,6 @@ const struct ws_renderer_ops gles_renderer_ops = {
 	.end = gles_end,
 	.scanout = gles_scanout,
 	.presented = gles_presented,
+	.window_commit = gles_window_commit,
+	.window_gone = gles_window_gone,
 };
