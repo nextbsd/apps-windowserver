@@ -193,6 +193,9 @@ struct ws_window {
 	pixman_region32_t input_region;		/* window-local */
 	bool		frame_requested;	/* commit asked for FRAME_DONE */
 	bool		frame_inflight;		/* composited, waiting for present */
+	bool		culled;		/* not drawn this frame (compositor.c) */
+	bool		occluded;	/* covered by opaque windows the last
+					   time its frame was damaged */
 	/* minimizing (tile.c) */
 	bool		minimized;	/* WS_MSG_WINDOW_MINIMIZE, until the
 					   owner orders it in or out */

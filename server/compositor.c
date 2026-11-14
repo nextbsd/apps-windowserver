@@ -4,8 +4,10 @@
  *
  * The compositor. Windows are composited bottom to top, but only inside
  * the damaged region, by the renderer (srv->renderer: render_pixman.c
- * today). The output backend then puts the same region on the screen
- * (DRM) or does nothing (headless).
+ * today). Windows hidden there under opaque windows are left out, and
+ * the background is only filled where no opaque window is. The output
+ * backend then puts the same region on the screen (DRM) or does nothing
+ * (headless).
  *
  * HiDPI (display.c): positions are points, the backing store is scale
  * pixels per point. Images are drawn at their own pixels per point
@@ -241,17 +243,77 @@ composite_window(struct ws_server *srv, struct ws_window *w,
 	    w->frame.x, w->frame.y, bw, bh);
 }
 
+/*
+ * Does w hide what is below its frame? Only when it is drawn without
+ * blending (as composite_window does at opacity 1) over all of its
+ * frame: a smaller buffer leaves the rest showing what is below.
+ */
+static bool
+window_opaque(struct ws_window *w)
+{
+	struct ws_buffer *b = w->buffer;
+
+	if (!w->visible || w->tile_for != NULL || b == NULL ||
+	    w->frame.width <= 0 || w->frame.height <= 0)
+		return false;
+	if ((w->flags & WS_WINDOW_OPAQUE) == 0 &&
+	    b->format != WS_FORMAT_XRGB8888)
+		return false;
+	return (int)(b->width / b->scale) >= w->frame.width &&
+	    (int)(b->height / b->scale) >= w->frame.height;
+}
+
+/*
+ * Walk the stack top-down and mark the windows not to draw in `region`
+ * (points): those it doesn't meet, and those the opaque windows above
+ * cover there. `bg` gets what no opaque window covers.
+ */
+static void
+occlude(struct ws_server *srv, pixman_region32_t *region,
+    pixman_region32_t *bg)
+{
+	pixman_region32_t vis;
+	pixman_box32_t f;
+	struct ws_window *w;
+	bool hidden;
+
+	pixman_region32_init(bg);
+	pixman_region32_copy(bg, region);
+	pixman_region32_init(&vis);
+	for (w = srv->stack_top; w != NULL; w = w->below) {
+		f = (pixman_box32_t){ w->frame.x, w->frame.y,
+		    w->frame.x + w->frame.width, w->frame.y + w->frame.height };
+		w->culled = true;
+		if (w->frame.width <= 0 || w->frame.height <= 0 ||
+		    pixman_region32_contains_rectangle(region, &f) ==
+		    PIXMAN_REGION_OUT)
+			continue;
+		pixman_region32_intersect_rect(&vis, bg, f.x1, f.y1,
+		    (unsigned)w->frame.width, (unsigned)w->frame.height);
+		hidden = !pixman_region32_not_empty(&vis);
+		if (hidden != w->occluded)
+			ws_debug(hidden ? "window %u (%s) not drawn: covered" :
+			    "window %u (%s) drawn again", w->id, w->title);
+		w->occluded = hidden;
+		w->culled = hidden;
+		if (!hidden && window_opaque(w))
+			pixman_region32_subtract(bg, bg, &vis);
+	}
+	pixman_region32_fini(&vis);
+}
+
 /* Composite `region` (points) and finish the frame; `out` gets what
    changed in panel pixels. */
 static void
 repaint_region(struct ws_server *srv, pixman_region32_t *region,
     pixman_region32_t *out)
 {
-	pixman_region32_t back;
+	pixman_region32_t back, uncov, uncov_back;
 	pixman_color_t bg;
-	pixman_box32_t *ext, *bext;
+	pixman_box32_t *ext, *bext, *b;
 	struct ws_window *w;
 	uint32_t c = srv->cfg.background;
+	int n;
 
 	region_to_back(srv, region, &back);
 	srv->renderer->begin(srv, &back);
@@ -262,18 +324,25 @@ repaint_region(struct ws_server *srv, pixman_region32_t *region,
 	bg.green = (uint16_t)(((c >> 8) & 0xff) * 0x101);
 	bg.blue = (uint16_t)((c & 0xff) * 0x101);
 	bg.alpha = 0xffff;
-	srv->renderer->fill(srv, &bg, bext, 1);
 
 	if (srv->ov.state != WS_OVERVIEW_STATE_CLOSED) {
 		/* the window overview (overview.c) */
+		srv->renderer->fill(srv, &bg, bext, 1);
 		overview_composite(srv, region);
 	} else {
-		/* TODO: skip windows hidden behind opaque windows above
-		 * them. */
+		occlude(srv, region, &uncov);
+		region_to_back(srv, &uncov, &uncov_back);
+		b = pixman_region32_rectangles(&uncov_back, &n);
+		if (n > 0)
+			srv->renderer->fill(srv, &bg, b, n);
+		pixman_region32_fini(&uncov_back);
+		pixman_region32_fini(&uncov);
 		for (w = srv->stack_bottom; w != NULL; w = w->above) {
+			/* the border is outside the frame: drawn anyway */
 			if (w == srv->tiling.border)
 				tiling_draw_border(srv, w);
-			composite_window(srv, w, ext, 1.0);
+			if (!w->culled)
+				composite_window(srv, w, ext, 1.0);
 		}
 	}
 
