@@ -851,7 +851,11 @@ gles_draw(struct ws_server *srv, const struct ws_draw *d)
 		/* the mirror: the image uploaded whole, this frame's damage */
 		glBindFramebuffer(GL_FRAMEBUFFER, gl.mirror_fbo);
 		glBindTexture(GL_TEXTURE_2D, gl.tex);
-		if (upload(d->src, &tw, &th)) {
+		/* a GPU buffer has no CPU pixels: its own texture is the truth */
+		if (b != NULL && b->dmabuf && b->render != NULL)
+			glBindTexture(GL_TEXTURE_2D,
+			    ((struct gles_buffer *)b->render)->tex);
+		if ((b != NULL && b->dmabuf) || upload(d->src, &tw, &th)) {
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
 			    d->smooth ? GL_LINEAR : GL_NEAREST);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
