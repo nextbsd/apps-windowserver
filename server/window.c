@@ -589,6 +589,8 @@ window_destroy(struct ws_server *srv, struct ws_window *w)
 		window_release_buffer(srv, w, w->buffer);
 	else
 		buffer_unref(srv, w->buffer);
+	if (srv->renderer->window_gone != NULL)
+		srv->renderer->window_gone(srv, w);
 	pixman_region32_fini(&w->pending_damage);
 	pixman_region32_fini(&w->input_region);
 	if (w->cursor_buffer != NULL) {
@@ -883,6 +885,9 @@ window_commit(struct ws_server *srv, struct ws_window *w, uint32_t flags,
 			pixman_region32_fini(&r);
 		}
 	}
+	if (srv->renderer->window_commit != NULL)
+		srv->renderer->window_commit(srv, w,
+		    full ? NULL : &w->pending_damage);
 	capture_window_committed(srv, w, full ? NULL : &w->pending_damage);
 	overview_window_committed(srv, w);
 	tiling_committed(srv, w);
