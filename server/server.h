@@ -581,7 +581,8 @@ struct ws_draw {
 	pixman_image_t	*src;
 	int32_t		x, y, w, h;
 	double		fx, fy;
-	bool		smooth;		/* bilinear, else nearest */
+	bool		smooth;		/* bilinear, else nearest (only
+					   when fx or fy isn't 1) */
 	bool		pad;		/* edge pixels repeat outward */
 	bool		blend;		/* OVER, else SRC (src replaces) */
 	double		opacity;	/* 1.0 for none */
@@ -589,9 +590,9 @@ struct ws_draw {
 
 /*
  * How the composited screen is drawn (E38). The compositor decides what
- * goes where and in which order; the renderer draws it. Everything
- * between begin and end is clipped to the region begin was given, in
- * backing pixels.
+ * goes where and in which order; the renderer draws it. Draws and
+ * fills happen only between begin and end, clipped to the region begin
+ * was given, in backing pixels inside the screen.
  */
 struct ws_renderer_ops {
 	const char *name;

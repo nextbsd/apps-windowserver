@@ -104,11 +104,25 @@ pr_fill(struct ws_server *srv, const pixman_color_t *color,
     const pixman_box32_t *boxes, int n)
 {
 	pixman_image_t *solid;
+	pixman_box32_t b;
 	int i;
 
 	if (color->alpha == 0xffff) {
-		pixman_image_fill_boxes(PIXMAN_OP_SRC, srv->shadow, color, n,
-		    boxes);
+		/* fill_boxes keeps to the clip but not to the image */
+		for (i = 0; i < n; i++) {
+			b = boxes[i];
+			if (b.x1 < 0)
+				b.x1 = 0;
+			if (b.y1 < 0)
+				b.y1 = 0;
+			if (b.x2 > (int32_t)srv->back_width)
+				b.x2 = (int32_t)srv->back_width;
+			if (b.y2 > (int32_t)srv->back_height)
+				b.y2 = (int32_t)srv->back_height;
+			if (b.x2 > b.x1 && b.y2 > b.y1)
+				pixman_image_fill_boxes(PIXMAN_OP_SRC,
+				    srv->shadow, color, 1, &b);
+		}
 		return;
 	}
 	solid = pixman_image_create_solid_fill(color);
