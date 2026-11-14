@@ -13,6 +13,7 @@
 # area and tiles kept out of the Dock's strip, the active app's menu
 # bar strip (WS_MSG_SET_MENU_BAR) with a top Dock below it, screen size
 # changes,
+# an opaque window hiding another (occlusion culling),
 # touchpad scroll phases and momentum scrolling, and the window
 # overview (Exposé).
 #
@@ -241,6 +242,31 @@ expect_pixel 690 590 20a050 "W3 restored, with what it drew while minimized"
 expect_pixel 215 $((TILE_Y - 81)) 202020 "tile gone after the restore"
 "$B/wsctl" list | grep '"W3"$' | grep -q ' active key ' &&
     pass "W3 is key again" || fail "W3 not key after restoring"
+
+# Occlusion: "o" in Beta opens W5, opaque (XRGB8888), right over W3.
+# W3 isn't drawn at all (the server says so at -v), W2 above and the
+# rest of W1 still are, and once W5 closes the screen is as it was.
+"$B/wsctl" snapshot "$LOG/occl-before.ppm" >/dev/null || fail "wsctl snapshot"
+SL=$(wc -l <"$LOG/server.log")
+"$B/wsctl" key o || fail "wsctl key o"
+mark
+expect_pixel 690 590 808080 "opaque W5 over W3"
+expect_pixel 701 251 404040 "W5's border"
+expect_pixel 320 300 30a040 "W2 still over W5"
+expect_pixel 120 450 c03030 "W1 beside W5"
+tail -n +$((SL + 1)) "$LOG/server.log" | grep -q '(W3) not drawn: covered' &&
+    pass "W3, covered by W5, wasn't drawn" || fail "W3 drawn under opaque W5"
+tail -n +$((SL + 1)) "$LOG/server.log" | grep -q '(W[25]) not drawn' &&
+    fail "W2 or W5 not drawn" || pass "W2 and W5 drawn"
+SL=$(wc -l <"$LOG/server.log")
+"$B/wsctl" key o || fail "wsctl key o (close W5)"
+mark
+tail -n +$((SL + 1)) "$LOG/server.log" | grep -q '(W3) drawn again' &&
+    pass "W3 drawn again once W5 closed" || fail "W3 not drawn after W5 closed"
+"$B/wsctl" snapshot "$LOG/occl-after.ppm" >/dev/null || fail "wsctl snapshot"
+cmp -s "$LOG/occl-before.ppm" "$LOG/occl-after.ppm" &&
+    pass "screen unchanged after W5 came and went" ||
+    fail "screen differs after W5 came and went"
 
 # The Dock (WS_SERVER_DOCK). Apps can't list every app's windows;
 # a Dock connection can, with ids.

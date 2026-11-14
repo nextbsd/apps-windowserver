@@ -27,8 +27,10 @@
  * server's default says), "d" minimizes it into the Dock, "r" onto the
  * bottom row (WS_SERVER_MINIMIZE_WHERE; with no key window, the window
  * it minimized last moves there), "c" redraws W3
- * in green (minimized or not), and on WS_EVENT_WINDOW_RESTORE it
- * orders the window in again and makes it key.
+ * in green (minimized or not), "o" opens W5, grey and XRGB8888, right
+ * over W3 (occlusion), and closes it the next time, and on
+ * WS_EVENT_WINDOW_RESTORE it orders the window in again and makes it
+ * key.
  */
 
 #include <sys/mman.h>
@@ -58,7 +60,7 @@ struct win {
 };
 
 #define NAPPS	3
-#define NWINS	4
+#define NWINS	5
 
 static struct app apps[NAPPS] = {
 	{ "Alpha", NULL }, { "Beta", NULL }, { "Gamma", NULL },
@@ -67,6 +69,9 @@ static struct win wins[NWINS];
 static volatile sig_atomic_t quit;
 static uint32_t beta_key;	/* Beta's key window, for "m" */
 static uint32_t beta_min;	/* the window Beta minimized last */
+
+static int make_window(struct win *, struct app *, const char *, int, int,
+    int, int, int32_t, uint32_t, uint32_t, uint32_t);
 
 static const char *
 win_name(uint32_t id)
@@ -137,6 +142,15 @@ beta_act(const ws_event_t *ev)
 		ws_window_damage(c, wins[2].id, &r, 1);
 		ws_window_commit(c, wins[2].id, 0);
 		printf("redrew W3 green\n");
+	} else if (strcmp(ev->u.key.text, "o") == 0 && wins[4].id == 0) {
+		if (make_window(&wins[4], &apps[1], "W5", 300, 250, 500, 400,
+		    WS_LEVEL_NORMAL, 0, 0x00808080, WS_FORMAT_XRGB8888) < 0)
+			wins[4].id = 0;
+	} else if (strcmp(ev->u.key.text, "o") == 0) {
+		ws_window_destroy(c, wins[4].id);
+		ws_buffer_destroy(c, wins[4].buf);
+		memset(&wins[4], 0, sizeof(wins[4]));
+		printf("closed W5\n");
 	}
 }
 
