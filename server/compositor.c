@@ -30,20 +30,49 @@
 
 static void draw_cursor(struct ws_server *srv);
 
-/* The renderer for the current sizes; a GPU one that can't falls back
-   to pixman. */
+static void repaint_region(struct ws_server *srv, pixman_region32_t *region,
+    pixman_region32_t *out);
+
+/*
+ * The renderer for the current sizes; a GPU one that can't falls back
+ * to pixman. While running, the GPU renderer's buffer is on screen: so
+ * its flip finishes first, pixman draws a whole frame and the output
+ * shows it, and only then does the GPU renderer let its buffers go
+ * (removing the framebuffer on screen would turn the display off).
+ */
 static int
 renderer_init(struct ws_server *srv)
 {
+	const struct ws_renderer_ops *old;
+	pixman_region32_t all, out;
+	bool shown;
+
 	if (srv->renderer == NULL)
 		srv->renderer = &pixman_renderer_ops;
 	if (srv->renderer->init(srv) == 0)
 		return 0;
 	if (srv->renderer == &pixman_renderer_ops)
 		return -1;
-	srv->renderer->fini(srv);
+	old = srv->renderer;
+	shown = old->scanout != NULL && srv->display_active &&
+	    srv->output->take_screen != NULL;
+	if (shown && srv->present_pending && srv->output->wait_present != NULL)
+		srv->output->wait_present(srv);
 	srv->renderer = &pixman_renderer_ops;
-	return srv->renderer->init(srv);
+	if (srv->renderer->init(srv) < 0) {
+		old->fini(srv);
+		return -1;
+	}
+	if (shown) {
+		pixman_region32_init_rect(&all, 0, 0, srv->width,
+		    srv->height);
+		repaint_region(srv, &all, &out);
+		pixman_region32_fini(&out);
+		pixman_region32_fini(&all);
+		srv->output->take_screen(srv);
+	}
+	old->fini(srv);
+	return 0;
 }
 
 int

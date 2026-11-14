@@ -48,6 +48,7 @@ struct gles {
 	EGLContext	ctx;
 	EGLSurface	egl_surface;
 	uint32_t	width, height;	/* the surface: the panel */
+	GLint		max_tex;	/* GL_MAX_TEXTURE_SIZE */
 	bool		bgra;		/* GL_EXT_texture_format_BGRA8888 */
 	bool		unpack_row;	/* GL_EXT_unpack_subimage */
 	GLuint		prog_tex, prog_fill;
@@ -188,7 +189,13 @@ static const char vs_tex[] =
 /* Premultiplied ARGB in, so opacity scales every channel (OVER is
    ONE, ONE_MINUS_SRC_ALPHA). */
 static const char fs_tex[] =
+    /* texture coordinates need more than mediump's 11 bits on GPUs
+       that honour it, past ~2048 texels */
+    "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+    "precision highp float;\n"
+    "#else\n"
     "precision mediump float;\n"
+    "#endif\n"
     "uniform sampler2D tex;\n"
     "uniform float opacity;\n"
     "uniform bool opaque;\n"
@@ -295,6 +302,7 @@ gles_init(struct ws_server *srv)
 	}
 	ext = (const char *)glGetString(GL_EXTENSIONS);
 	gl.bgra = ext != NULL && has_ext(ext, "GL_EXT_texture_format_BGRA8888");
+	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &gl.max_tex);
 	gl.unpack_row = ext != NULL && has_ext(ext, "GL_EXT_unpack_subimage");
 	gl.prog_tex = program(vs_tex, fs_tex);
 	gl.prog_fill = program(vs_fill, fs_fill);
@@ -343,6 +351,13 @@ gles_fini(struct ws_server *srv)
 		eglDestroyContext(gl.dpy, gl.ctx);
 	if (gl.surface != NULL)
 		gbm_surface_destroy(gl.surface);
+	/* never started again in this server's life (compositor.c) */
+	if (gl.dpy != EGL_NO_DISPLAY)
+		eglTerminate(gl.dpy);
+	if (gl.gbm != NULL)
+		gbm_device_destroy(gl.gbm);
+	gl.dpy = EGL_NO_DISPLAY;
+	gl.gbm = NULL;
 	gl.egl_surface = EGL_NO_SURFACE;
 	gl.ctx = EGL_NO_CONTEXT;
 	gl.surface = NULL;
@@ -396,6 +411,8 @@ upload(pixman_image_t *img, int *tw, int *th)
 	int stride, y;
 	uint8_t *data;
 
+	if (w > gl.max_tex || h > gl.max_tex)
+		return false;	/* drawn as nothing rather than black */
 	if (f != PIXMAN_a8r8g8b8 && f != PIXMAN_x8r8g8b8) {
 		conv = pixman_image_create_bits(PIXMAN_a8r8g8b8, w, h, NULL, 0);
 		if (conv == NULL)
@@ -547,6 +564,12 @@ gles_scanout(struct ws_server *srv, uint32_t *fb_id)
 	int fd, i, planes, r = -1;
 
 	(void)srv;
+	/* a frame that never reached the screen (a failed flip and
+	   SetCrtc): give its buffer back, or GBM runs out */
+	if (gl.pending != NULL) {
+		gbm_surface_release_buffer(gl.surface, gl.pending);
+		gl.pending = NULL;
+	}
 	bo = gbm_surface_lock_front_buffer(gl.surface);
 	if (bo == NULL) {
 		ws_err("renderer: no front buffer to show");

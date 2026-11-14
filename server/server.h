@@ -573,6 +573,10 @@ struct ws_output_ops {
 	void	(*cursor_move)(struct ws_server *srv, int x, int y);
 	void	(*cursor_hide)(struct ws_server *srv);
 	void	(*shutdown)(struct ws_server *srv);
+	/* Switching away from a renderer with its own scanout buffers:
+	 * wait for the flip in flight, then show srv->out whole. */
+	void	(*wait_present)(struct ws_server *srv);
+	void	(*take_screen)(struct ws_server *srv);
 };
 
 /* ---- renderers ---- */

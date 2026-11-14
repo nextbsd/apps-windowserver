@@ -19,6 +19,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -305,6 +306,26 @@ show(struct ws_server *srv, uint32_t fb_id)
 	return false;
 }
 
+/* Wait (a little) for the flip in flight to finish. */
+static void
+drm_wait_present(struct ws_server *srv)
+{
+	struct pollfd p = { .fd = drm.fd, .events = POLLIN };
+	int i;
+
+	for (i = 0; i < 10 && srv->present_pending; i++)
+		if (poll(&p, 1, 100) > 0)
+			drm_readable(srv);
+}
+
+/* Show the whole of srv->out from a dumb buffer (renderer switch). */
+static void
+drm_take_screen(struct ws_server *srv)
+{
+	drm.flip_ok = true;
+	(void)modeset(srv);
+}
+
 static bool
 drm_present(struct ws_server *srv, pixman_region32_t *damage)
 {
@@ -443,6 +464,8 @@ const struct ws_output_ops drm_output_ops = {
 	.cursor_move = drm_cursor_move,
 	.cursor_hide = drm_cursor_hide,
 	.shutdown = drm_shutdown,
+	.wait_present = drm_wait_present,
+	.take_screen = drm_take_screen,
 };
 
 /*
