@@ -23,6 +23,14 @@
  * With EGL_EXT_buffer_age a frame repaints only what changed since the
  * GBM buffer it draws into was last on screen; without it, everything.
  *
+ * GPU priority (#74): with EGL_IMG_context_priority the context asks to
+ * be HIGH, so the composite jobs go ahead of a GPU-bound client's queued
+ * work instead of waiting their turn behind it, and the desktop keeps its
+ * frame rate while an app saturates the GPU. The driver decides: on v3d
+ * that needs NextBSD's kernel extension and an fd opened as root, which
+ * Mesa's is (gles_open). What was granted is logged; without the
+ * extension nothing changes.
+ *
  * GPU buffers (T12): a client's dmabuf is imported as an EGLImage and
  * drawn straight from it, never copied. The formats offered list the
  * GPU's own tiled modifiers before LINEAR, which v3d samples several
@@ -58,6 +66,12 @@
 #ifndef EGL_BUFFER_AGE_EXT
 #define EGL_BUFFER_AGE_EXT		0x313D
 #endif
+#ifndef EGL_CONTEXT_PRIORITY_LEVEL_IMG
+#define EGL_CONTEXT_PRIORITY_LEVEL_IMG	0x3100
+#define EGL_CONTEXT_PRIORITY_HIGH_IMG	0x3101
+#define EGL_CONTEXT_PRIORITY_MEDIUM_IMG	0x3102
+#define EGL_CONTEXT_PRIORITY_LOW_IMG	0x3103
+#endif
 
 /* Damage of the frames before this one, newest first (buffer age). */
 #define GLES_HISTORY	4
@@ -91,6 +105,7 @@ struct gles {
 	bool		bgra;		/* GL_EXT_texture_format_BGRA8888 */
 	bool		unpack_row;	/* GL_EXT_unpack_subimage */
 	bool		buffer_age;	/* EGL_EXT_buffer_age */
+	const char	*priority;	/* GPU priority granted, or NULL */
 	/* GPU buffers: EGL_EXT_image_dma_buf_import, GL_OES_EGL_image */
 	bool		dmabuf;
 	char		render_node[32];
@@ -374,10 +389,58 @@ dmabuf_setup(const char *glext)
 	gl.dmabuf = gl.render_node[0] != '\0';
 }
 
+/*
+ * The GLES2 context, HIGH priority if EGL_IMG_context_priority is there
+ * (#74). The level is a hint the driver may lower, so ask EGL what was
+ * granted; gl.priority stays NULL without the extension.
+ */
+static EGLContext
+create_context(void)
+{
+	EGLint attr[] = { EGL_CONTEXT_CLIENT_VERSION, 2,
+	    EGL_CONTEXT_PRIORITY_LEVEL_IMG, EGL_CONTEXT_PRIORITY_HIGH_IMG,
+	    EGL_NONE };
+	EGLContext ctx;
+	EGLint level;
+
+	gl.priority = NULL;
+	if (!has_ext(eglQueryString(gl.dpy, EGL_EXTENSIONS),
+	    "EGL_IMG_context_priority"))
+		attr[2] = EGL_NONE;
+	ctx = eglCreateContext(gl.dpy, gl.config, EGL_NO_CONTEXT, attr);
+	if (ctx == EGL_NO_CONTEXT && attr[2] != EGL_NONE) {
+		/* the spec says a hint never fails; don't count on it */
+		ws_warn("renderer: high-priority context failed (0x%x); "
+		    "trying without", eglGetError());
+		attr[2] = EGL_NONE;
+		ctx = eglCreateContext(gl.dpy, gl.config, EGL_NO_CONTEXT,
+		    attr);
+	}
+	if (ctx == EGL_NO_CONTEXT || attr[2] == EGL_NONE)
+		return ctx;
+	if (!eglQueryContext(gl.dpy, ctx, EGL_CONTEXT_PRIORITY_LEVEL_IMG,
+	    &level))
+		level = 0;
+	switch (level) {
+	case EGL_CONTEXT_PRIORITY_HIGH_IMG:
+		gl.priority = "high";
+		break;
+	case EGL_CONTEXT_PRIORITY_MEDIUM_IMG:
+		gl.priority = "medium";
+		break;
+	case EGL_CONTEXT_PRIORITY_LOW_IMG:
+		gl.priority = "low";
+		break;
+	default:
+		gl.priority = "unknown";
+		break;
+	}
+	return ctx;
+}
+
 static int
 gles_init(struct ws_server *srv)
 {
-	EGLint ctx_attr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
 	const char *ext, *renderer;
 	int i;
 
@@ -398,7 +461,7 @@ gles_init(struct ws_server *srv)
 		ws_info("renderer: no XRGB8888 EGL config; using pixman");
 		return -1;
 	}
-	gl.ctx = eglCreateContext(gl.dpy, gl.config, EGL_NO_CONTEXT, ctx_attr);
+	gl.ctx = create_context();
 	gl.width = srv->panel_width;
 	gl.height = srv->panel_height;
 	gl.surface = gbm_surface_create(gl.gbm, gl.width, gl.height,
@@ -483,12 +546,15 @@ gles_init(struct ws_server *srv)
 	for (i = 0; i < GLES_HISTORY; i++)
 		pixman_region32_init(&gl.history[i]);
 	gl.nhistory = 0;
-	ws_info("renderer: gles2 on %s, %ux%u%s%s%s%s%s", renderer, gl.width,
+	ws_info("renderer: gles2 on %s, %ux%u%s%s%s%s%s, GPU priority %s",
+	    renderer, gl.width,
 	    gl.height, gl.bgra ? ", BGRA textures" : "",
 	    gl.unpack_row ? ", row length" : "",
 	    gl.buffer_age ? ", buffer age" : "",
 	    gl.dmabuf ? ", GPU buffers from " : "",
-	    gl.dmabuf ? gl.render_node : "");
+	    gl.dmabuf ? gl.render_node : "",
+	    gl.priority != NULL ? gl.priority :
+	    "default (no EGL_IMG_context_priority)");
 	return 0;
 fail:
 	gles_fini(srv);
