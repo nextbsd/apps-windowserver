@@ -127,19 +127,12 @@ void
 drag_composite(struct ws_server *srv)
 {
 	struct ws_drag *d = &srv->drag;
-	pixman_image_t *mask;
-	pixman_color_t a;
 
 	if (d->session == 0 || d->image == NULL || d->image_rect.width <= 0)
 		return;
-	a.red = a.green = a.blue = 0;
-	a.alpha = (uint16_t)(DRAG_IMAGE_OPACITY * 0xffff);
-	mask = pixman_image_create_solid_fill(&a);
-	shadow_image(srv, PIXMAN_OP_OVER, d->image, d->image_scale, mask,
+	shadow_image(srv, true, d->image, d->image_scale, DRAG_IMAGE_OPACITY,
 	    d->image_rect.x, d->image_rect.y, d->image_rect.width,
 	    d->image_rect.height);
-	if (mask != NULL)
-		pixman_image_unref(mask);
 }
 
 /* A copy of the client's buffer, so the client may destroy it. */

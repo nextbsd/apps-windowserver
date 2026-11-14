@@ -621,12 +621,13 @@ buffer_view(struct ws_window *w)
 	    pixman_image_get_data(b->image), (int)b->stride);
 }
 
-/* Draw sw x sh of src into r on the screen, bilinear, with a mask. */
+/* Draw sw x sh of src into r on the screen, bilinear, with an
+   opacity. */
 static void
 draw_scaled(struct ws_server *srv, pixman_image_t *src, int sw, int sh,
-    ws_rect_t r, pixman_image_t *mask)
+    ws_rect_t r, double opacity)
 {
-	shadow_scaled(srv, src, sw, sh, r, mask);
+	shadow_scaled(srv, src, sw, sh, r, opacity);
 }
 
 /* The preview at the item's place in the open overview, box-filtered
@@ -719,11 +720,11 @@ overview_composite(struct ws_server *srv, pixman_region32_t *region)
 {
 	struct ws_overview *ov = &srv->ov;
 	pixman_box32_t *ext = pixman_region32_extents(region);
-	pixman_image_t *mask = NULL, *src, *icon;
+	pixman_image_t *src, *icon;
 	pixman_color_t dim = { 0, 0, 0, 0 };
 	struct ws_window *w;
 	ws_rect_t from, r, to;
-	double e = ease(ov->t);
+	double e = ease(ov->t), fade;
 	unsigned i, j, *order;
 	int *z, cw, ch, tmp;
 
@@ -760,11 +761,8 @@ overview_composite(struct ws_server *srv, pixman_region32_t *region)
 			order[j - 1] = (unsigned)tmp;
 		}
 
-	if (e < 1.0) {
-		pixman_color_t a = { 0, 0, 0, (uint16_t)(e * 0xffff) };
-
-		mask = pixman_image_create_solid_fill(&a);
-	}
+	/* minimized windows and app icons fade in */
+	fade = e < 1.0 ? e : 1.0;
 	for (j = 0; j < ov->nitems; j++) {
 		struct ws_overview_item *it = &ov->items[order[j]];
 
@@ -775,9 +773,8 @@ overview_composite(struct ws_server *srv, pixman_region32_t *region)
 		if (ov->state == WS_OVERVIEW_STATE_OPEN) {
 			src = item_cache(srv, it, w);
 			if (src != NULL)
-				shadow_image(srv, PIXMAN_OP_OVER, src,
-				    srv->scale, NULL, to.x, to.y, to.width,
-				    to.height);
+				shadow_image(srv, true, src, srv->scale, 1.0,
+				    to.x, to.y, to.width, to.height);
 		} else {
 			from = home_rect(srv, w);
 			r.x = (int32_t)lround(from.x + (to.x - from.x) * e);
@@ -791,7 +788,7 @@ overview_composite(struct ws_server *srv, pixman_region32_t *region)
 				buffer_extent(w, &cw, &ch);
 				/* minimized windows fade in from their tiles */
 				draw_scaled(srv, src, cw, ch, r,
-				    w->minimized ? mask : NULL);
+				    w->minimized ? fade : 1.0);
 				pixman_image_unref(src);
 			}
 			to = r;
@@ -800,10 +797,8 @@ overview_composite(struct ws_server *srv, pixman_region32_t *region)
 			draw_highlight(srv, to, e);
 		if (it->icon.width > 0 && (icon = app_icon(w)) != NULL)
 			draw_scaled(srv, icon, pixman_image_get_width(icon),
-			    pixman_image_get_height(icon), it->icon, mask);
+			    pixman_image_get_height(icon), it->icon, fade);
 	}
-	if (mask != NULL)
-		pixman_image_unref(mask);
 	free(order);
 	free(z);
 }
