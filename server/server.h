@@ -571,6 +571,44 @@ struct ws_output_ops {
 	void	(*shutdown)(struct ws_server *srv);
 };
 
+/* ---- renderers ---- */
+
+/*
+ * One image drawn into the screen: w x h backing pixels at x, y, from
+ * src scaled by fx, fy (source pixels per backing pixel; 1 = as is).
+ */
+struct ws_draw {
+	pixman_image_t	*src;
+	int32_t		x, y, w, h;
+	double		fx, fy;
+	bool		smooth;		/* bilinear, else nearest */
+	bool		pad;		/* edge pixels repeat outward */
+	bool		blend;		/* OVER, else SRC (src replaces) */
+	double		opacity;	/* 1.0 for none */
+};
+
+/*
+ * How the composited screen is drawn (E38). The compositor decides what
+ * goes where and in which order; the renderer draws it. Everything
+ * between begin and end is clipped to the region begin was given, in
+ * backing pixels.
+ */
+struct ws_renderer_ops {
+	const char *name;
+	/* Make the screen for the current sizes, at start and whenever
+	 * they change (display.c). */
+	int	(*init)(struct ws_server *srv);
+	void	(*fini)(struct ws_server *srv);
+	void	(*begin)(struct ws_server *srv, pixman_region32_t *back);
+	void	(*draw)(struct ws_server *srv, const struct ws_draw *d);
+	/* Opaque colours replace, translucent ones blend (OVER). */
+	void	(*fill)(struct ws_server *srv, const pixman_color_t *color,
+		    const pixman_box32_t *boxes, int n);
+	/* Done drawing `back`; `out` gets what changed in panel pixels. */
+	void	(*end)(struct ws_server *srv, pixman_region32_t *back,
+		    pixman_region32_t *out);
+};
+
 struct ws_mach_item {
 	struct ws_mach_item *next;
 	size_t		size;
@@ -617,7 +655,9 @@ struct ws_server {
 	pixman_image_t	*panel;		/* the shadow scaled to the panel,
 					   when the sizes differ, else NULL */
 	pixman_image_t	*out;		/* what the panel shows: panel or
-					   shadow (not owned) */
+					   shadow (not owned). The pixman
+					   renderer's; outputs, captures
+					   and snapshots read it */
 	bool		screen_internal; /* a laptop's own panel */
 	bool		edid_trusted;	/* mm_width/height are real */
 	char		display_id[48];	/* EDID vendor-product-serial */
@@ -635,6 +675,8 @@ struct ws_server {
 	pixman_region32_t damage;	/* screen damage not yet composited */
 	const struct ws_output_ops *output;
 	void		*output_data;
+	const struct ws_renderer_ops *renderer;
+	void		*renderer_data;
 	bool		present_pending;	/* waiting for page flip */
 	bool		display_active;		/* we own the VT and DRM master */
 
@@ -1123,13 +1165,15 @@ int	cursor_window_set(struct ws_server *srv, struct ws_window *w,
 /* ---- compositor.c ---- */
 int	compositor_init(struct ws_server *srv);
 int	compositor_resize(struct ws_server *srv);
-void	shadow_image(struct ws_server *srv, pixman_op_t op,
-	    pixman_image_t *src, uint32_t src_scale, pixman_image_t *mask,
+void	shadow_image(struct ws_server *srv, bool blend,
+	    pixman_image_t *src, uint32_t src_scale, double opacity,
 	    int32_t x, int32_t y, int32_t w, int32_t h);
 void	shadow_scaled(struct ws_server *srv, pixman_image_t *src, int sw,
-	    int sh, ws_rect_t r, pixman_image_t *mask);
+	    int sh, ws_rect_t r, double opacity);
 void	shadow_fill(struct ws_server *srv, const pixman_color_t *color,
 	    int32_t x, int32_t y, int32_t w, int32_t h);
+void	shadow_fill_boxes(struct ws_server *srv, const pixman_color_t *color,
+	    const pixman_box32_t *boxes, int n);
 double	panel_x(struct ws_server *srv, double x);
 double	panel_y(struct ws_server *srv, double y);
 void	compositor_fini(struct ws_server *srv);
@@ -1145,6 +1189,9 @@ int	snapshot_write_ppm(struct ws_server *srv, const char *path);
 
 /* ---- headless output (compositor.c) ---- */
 extern const struct ws_output_ops headless_output_ops;
+
+/* ---- render_pixman.c ---- */
+extern const struct ws_renderer_ops pixman_renderer_ops;
 
 /* ---- drm.c ---- */
 int	drm_open(struct ws_server *srv);

@@ -881,7 +881,7 @@ tiling_draw_border(struct ws_server *srv, struct ws_window *w)
 		b[i].x2 *= (int32_t)srv->scale;
 		b[i].y2 *= (int32_t)srv->scale;
 	}
-	pixman_image_fill_boxes(PIXMAN_OP_SRC, srv->shadow, &col, 4, b);
+	shadow_fill_boxes(srv, &col, b, 4);
 }
 
 /* ---- the event loop ---- */
