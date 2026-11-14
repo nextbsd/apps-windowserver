@@ -185,6 +185,12 @@ uint32_t	 ws_buffer_id(ws_buffer_t *buffer);
  * coordinates, then commit. A commit with no damage after a new
  * attach repaints the whole window. The previous buffer is handed
  * back with WS_EVENT_BUFFER_RELEASE.
+ *
+ * Damage says what changed since the previous commit, and the new
+ * buffer must hold the whole window as of this commit (a client that
+ * double-buffers copies what the other buffer is missing). The server
+ * may keep the window's pixels between commits, on a GPU for instance,
+ * and update only the damage: pixels left out of it can stay stale.
  */
 int		 ws_window_attach(ws_connection_t *conn, uint32_t window,
     ws_buffer_t *buffer);

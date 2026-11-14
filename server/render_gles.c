@@ -59,6 +59,8 @@
 struct gles_window {
 	GLuint		tex;
 	int		tw, th;
+	pixman_format_code_t format;	/* of what was uploaded */
+	int		scale;
 	bool		all;		/* upload everything */
 	pixman_region32_t dirty;
 };
@@ -575,8 +577,13 @@ window_texture(struct ws_window *w, pixman_image_t *img, int *tw, int *th)
 		gw->all = true;
 	} else
 		glBindTexture(GL_TEXTURE_2D, gw->tex);
-	if (gw->tw != iw || gw->th != ih)
+	/* damage is in points of the buffer it came with: another size,
+	   format or scale makes the texture all stale */
+	if (gw->tw != iw || gw->th != ih ||
+	    gw->format != pixman_image_get_format(img) || gw->scale != s)
 		gw->all = true;
+	gw->format = pixman_image_get_format(img);
+	gw->scale = s;
 	if (gw->all) {
 		if (!upload(img, &gw->tw, &gw->th))
 			return false;
@@ -783,8 +790,8 @@ gles_window_commit(struct ws_server *srv, struct ws_window *w,
 	(void)srv;
 	if (gw == NULL)
 		return;		/* no texture yet: the first draw makes it */
-	if (damage == NULL)
-		gw->all = true;
+	if (damage == NULL || w->buffer == NULL)
+		gw->all = true;	/* a detach: whatever comes next is new */
 	else
 		pixman_region32_union(&gw->dirty, &gw->dirty, damage);
 }
