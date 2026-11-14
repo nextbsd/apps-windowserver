@@ -612,13 +612,9 @@ home_rect(struct ws_server *srv, struct ws_window *w)
 
 /* A view of w's buffer pixels without the compositor's transform. */
 static pixman_image_t *
-buffer_view(struct ws_window *w)
+buffer_view(struct ws_server *srv, struct ws_window *w)
 {
-	struct ws_buffer *b = w->buffer;
-
-	return pixman_image_create_bits(b->format == WS_FORMAT_XRGB8888 ?
-	    PIXMAN_x8r8g8b8 : PIXMAN_a8r8g8b8, (int)b->width, (int)b->height,
-	    pixman_image_get_data(b->image), (int)b->stride);
+	return buffer_view_image(srv, w->buffer);
 }
 
 /* Draw sw x sh of src into r on the screen, bilinear, with an
@@ -657,7 +653,7 @@ item_cache(struct ws_server *srv, struct ws_overview_item *it,
 	}
 	memset(pixman_image_get_data(it->cache), 0,
 	    (size_t)pixman_image_get_stride(it->cache) * (size_t)ph);
-	src = buffer_view(w);
+	src = buffer_view(srv, w);
 	if (src != NULL) {
 		buffer_extent(w, &cw, &ch);
 		tile_scale(src, it->cache, 0, 0, pw, ph, cw, ch);
@@ -783,7 +779,7 @@ overview_composite(struct ws_server *srv, pixman_region32_t *region)
 			    (to.width - from.width) * e);
 			r.height = (int32_t)lround(from.height +
 			    (to.height - from.height) * e);
-			src = buffer_view(w);
+			src = buffer_view(srv, w);
 			if (src != NULL) {
 				buffer_extent(w, &cw, &ch);
 				/* minimized windows fade in from their tiles */

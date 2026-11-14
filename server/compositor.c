@@ -279,8 +279,9 @@ composite_window(struct ws_server *srv, struct ws_window *w,
 			    w->frame.height);
 		return;
 	}
-	if (b == NULL || w->frame.width <= 0 || w->frame.height <= 0)
-		return;
+	if (b == NULL || w->frame.width <= 0 || w->frame.height <= 0 ||
+	    (b->image == NULL && srv->renderer->buffer_import == NULL))
+		return;	/* a GPU buffer, and a renderer that can't */
 	bw = (int)(b->width / b->scale);
 	bh = (int)(b->height / b->scale);
 	if (bw > w->frame.width)

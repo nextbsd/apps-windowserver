@@ -990,6 +990,76 @@ fail:
 	return NULL;
 }
 
+WS_API int
+ws_dmabuf_formats(ws_connection_t *c, ws_dmabuf_formats_t *out)
+{
+	ws_req_header_t h;
+	ws_reply_t reply;
+	uint32_t i;
+
+	if ((c->server_flags & WS_SERVER_DMABUF) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	req_init(c, &h, WS_MSG_DMABUF_FORMATS, sizeof(h), 0);
+	if (send_rpc(c, &h, &reply) < 0)
+		return -1;
+	memset(out, 0, sizeof(*out));
+	memcpy(out->render_node, reply.u.dmabuf.render_node,
+	    sizeof(out->render_node));
+	out->render_node[sizeof(out->render_node) - 1] = '\0';
+	out->count = reply.u.dmabuf.count;
+	if (out->count > WS_MAX_DMABUF_FORMATS)
+		out->count = WS_MAX_DMABUF_FORMATS;
+	for (i = 0; i < out->count; i++) {
+		out->formats[i].format = reply.u.dmabuf.formats[i].format;
+		out->formats[i].modifier = reply.u.dmabuf.formats[i].modifier;
+	}
+	return 0;
+}
+
+WS_API ws_buffer_t *
+ws_buffer_create_dmabuf(ws_connection_t *c, uint32_t width, uint32_t height,
+    uint32_t scale, uint32_t format, int fd, uint32_t offset, uint32_t stride,
+    uint64_t modifier)
+{
+	ws_sock_buffer_dmabuf_t m;
+	ws_buffer_t *b;
+	int saved;
+
+	if (width == 0 || height == 0 || width > 16384 || height > 16384 ||
+	    fd < 0 || (format != WS_FORMAT_ARGB8888 &&
+	    format != WS_FORMAT_XRGB8888)) {
+		errno = EINVAL;
+		return NULL;
+	}
+	b = calloc(1, sizeof(*b));
+	if (b == NULL)
+		return NULL;
+	b->id = c->next_buffer_id++;
+	b->width = width;
+	b->height = height;
+	b->stride = stride;
+	memset(&m, 0, sizeof(m));
+	m.hdr.type = WS_SOCK_BUFFER_CREATE_DMABUF;
+	m.hdr.size = sizeof(m);
+	m.buffer_id = b->id;
+	m.width = width;
+	m.height = height;
+	m.format = format;
+	m.scale = scale ? scale : 1;
+	m.stride = stride;
+	m.offset = offset;
+	m.modifier = modifier;
+	if (sock_send(c, &m, sizeof(m), fd) < 0) {
+		saved = errno;
+		free(b);
+		errno = saved;
+		return NULL;
+	}
+	return b;
+}
+
 WS_API ws_buffer_t *
 ws_buffer_create(ws_connection_t *c, uint32_t width, uint32_t height,
     uint32_t scale)
@@ -1004,7 +1074,8 @@ ws_buffer_destroy(ws_connection_t *c, ws_buffer_t *b)
 	if (b == NULL)
 		return;
 	(void)send_int(c, WS_MSG_BUFFER_DESTROY, 0, (int32_t)b->id);
-	munmap(b->data, b->size);
+	if (b->data != NULL)	/* not a GPU buffer */
+		munmap(b->data, b->size);
 	free(b);
 }
 

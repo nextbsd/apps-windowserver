@@ -142,6 +142,8 @@ enum {
 					   answers on the socket */
 	WS_MSG_CAPTURE_REVOKE,		/* tools and the consent agent,
 					   ws_req_capture_revoke_t */
+	/* servers with WS_SERVER_DMABUF, see "GPU buffers" */
+	WS_MSG_DMABUF_FORMATS,		/* sync; u.dmabuf */
 	WS_MSG_LAST
 };
 
@@ -1227,6 +1229,17 @@ typedef struct ws_reply {
 			uint32_t base;		/* RESERVE_WINDOW_IDS */
 			uint32_t count;
 		} window_ids;
+		struct {			/* DMABUF_FORMATS */
+			char	 render_node[32]; /* where to allocate */
+			uint32_t count;		/* entries in formats */
+			uint32_t reserved;
+			struct {
+				uint32_t format;	/* WS_FORMAT_* */
+				uint32_t reserved;
+				uint64_t modifier;	/* DRM format
+							   modifier */
+			} formats[WS_MAX_DMABUF_FORMATS];
+		} dmabuf;
 		struct {
 			uint32_t session;	/* DRAG_BEGIN */
 			uint32_t reserved;
@@ -1246,6 +1259,7 @@ typedef struct ws_reply {
 enum {
 	WS_SOCK_AUTH = 1,
 	WS_SOCK_BUFFER_CREATE = 2,	/* carries one fd (SCM_RIGHTS) */
+	WS_SOCK_BUFFER_CREATE_DMABUF = 3, /* carries one dmabuf fd */
 };
 
 typedef struct ws_sock_header {
@@ -1275,6 +1289,35 @@ typedef struct ws_sock_buffer {
 	uint32_t	scale;		/* 1 = one buffer pixel per point */
 	uint64_t	offset;		/* start of the pixels in the fd */
 } ws_sock_buffer_t;
+
+/*
+ * GPU buffers (servers with WS_SERVER_DMABUF). A window buffer may be a
+ * dmabuf the client allocated on the GPU and draws into with GL or
+ * Vulkan; the server composites it without copying it.
+ * WS_MSG_DMABUF_FORMATS (sync) answers in u.dmabuf with the render node
+ * to allocate on (e.g. "/dev/dri/renderD128") and the formats and DRM
+ * format modifiers the server can composite, the fastest first: on a
+ * GPU with a tiled layout (Broadcom UIF on a Raspberry Pi 5) a LINEAR
+ * buffer composites several times slower. WS_SOCK_BUFFER_CREATE_DMABUF
+ * then names the buffer, with the dmabuf fd as SCM_RIGHTS; it is used
+ * like any other buffer (attach, damage, commit, and reuse only after
+ * WS_EVENT_BUFFER_RELEASE). Rendering must be finished, or fenced in
+ * the dmabuf (implicit sync, as GL drivers do), before the commit. One
+ * plane only. The server has no CPU access to it: a window drawn in one
+ * isn't in captures or previews while the server lacks a GPU readback.
+ */
+typedef struct ws_sock_buffer_dmabuf {
+	ws_sock_header_t hdr;
+	uint32_t	buffer_id;	/* chosen by the client, nonzero */
+	uint32_t	width;
+	uint32_t	height;
+	uint32_t	format;		/* WS_FORMAT_ARGB8888 or _XRGB8888 */
+	uint32_t	scale;		/* 1 = one buffer pixel per point */
+	uint32_t	stride;		/* plane 0's pitch, bytes */
+	uint32_t	offset;		/* plane 0's offset, bytes */
+	uint32_t	reserved;
+	uint64_t	modifier;	/* DRM format modifier */
+} ws_sock_buffer_dmabuf_t;
 
 #ifdef __cplusplus
 }

@@ -143,8 +143,7 @@ handle_hello(struct ws_server *srv, struct ws_mach_item *item)
 	r.seq = m->hdr.seq;
 	r.status = 0;
 	r.u.hello.client_id = c->id;
-	r.u.hello.server_flags = (srv->headless ? WS_SERVER_HEADLESS : 0) |
-	    WS_SERVER_FEATURES;
+	r.u.hello.server_flags = server_flags(srv);
 	r.u.hello.token = c->token;
 	strlcpy(r.u.hello.socket_path, srv->socket_path,
 	    sizeof(r.u.hello.socket_path));
@@ -487,6 +486,23 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 	    ((ws_req_int_t *)(void *)h)->value : 0;
 
 	switch (id) {
+	case WS_MSG_DMABUF_FORMATS: {
+		ws_reply_t r;
+		int err;
+
+		if (!want_reply)
+			return;
+		memset(&r, 0, sizeof(r));
+		err = srv->renderer->dmabuf_formats != NULL ?
+		    srv->renderer->dmabuf_formats(srv, &r) : ENOTSUP;
+		if (err != 0) {
+			reply_status(item, h->seq, err);
+			return;
+		}
+		r.seq = h->seq;
+		reply_send(item, &r, sizeof(r));
+		return;
+	}
 	case WS_MSG_GOODBYE:
 		ws_info("client %u (%s) said goodbye", c->id, c->app_name);
 		client_destroy(srv, c);

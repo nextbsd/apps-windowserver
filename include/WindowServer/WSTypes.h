@@ -275,6 +275,12 @@ extern "C" {
 						   display modes ("HiDPI" in
 						   WSProtocol.h). Servers without it
 						   are 1x. */
+#define WS_SERVER_DMABUF	0x20000000 /* GPU buffers: WS_MSG_DMABUF_FORMATS
+						   and WS_SOCK_BUFFER_CREATE_DMABUF
+						   ("GPU buffers" in WSProtocol.h).
+						   Only while the server composites
+						   on a GPU. */
+#define WS_MAX_DMABUF_FORMATS	5	/* in WS_MSG_DMABUF_FORMATS' reply */
 
 /* WS_MSG_ACTIVATE flags (ws_activate_flags). */
 #define WS_ACTIVATE_RAISE	0x0001	/* also bring the app's windows,

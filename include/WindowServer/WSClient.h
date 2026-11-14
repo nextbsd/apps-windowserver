@@ -173,6 +173,27 @@ ws_buffer_t	*ws_buffer_create(ws_connection_t *conn, uint32_t width,
  */
 ws_buffer_t	*ws_buffer_create_format(ws_connection_t *conn, uint32_t width,
     uint32_t height, uint32_t scale, uint32_t format);
+/*
+ * GPU buffers (servers with WS_SERVER_DMABUF; "GPU buffers" in
+ * WSProtocol.h). ws_dmabuf_formats asks where to allocate and in which
+ * formats and modifiers, the fastest first. ws_buffer_create_dmabuf
+ * names a single-plane dmabuf the caller allocated (with GBM, say) as a
+ * buffer; the fd stays the caller's, and ws_buffer_data is NULL.
+ */
+typedef struct ws_dmabuf_formats {
+	char		render_node[32];
+	uint32_t	count;
+	struct {
+		uint32_t	format;		/* WS_FORMAT_* */
+		uint64_t	modifier;
+	} formats[WS_MAX_DMABUF_FORMATS];
+} ws_dmabuf_formats_t;
+
+int		 ws_dmabuf_formats(ws_connection_t *conn,
+    ws_dmabuf_formats_t *out);
+ws_buffer_t	*ws_buffer_create_dmabuf(ws_connection_t *conn, uint32_t width,
+    uint32_t height, uint32_t scale, uint32_t format, int fd,
+    uint32_t offset, uint32_t stride, uint64_t modifier);
 void		 ws_buffer_destroy(ws_connection_t *conn, ws_buffer_t *buffer);
 void		*ws_buffer_data(ws_buffer_t *buffer);
 uint32_t	 ws_buffer_stride(ws_buffer_t *buffer);

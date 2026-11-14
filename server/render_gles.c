@@ -23,10 +23,18 @@
  * With EGL_EXT_buffer_age a frame repaints only what changed since the
  * GBM buffer it draws into was last on screen; without it, everything.
  *
+ * GPU buffers (T12): a client's dmabuf is imported as an EGLImage and
+ * drawn straight from it, never copied. The formats offered list the
+ * GPU's own tiled modifiers before LINEAR, which v3d samples several
+ * times slower. CPU users of such a window's pixels (tiles, previews,
+ * window captures) get them read back on the GPU (gles_buffer_read).
+ *
  * Still to come (nextbsd/nextbsd#642): a backing store of another size
- * than the panel (T7) and readback (T8).
+ * than the panel (T7) and readback of the screen (T8).
  */
 
+#include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,6 +62,12 @@
 /* Damage of the frames before this one, newest first (buffer age). */
 #define GLES_HISTORY	4
 
+/* A GPU buffer: the client's dmabuf, as a texture. */
+struct gles_buffer {
+	EGLImageKHR	image;
+	GLuint		tex;
+};
+
 /* A window's texture: its buffer's pixels, as of `dirty` (window-local
    points) being uploaded. */
 struct gles_window {
@@ -77,6 +91,12 @@ struct gles {
 	bool		bgra;		/* GL_EXT_texture_format_BGRA8888 */
 	bool		unpack_row;	/* GL_EXT_unpack_subimage */
 	bool		buffer_age;	/* EGL_EXT_buffer_age */
+	/* GPU buffers: EGL_EXT_image_dma_buf_import, GL_OES_EGL_image */
+	bool		dmabuf;
+	char		render_node[32];
+	PFNEGLCREATEIMAGEKHRPROC create_image;
+	PFNEGLDESTROYIMAGEKHRPROC destroy_image;
+	PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_texture;
 	pixman_region32_t history[GLES_HISTORY];	/* points */
 	int		nhistory;
 	GLuint		prog_tex, prog_fill;
@@ -301,6 +321,59 @@ choose_config(void)
 
 static void gles_fini(struct ws_server *srv);
 
+/*
+ * GPU buffers need dmabuf import, EGLImage textures and a render node
+ * for clients to allocate on: the display's own GPU, as EGL says
+ * (EGL_EXT_device_drm_render_node), else the first render node.
+ */
+static void
+dmabuf_setup(const char *glext)
+{
+	PFNEGLQUERYDISPLAYATTRIBEXTPROC query_display;
+	PFNEGLQUERYDEVICESTRINGEXTPROC query_device;
+	const char *eglext = eglQueryString(gl.dpy, EGL_EXTENSIONS);
+	const char *node = NULL;
+	EGLAttrib dev = 0;
+	struct dirent *de;
+	DIR *d;
+
+	gl.dmabuf = false;
+	if (eglext == NULL || glext == NULL ||
+	    !has_ext(eglext, "EGL_EXT_image_dma_buf_import") ||
+	    !has_ext(glext, "GL_OES_EGL_image"))
+		return;
+	gl.create_image = (PFNEGLCREATEIMAGEKHRPROC)
+	    eglGetProcAddress("eglCreateImageKHR");
+	gl.destroy_image = (PFNEGLDESTROYIMAGEKHRPROC)
+	    eglGetProcAddress("eglDestroyImageKHR");
+	gl.image_texture = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)
+	    eglGetProcAddress("glEGLImageTargetTexture2DOES");
+	if (gl.create_image == NULL || gl.destroy_image == NULL ||
+	    gl.image_texture == NULL)
+		return;
+	query_display = (PFNEGLQUERYDISPLAYATTRIBEXTPROC)
+	    eglGetProcAddress("eglQueryDisplayAttribEXT");
+	query_device = (PFNEGLQUERYDEVICESTRINGEXTPROC)
+	    eglGetProcAddress("eglQueryDeviceStringEXT");
+	if (query_display != NULL && query_device != NULL &&
+	    query_display(gl.dpy, EGL_DEVICE_EXT, &dev) && dev != 0)
+		node = query_device((EGLDeviceEXT)dev,
+		    EGL_DRM_RENDER_NODE_FILE_EXT);
+	gl.render_node[0] = '\0';
+	if (node != NULL)
+		strlcpy(gl.render_node, node, sizeof(gl.render_node));
+	else if ((d = opendir("/dev/dri")) != NULL) {
+		while ((de = readdir(d)) != NULL)
+			if (strncmp(de->d_name, "renderD", 7) == 0) {
+				snprintf(gl.render_node, sizeof(gl.render_node),
+				    "/dev/dri/%s", de->d_name);
+				break;
+			}
+		closedir(d);
+	}
+	gl.dmabuf = gl.render_node[0] != '\0';
+}
+
 static int
 gles_init(struct ws_server *srv)
 {
@@ -357,6 +430,7 @@ gles_init(struct ws_server *srv)
 	gl.unpack_row = ext != NULL && has_ext(ext, "GL_EXT_unpack_subimage");
 	gl.buffer_age = has_ext(eglQueryString(gl.dpy, EGL_EXTENSIONS),
 	    "EGL_EXT_buffer_age");
+	dmabuf_setup(ext);
 	gl.prog_tex = program(vs_tex, fs_tex);
 	gl.prog_fill = program(vs_fill, fs_fill);
 	if (gl.prog_tex == 0 || gl.prog_fill == 0)
@@ -409,10 +483,12 @@ gles_init(struct ws_server *srv)
 	for (i = 0; i < GLES_HISTORY; i++)
 		pixman_region32_init(&gl.history[i]);
 	gl.nhistory = 0;
-	ws_info("renderer: gles2 on %s, %ux%u%s%s%s", renderer, gl.width,
+	ws_info("renderer: gles2 on %s, %ux%u%s%s%s%s%s", renderer, gl.width,
 	    gl.height, gl.bgra ? ", BGRA textures" : "",
 	    gl.unpack_row ? ", row length" : "",
-	    gl.buffer_age ? ", buffer age" : "");
+	    gl.buffer_age ? ", buffer age" : "",
+	    gl.dmabuf ? ", GPU buffers from " : "",
+	    gl.dmabuf ? gl.render_node : "");
 	return 0;
 fail:
 	gles_fini(srv);
@@ -715,15 +791,31 @@ gles_draw(struct ws_server *srv, const struct ws_draw *d)
 	(void)srv;
 	if (d->w <= 0 || d->h <= 0 || d->opacity <= 0.0)
 		return;
-	if (d->window != NULL &&
+	struct ws_buffer *b = d->window != NULL ? d->window->buffer : NULL;
+	struct gles_buffer *gb;
+	bool opaque, swizzle = !gl.bgra;
+
+	if (b != NULL && b->dmabuf) {
+		/* the client's GPU buffer itself: nothing to upload */
+		gb = b->render;
+		if (gb == NULL)
+			return;
+		glBindTexture(GL_TEXTURE_2D, gb->tex);
+		tw = (int)b->width;
+		th = (int)b->height;
+		opaque = b->format == WS_FORMAT_XRGB8888;
+		swizzle = false;	/* EGL samples it as RGBA */
+	} else if (d->window != NULL &&
 	    (pixman_image_get_format(d->src) == PIXMAN_a8r8g8b8 ||
 	    pixman_image_get_format(d->src) == PIXMAN_x8r8g8b8)) {
 		if (!window_texture(d->window, d->src, &tw, &th))
 			return;
+		opaque = pixman_image_get_format(d->src) == PIXMAN_x8r8g8b8;
 	} else {
 		glBindTexture(GL_TEXTURE_2D, gl.tex);
 		if (!upload(d->src, &tw, &th))
 			return;
+		opaque = pixman_image_get_format(d->src) == PIXMAN_x8r8g8b8;
 	}
 	/* the source pixels this covers, as texture coordinates */
 	u2 = (GLfloat)(d->w * d->fx / tw);
@@ -741,9 +833,8 @@ gles_draw(struct ws_server *srv, const struct ws_draw *d)
 	glUniform1f(gl.tex_opacity, (GLfloat)(d->opacity < 1.0 ?
 	    d->opacity : 1.0));
 	/* x8r8g8b8's top byte isn't alpha, as pixman reads it */
-	glUniform1i(gl.tex_opaque,
-	    pixman_image_get_format(d->src) == PIXMAN_x8r8g8b8);
-	glUniform1i(gl.tex_swizzle, !gl.bgra);
+	glUniform1i(gl.tex_opaque, opaque);
+	glUniform1i(gl.tex_swizzle, swizzle);
 	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, pos);
 	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, uv);
 	glEnableVertexAttribArray(0);
@@ -760,7 +851,11 @@ gles_draw(struct ws_server *srv, const struct ws_draw *d)
 		/* the mirror: the image uploaded whole, this frame's damage */
 		glBindFramebuffer(GL_FRAMEBUFFER, gl.mirror_fbo);
 		glBindTexture(GL_TEXTURE_2D, gl.tex);
-		if (upload(d->src, &tw, &th)) {
+		/* a GPU buffer has no CPU pixels: its own texture is the truth */
+		if (b != NULL && b->dmabuf && b->render != NULL)
+			glBindTexture(GL_TEXTURE_2D,
+			    ((struct gles_buffer *)b->render)->tex);
+		if ((b != NULL && b->dmabuf) || upload(d->src, &tw, &th)) {
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
 			    d->smooth ? GL_LINEAR : GL_NEAREST);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
@@ -1036,6 +1131,185 @@ gles_window_gone(struct ws_server *srv, struct ws_window *w)
 	w->render = NULL;
 }
 
+/* ---- GPU buffers ---- */
+
+static uint32_t
+drm_format(uint32_t ws_format)
+{
+	return ws_format == WS_FORMAT_XRGB8888 ? DRM_FORMAT_XRGB8888 :
+	    DRM_FORMAT_ARGB8888;
+}
+
+/* The render node, and the modifiers EGL imports for both formats, the
+   GPU's own (tiled) ones before LINEAR. */
+static int
+gles_dmabuf_formats(struct ws_server *srv, ws_reply_t *r)
+{
+	PFNEGLQUERYDMABUFMODIFIERSEXTPROC query;
+	static const uint32_t fmts[] = { WS_FORMAT_ARGB8888,
+	    WS_FORMAT_XRGB8888 };
+	EGLuint64KHR mods[32];
+	EGLBoolean ext_only[32];
+	EGLint n;
+	int f, i, pass;
+	uint32_t k = 0;
+
+	(void)srv;
+	if (!gl.dmabuf)
+		return ENOTSUP;
+	strlcpy(r->u.dmabuf.render_node, gl.render_node,
+	    sizeof(r->u.dmabuf.render_node));
+	query = (PFNEGLQUERYDMABUFMODIFIERSEXTPROC)
+	    eglGetProcAddress("eglQueryDmaBufModifiersEXT");
+	for (pass = 0; pass < 2; pass++)	/* tiled, then LINEAR */
+		for (f = 0; f < 2; f++) {
+			n = 0;
+			if (query == NULL || !query(gl.dpy, drm_format(fmts[f]),
+			    32, mods, ext_only, &n))
+				n = 0;
+			for (i = 0; i < n; i++) {
+				if (ext_only[i] ||
+				    (mods[i] == DRM_FORMAT_MOD_LINEAR) != pass)
+					continue;
+				if (k == WS_MAX_DMABUF_FORMATS)
+					goto done;
+				r->u.dmabuf.formats[k].format = fmts[f];
+				r->u.dmabuf.formats[k].modifier = mods[i];
+				k++;
+			}
+			if (n == 0 && pass == 1 && k < WS_MAX_DMABUF_FORMATS) {
+				r->u.dmabuf.formats[k].format = fmts[f];
+				r->u.dmabuf.formats[k].modifier =
+				    DRM_FORMAT_MOD_LINEAR;
+				k++;
+			}
+		}
+done:
+	r->u.dmabuf.count = k;
+	return 0;
+}
+
+static bool
+gles_buffer_import(struct ws_server *srv, struct ws_buffer *b)
+{
+	struct gles_buffer *gb;
+	EGLint attr[] = {
+		EGL_WIDTH, (EGLint)b->width,
+		EGL_HEIGHT, (EGLint)b->height,
+		EGL_LINUX_DRM_FOURCC_EXT, (EGLint)drm_format(b->format),
+		EGL_DMA_BUF_PLANE0_FD_EXT, b->fd,
+		EGL_DMA_BUF_PLANE0_OFFSET_EXT, (EGLint)b->offset,
+		EGL_DMA_BUF_PLANE0_PITCH_EXT, (EGLint)b->stride,
+		EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT,
+		    (EGLint)(b->modifier & 0xffffffff),
+		EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, (EGLint)(b->modifier >> 32),
+		EGL_NONE
+	};
+
+	(void)srv;
+	if (!gl.dmabuf)
+		return false;
+	if (b->modifier == DRM_FORMAT_MOD_INVALID)
+		attr[12] = EGL_NONE;	/* implicit: no modifier attributes */
+	gb = calloc(1, sizeof(*gb));
+	if (gb == NULL)
+		return false;
+	gb->image = gl.create_image(gl.dpy, EGL_NO_CONTEXT,
+	    EGL_LINUX_DMA_BUF_EXT, NULL, attr);
+	if (gb->image == EGL_NO_IMAGE_KHR) {
+		ws_debug("renderer: dmabuf import failed (0x%x)",
+		    eglGetError());
+		free(gb);
+		return false;
+	}
+	glGenTextures(1, &gb->tex);
+	glBindTexture(GL_TEXTURE_2D, gb->tex);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	gl.image_texture(GL_TEXTURE_2D, (GLeglImageOES)gb->image);
+	if (glGetError() != GL_NO_ERROR) {
+		glDeleteTextures(1, &gb->tex);
+		gl.destroy_image(gl.dpy, gb->image);
+		free(gb);
+		return false;
+	}
+	b->render = gb;
+	return true;
+}
+
+static void
+gles_buffer_gone(struct ws_server *srv, struct ws_buffer *b)
+{
+	struct gles_buffer *gb = b->render;
+
+	(void)srv;
+	if (gb == NULL)
+		return;
+	glDeleteTextures(1, &gb->tex);
+	gl.destroy_image(gl.dpy, gb->image);
+	free(gb);
+	b->render = NULL;
+}
+
+/*
+ * A GPU buffer's pixels for the CPU, as premultiplied a8r8g8b8: drawn
+ * into a framebuffer of its size (flipped, so the rows read back top
+ * first; swizzled, so RGBA reads as native ARGB), then read. Leaves the
+ * frame being drawn as it was.
+ */
+static pixman_image_t *
+gles_buffer_read(struct ws_server *srv, struct ws_buffer *b)
+{
+	struct gles_buffer *gb = b->render;
+	pixman_image_t *img;
+	GLuint tex, fbo;
+	GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+	GLfloat w = (GLfloat)b->width, h = (GLfloat)b->height;
+	GLfloat pos[8] = { 0, 0, w, 0, 0, h, w, h };
+	GLfloat uv[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };
+
+	(void)srv;
+	if (gb == NULL)
+		return NULL;
+	img = pixman_image_create_bits(PIXMAN_a8r8g8b8, (int)b->width,
+	    (int)b->height, NULL, (int)b->width * 4);
+	if (img == NULL)
+		return NULL;
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)b->width,
+	    (GLsizei)b->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glGenFramebuffers(1, &fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+	    GL_TEXTURE_2D, tex, 0);
+	glViewport(0, 0, (GLsizei)b->width, (GLsizei)b->height);
+	glDisable(GL_SCISSOR_TEST);
+	glDisable(GL_BLEND);
+	glUseProgram(gl.prog_tex);
+	glUniform2f(gl.tex_screen, w, h);
+	glUniform1f(gl.tex_opacity, 1.0f);
+	glUniform1i(gl.tex_opaque, b->format == WS_FORMAT_XRGB8888);
+	glUniform1i(gl.tex_swizzle, 1);
+	glBindTexture(GL_TEXTURE_2D, gb->tex);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, pos);
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, uv);
+	glEnableVertexAttribArray(0);
+	glEnableVertexAttribArray(1);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	glReadPixels(0, 0, (GLsizei)b->width, (GLsizei)b->height, GL_RGBA,
+	    GL_UNSIGNED_BYTE, pixman_image_get_data(img));
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glDeleteFramebuffers(1, &fbo);
+	glDeleteTextures(1, &tex);
+	glViewport(0, 0, (GLsizei)gl.width, (GLsizei)gl.height);
+	if (scissor)
+		glEnable(GL_SCISSOR_TEST);
+	return img;
+}
+
 const struct ws_renderer_ops gles_renderer_ops = {
 	.name = "gles2",
 	.init = gles_init,
@@ -1049,4 +1323,8 @@ const struct ws_renderer_ops gles_renderer_ops = {
 	.presented = gles_presented,
 	.window_commit = gles_window_commit,
 	.window_gone = gles_window_gone,
+	.dmabuf_formats = gles_dmabuf_formats,
+	.buffer_import = gles_buffer_import,
+	.buffer_gone = gles_buffer_gone,
+	.buffer_read = gles_buffer_read,
 };

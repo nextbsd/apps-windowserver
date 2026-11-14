@@ -167,7 +167,16 @@ struct ws_buffer {
 	uint32_t	stride;
 	uint32_t	scale;
 	uint32_t	format;		/* WS_FORMAT_* */
-	pixman_image_t	*image;
+	pixman_image_t	*image;		/* NULL for a GPU buffer */
+	/* a GPU buffer (WS_SOCK_BUFFER_CREATE_DMABUF) */
+	bool		dmabuf;
+	int		fd;
+	uint32_t	offset;
+	uint64_t	modifier;
+	void		*render;	/* the renderer's */
+	uint32_t	gen;		/* commits showing it */
+	pixman_image_t	*readback;	/* its pixels, as of readback_gen */
+	uint32_t	readback_gen;
 	struct ws_buffer *next;		/* owner's list */
 };
 
@@ -631,6 +640,14 @@ struct ws_renderer_ops {
 	void	(*window_commit)(struct ws_server *srv, struct ws_window *w,
 		    pixman_region32_t *damage);
 	void	(*window_gone)(struct ws_server *srv, struct ws_window *w);
+	/* GPU buffers (NULL: none): what can be imported, importing and
+	 * letting go of one, and reading its pixels back for the parts of
+	 * the server that need them on the CPU (previews, captures). */
+	int	(*dmabuf_formats)(struct ws_server *srv, ws_reply_t *r);
+	bool	(*buffer_import)(struct ws_server *srv, struct ws_buffer *b);
+	void	(*buffer_gone)(struct ws_server *srv, struct ws_buffer *b);
+	pixman_image_t *(*buffer_read)(struct ws_server *srv,
+		    struct ws_buffer *b);
 };
 
 struct ws_mach_item {
@@ -907,6 +924,10 @@ void	clients_housekeeping(struct ws_server *srv);
 struct ws_client *client_lookup(struct ws_server *srv, uint32_t id);
 struct ws_buffer *client_buffer(struct ws_client *c, uint32_t id);
 void	buffer_unref(struct ws_server *srv, struct ws_buffer *b);
+pixman_image_t *buffer_pixels(struct ws_server *srv, struct ws_buffer *b);
+pixman_image_t *buffer_view_image(struct ws_server *srv,
+	    struct ws_buffer *b);
+uint32_t server_flags(struct ws_server *srv);
 void	client_send(struct ws_server *srv, struct ws_client *c,
 	    ws_event_t *ev, int fd);
 void	client_error(struct ws_server *srv, struct ws_client *c,
