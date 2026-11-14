@@ -346,12 +346,13 @@ out:
 	overview_fini(srv);
 	tiling_fini(srv);
 	tile_fini(srv);
+	/* the renderer's GPU buffers go before the DRM device does */
+	compositor_fini(srv);
 	if (srv->output != NULL && srv->output->shutdown != NULL)
 		srv->output->shutdown(srv);
 	vt_close(srv);
 	input_close(srv);
 	keyboard_fini(srv);
-	compositor_fini(srv);
 	socket_cleanup(srv);
 	ws_info("exiting");
 	return status;

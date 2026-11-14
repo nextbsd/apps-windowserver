@@ -30,13 +30,57 @@
 
 static void draw_cursor(struct ws_server *srv);
 
+static void repaint_region(struct ws_server *srv, pixman_region32_t *region,
+    pixman_region32_t *out);
+
+/*
+ * The renderer for the current sizes; a GPU one that can't falls back
+ * to pixman. While running, the GPU renderer's buffer is on screen: so
+ * its flip finishes first, pixman draws a whole frame and the output
+ * shows it, and only then does the GPU renderer let its buffers go
+ * (removing the framebuffer on screen would turn the display off).
+ */
+static int
+renderer_init(struct ws_server *srv)
+{
+	const struct ws_renderer_ops *old;
+	pixman_region32_t all, out;
+	bool shown;
+
+	if (srv->renderer == NULL)
+		srv->renderer = &pixman_renderer_ops;
+	if (srv->renderer->init(srv) == 0)
+		return 0;
+	if (srv->renderer == &pixman_renderer_ops)
+		return -1;
+	old = srv->renderer;
+	shown = old->scanout != NULL && srv->display_active &&
+	    srv->output->take_screen != NULL;
+	if (shown && srv->present_pending && srv->output->wait_present != NULL)
+		srv->output->wait_present(srv);
+	srv->renderer = &pixman_renderer_ops;
+	if (srv->renderer->init(srv) < 0) {
+		old->fini(srv);
+		return -1;
+	}
+	if (shown) {
+		pixman_region32_init_rect(&all, 0, 0, srv->width,
+		    srv->height);
+		repaint_region(srv, &all, &out);
+		pixman_region32_fini(&out);
+		pixman_region32_fini(&all);
+		srv->output->take_screen(srv);
+	}
+	old->fini(srv);
+	return 0;
+}
+
 int
 compositor_init(struct ws_server *srv)
 {
-	if (srv->renderer == NULL)
-		srv->renderer = &pixman_renderer_ops;
-	if (srv->renderer->init(srv) < 0)
+	if (renderer_init(srv) < 0)
 		return -1;
+	ws_info("renderer: %s", srv->renderer->name);
 	pixman_region32_init(&srv->damage);
 	damage_all(srv);
 	return 0;
@@ -47,7 +91,7 @@ compositor_init(struct ws_server *srv)
 int
 compositor_resize(struct ws_server *srv)
 {
-	if (srv->renderer->init(srv) < 0)
+	if (renderer_init(srv) < 0)
 		return -1;
 	pixman_region32_clear(&srv->damage);
 	damage_all(srv);
@@ -398,6 +442,8 @@ compositor_repaint(struct ws_server *srv)
 	pixman_region32_init(&region);
 	pixman_region32_copy(&region, &srv->damage);
 	pixman_region32_clear(&srv->damage);
+	if (srv->renderer->repaint != NULL)
+		srv->renderer->repaint(srv, &region);
 
 	tiles_render(srv);
 	repaint_region(srv, &region, &out);
@@ -439,6 +485,8 @@ compositor_capture_overlays(struct ws_server *srv, bool hide, bool cursor)
 	ws_rect_t r[5];
 	int i, n = 0;
 
+	if (srv->out == NULL)
+		return;		/* no readback from this renderer yet */
 	if (srv->capture_indicator) {
 		capture_indicator_rects(srv, r);
 		n = 4;
@@ -475,6 +523,8 @@ snapshot_memfd(struct ws_server *srv, uint32_t *stride_out)
 	int fd;
 
 	compositor_repaint(srv);
+	if (srv->out == NULL)
+		return -1;
 	fd = memfd_create("WindowServer-snapshot", MFD_CLOEXEC);
 	if (fd < 0)
 		return -1;
@@ -508,6 +558,8 @@ snapshot_write_ppm(struct ws_server *srv, const char *path)
 	FILE *f;
 
 	compositor_repaint(srv);
+	if (srv->out == NULL)
+		return -1;
 	f = fopen(path, "wb");
 	if (f == NULL)
 		return -1;
