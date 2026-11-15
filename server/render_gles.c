@@ -103,11 +103,13 @@ typedef void (GL_APIENTRYP gles_delete_sync)(gles_sync);
 /* Damage of the frames before this one, newest first (buffer age). */
 #define GLES_HISTORY	4
 
-/* Screen capture readbacks in flight at once (snapshots). */
-#define GLES_CAP_SNAPS	2
+/* Screen capture snapshots in flight at once. */
+#define GLES_CAP_SNAPS	3
 
-/* A snapshot's readback (cap_snap.state). */
-enum { CAP_IDLE, CAP_QUEUED, CAP_DONE, CAP_FAILED };
+/* A snapshot's readback (cap_snap.state): CAP_COPIED waits for the main
+   thread, CAP_QUEUED for the worker, which makes it CAP_DONE or
+   CAP_FAILED. */
+enum { CAP_IDLE, CAP_COPIED, CAP_QUEUED, CAP_DONE, CAP_FAILED };
 
 /* A GPU buffer: the client's dmabuf, as a texture. */
 struct gles_buffer {
@@ -172,24 +174,27 @@ struct gles {
 	unsigned long	vframes, vbad;
 	EGLint		egl_age;	/* what EGL said this frame */
 	struct { struct gbm_bo *bo; unsigned long frame; } seen[8];
-	/* screen captures (T8): the second copy of the screen, and what
-	   of it the CPU image lacks */
+	/* screen captures (T8): snapshots of what each frame changed, and
+	   what of the screen the CPU image lacks */
 	bool		cap_on;
 	bool		cap_fresh;	/* not drawn whole yet */
 	uint64_t	cap_used;	/* ws_now_usec() of the last read */
-	GLuint		cap_fbo, cap_tex;
 	pixman_region32_t cap_clip;	/* this frame's, backing pixels */
-	pixman_region32_t cap_dirty;	/* not read back, backing pixels */
+	pixman_region32_t cap_dirty;	/* in no snapshot, backing pixels */
 	pixman_image_t	*cap_img;	/* x8r8g8b8, the panel's size */
-	uint8_t		*cap_rows;	/* glReadPixels lands here */
+	/* while capturing, frames are drawn here and then put on the back
+	   buffer: Mesa v3d copies out of the scanout buffer only by
+	   mapping it on the CPU, but out of a texture on the GPU */
+	GLuint		screen_fbo, screen_tex;
+	GLuint		draw_fbo;	/* this frame's: 0 or screen_fbo */
+	bool		cap_want;	/* a capture waits for a snapshot */
 	bool		read_bgra;	/* GL_EXT_read_format_bgra */
 	/*
 	 * Readback off the main thread (GLES 3 fences, a surfaceless
-	 * context): what changed is copied on the GPU into a snapshot, and
-	 * a worker thread with a context of its own, sharing the snapshot,
-	 * reads it back. glReadPixels is slow where the driver untiles on
-	 * the CPU (Mesa v3d), and every window and the pointer wait while
-	 * the main thread does it.
+	 * context): a worker thread with a context of its own, sharing the
+	 * snapshots, reads them back. glReadPixels is slow where the driver
+	 * untiles on the CPU (Mesa v3d), and every window and the pointer
+	 * wait while the main thread does it.
 	 */
 	bool		async;
 	bool		cap_sync;	/* the next read waits: the first */
@@ -197,7 +202,7 @@ struct gles {
 	int		cap_next;	/* the snapshot to use next, the oldest */
 	struct cap_snap {
 		GLuint		tex;		/* the main context's */
-		GLuint		fbo;		/* the worker's, over tex */
+		GLuint		fbo;		/* the main thread's, over tex */
 		gles_sync	fence;		/* the copy into tex is done */
 		pixman_region32_t rects;	/* what it holds, backing pixels */
 		uint8_t		*rows;		/* the worker reads them here */
@@ -708,12 +713,21 @@ static void gles_window_gone(struct ws_server *srv, struct ws_window *w);
 
 /* ---- screen captures (T8) ---- */
 
-/* A capture reads nothing for this long: stop the second copy. */
+/*
+ * While something captures the screen, frames are drawn into a screen
+ * texture and put on the back buffer from there (cap_present), and each
+ * frame's own damage is copied on the GPU out of that texture into a
+ * snapshot, which is read back: by the worker thread (async), or else
+ * by the main thread when the capture asks. Nothing is drawn twice; the
+ * GPU's extra work is copying what was drawn and what changed.
+ */
+
+/* A capture reads nothing for this long: stop the snapshots. */
 #define GLES_CAP_IDLE_USEC	3000000
 /* More rectangles than this to read back: read their extents instead,
    one glReadPixels */
 #define GLES_CAP_RECTS		32
-/* The longest the first read waits for the GPU (ns) */
+/* The longest a read waits for the GPU (ns) */
 #define GLES_CAP_WAIT_NSEC	1000000000ull
 
 /* Is the worker still reading any snapshot? Under cap_lock. */
@@ -746,6 +760,9 @@ cap_stop(void)
 		if (c->fence != NULL)
 			gl.delete_sync(c->fence);
 		c->fence = NULL;
+		if (c->fbo != 0)
+			glDeleteFramebuffers(1, &c->fbo);
+		c->fbo = 0;
 		if (c->tex != 0)
 			glDeleteTextures(1, &c->tex);
 		c->tex = 0;
@@ -754,85 +771,76 @@ cap_stop(void)
 		c->state = CAP_IDLE;
 		pixman_region32_clear(&c->rects);
 	}
-	if (gl.cap_fbo != 0)
-		glDeleteFramebuffers(1, &gl.cap_fbo);
-	if (gl.cap_tex != 0)
-		glDeleteTextures(1, &gl.cap_tex);
-	gl.cap_fbo = gl.cap_tex = 0;
+	if (gl.screen_fbo != 0)
+		glDeleteFramebuffers(1, &gl.screen_fbo);
+	if (gl.screen_tex != 0)
+		glDeleteTextures(1, &gl.screen_tex);
+	gl.screen_fbo = gl.screen_tex = 0;
 	if (gl.cap_img != NULL)
 		pixman_image_unref(gl.cap_img);
 	gl.cap_img = NULL;
-	free(gl.cap_rows);
-	gl.cap_rows = NULL;
 	if (gl.cap_on)
-		ws_info("renderer: screen capture copy stopped");
+		ws_info("renderer: screen capture snapshots stopped");
 	gl.cap_on = false;
+	gl.cap_want = false;
 }
 
 static bool
 cap_start(void)
 {
+	struct cap_snap *c;
 	int i;
 
 	gl.cap_img = pixman_image_create_bits(PIXMAN_x8r8g8b8,
 	    (int)gl.width, (int)gl.height, NULL, 0);
-	gl.cap_rows = malloc((size_t)gl.width * gl.height * 4);
-	if (gl.cap_img == NULL || gl.cap_rows == NULL) {
-		cap_stop();
+	if (gl.cap_img == NULL)
 		return false;
-	}
-	glGenTextures(1, &gl.cap_tex);
-	glBindTexture(GL_TEXTURE_2D, gl.cap_tex);
+	while (glGetError() != GL_NO_ERROR)
+		;
+	glGenTextures(1, &gl.screen_tex);
+	glBindTexture(GL_TEXTURE_2D, gl.screen_tex);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)gl.width,
 	    (GLsizei)gl.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-	glGenFramebuffers(1, &gl.cap_fbo);
-	glBindFramebuffer(GL_FRAMEBUFFER, gl.cap_fbo);
+	glGenFramebuffers(1, &gl.screen_fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl.screen_fbo);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-	    GL_TEXTURE_2D, gl.cap_tex, 0);
+	    GL_TEXTURE_2D, gl.screen_tex, 0);
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
 	    GL_FRAMEBUFFER_COMPLETE) {
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		ws_warn("renderer: no framebuffer for screen captures");
+		gl.cap_on = true;	/* so cap_stop frees it */
 		cap_stop();
 		return false;
 	}
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	if (gl.async) {
+	for (i = 0; i < GLES_CAP_SNAPS; i++) {
+		c = &gl.cap_snap[i];
+		glGenTextures(1, &c->tex);
+		glBindTexture(GL_TEXTURE_2D, c->tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)gl.width,
+		    (GLsizei)gl.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 		/* each big enough for the whole screen: the rectangles of
 		   one read don't overlap */
-		while (glGetError() != GL_NO_ERROR)
-			;
-		for (i = 0; i < GLES_CAP_SNAPS; i++) {
-			struct cap_snap *c = &gl.cap_snap[i];
-
-			glGenTextures(1, &c->tex);
-			glBindTexture(GL_TEXTURE_2D, c->tex);
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-			    (GLsizei)gl.width, (GLsizei)gl.height, 0, GL_RGBA,
-			    GL_UNSIGNED_BYTE, NULL);
-			c->rows = malloc((size_t)gl.width * gl.height * 4);
-			if (c->rows == NULL)
-				gl.async = false;
-		}
-		if (glGetError() != GL_NO_ERROR || !gl.async) {
-			ws_warn("renderer: no snapshots for screen captures; "
-			    "reading back the slow way");
-			for (i = 0; i < GLES_CAP_SNAPS; i++) {
-				glDeleteTextures(1, &gl.cap_snap[i].tex);
-				gl.cap_snap[i].tex = 0;
-				free(gl.cap_snap[i].rows);
-				gl.cap_snap[i].rows = NULL;
-			}
-			gl.async = false;
-		}
+		c->rows = malloc((size_t)gl.width * gl.height * 4);
+		c->state = CAP_IDLE;
+		if (c->rows == NULL)
+			break;
+	}
+	if (i < GLES_CAP_SNAPS || glGetError() != GL_NO_ERROR) {
+		ws_warn("renderer: no snapshots for screen captures");
+		gl.cap_on = true;	/* so cap_stop frees them */
+		cap_stop();
+		return false;
 	}
 	gl.cap_next = 0;
 	pixman_region32_clear(&gl.cap_dirty);
 	gl.cap_on = true;
 	gl.cap_fresh = true;
 	gl.cap_sync = true;
-	ws_info("renderer: screen capture copy started (%ux%u, %s readback%s)",
-	    gl.width, gl.height, gl.read_bgra ? "BGRA" : "RGBA",
+	gl.cap_want = true;
+	ws_info("renderer: screen capture snapshots started (%ux%u, %s "
+	    "readback%s)", gl.width, gl.height, gl.read_bgra ? "BGRA" : "RGBA",
 	    gl.async ? " on a worker thread" : ", blocking");
 	return true;
 }
@@ -893,46 +901,23 @@ cap_copy(const pixman_box32_t *b, const uint8_t *rows)
 	}
 }
 
-/* Read r back now, waiting for the GPU: the slow way. */
-static void
-cap_read_now(pixman_region32_t *r)
-{
-	pixman_box32_t *b;
-	int i, n, w, h;
-
-	glBindFramebuffer(GL_FRAMEBUFFER, gl.cap_fbo);
-	glPixelStorei(GL_PACK_ALIGNMENT, 4);
-	b = cap_boxes(r, &n);
-	for (i = 0; i < n; i++) {
-		w = b[i].x2 - b[i].x1;
-		h = b[i].y2 - b[i].y1;
-		if (w <= 0 || h <= 0)
-			continue;
-		/* GL rows are bottom up */
-		glReadPixels(b[i].x1, (GLint)gl.height - b[i].y2, w, h,
-		    gl.read_bgra ? GL_BGRA_EXT : GL_RGBA, GL_UNSIGNED_BYTE,
-		    gl.cap_rows);
-		cap_copy(&b[i], gl.cap_rows);
-	}
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	pixman_region32_clear(r);
-}
-
 /*
- * Start reading cap_dirty back through snapshot k: copy it out of the
- * capture copy on the GPU, rectangle after rectangle, behind a fence,
- * and hand the snapshot to the worker.
+ * At the end of a frame: copy what the CPU image lacks (cap_dirty) out
+ * of the screen texture into an idle snapshot, behind a fence, and hand
+ * it to the worker. With none idle it waits for a later frame.
  */
-static void
-cap_read_start(int k)
+static bool
+cap_snapshot(void)
 {
-	struct cap_snap *c = &gl.cap_snap[k];
+	struct cap_snap *c = &gl.cap_snap[gl.cap_next];
 	pixman_box32_t *b;
-	int i, n, w, h;
+	int i, n, w, h, y;
 
+	if (!pixman_region32_not_empty(&gl.cap_dirty) || c->state != CAP_IDLE)
+		return false;
 	pixman_region32_copy(&c->rects, &gl.cap_dirty);
 	pixman_region32_clear(&gl.cap_dirty);
-	glBindFramebuffer(GL_FRAMEBUFFER, gl.cap_fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl.screen_fbo);
 	glBindTexture(GL_TEXTURE_2D, c->tex);
 	b = cap_boxes(&c->rects, &n);
 	for (i = 0; i < n; i++) {
@@ -940,36 +925,37 @@ cap_read_start(int k)
 		h = b[i].y2 - b[i].y1;
 		if (w <= 0 || h <= 0)
 			continue;
-		/* the same place in both; GL rows are bottom up */
-		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, b[i].x1,
-		    (GLint)gl.height - b[i].y2, b[i].x1,
-		    (GLint)gl.height - b[i].y2, w, h);
+		/* from the screen texture to the same place; GL rows are
+		   bottom up */
+		y = (GLint)gl.height - b[i].y2;
+		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, b[i].x1, y, b[i].x1, y,
+		    w, h);
 	}
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	gl.cap_next = (gl.cap_next + 1) % GLES_CAP_SNAPS;
+	if (!gl.async) {
+		c->state = CAP_COPIED;	/* the main thread reads it */
+		return true;
+	}
 	c->fence = gl.fence_sync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
 	glFlush();	/* so the fence can signal without us */
 	pthread_mutex_lock(&gl.cap_lock);
 	c->state = CAP_QUEUED;
 	pthread_cond_broadcast(&gl.cap_cond);
 	pthread_mutex_unlock(&gl.cap_lock);
-	gl.cap_next = (k + 1) % GLES_CAP_SNAPS;
+	return true;
 }
 
-/* On the worker: snapshot c's rectangles into c->rows, packed in order. */
+/* Read snapshot c's rectangles into rows, packed in order, on the
+   thread whose context fbo belongs to. */
 static bool
-cap_worker_read(struct cap_snap *c)
+cap_snap_read(struct cap_snap *c, GLuint fbo, uint8_t *rows)
 {
 	pixman_box32_t *b;
 	size_t off = 0;
-	GLuint fbo;
-	GLenum r;
 	int i, n, w, h;
 	bool ok;
 
-	r = gl.client_wait_sync(c->fence, 0, GLES_CAP_WAIT_NSEC);
-	if (r != GL_ALREADY_SIGNALED && r != GL_CONDITION_SATISFIED)
-		return false;
-	glGenFramebuffers(1, &fbo);
 	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
 	    GL_TEXTURE_2D, c->tex, 0);
@@ -984,12 +970,28 @@ cap_worker_read(struct cap_snap *c)
 			continue;
 		glReadPixels(b[i].x1, (GLint)gl.height - b[i].y2, w, h,
 		    gl.read_bgra ? GL_BGRA_EXT : GL_RGBA, GL_UNSIGNED_BYTE,
-		    c->rows + off);
+		    rows + off);
 		off += (size_t)w * h * 4;
 	}
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	glDeleteFramebuffers(1, &fbo);
 	return ok && glGetError() == GL_NO_ERROR;
+}
+
+/* On the worker: wait for the copy, then read it back. */
+static bool
+cap_worker_read(struct cap_snap *c)
+{
+	GLuint fbo;
+	GLenum r;
+	bool ok;
+
+	r = gl.client_wait_sync(c->fence, 0, GLES_CAP_WAIT_NSEC);
+	if (r != GL_ALREADY_SIGNALED && r != GL_CONDITION_SATISFIED)
+		return false;
+	glGenFramebuffers(1, &fbo);
+	ok = cap_snap_read(c, fbo, c->rows);
+	glDeleteFramebuffers(1, &fbo);
+	return ok;
 }
 
 /* The worker thread: reads back the snapshots it's handed, one by one. */
@@ -1005,7 +1007,7 @@ cap_worker(void *arg)
 	    gl.cap_ctx);
 	if (!current)
 		ws_warn("renderer: screen capture readback context failed "
-		    "(0x%x); reading back the slow way", eglGetError());
+		    "(0x%x); reading back on the main thread", eglGetError());
 	pthread_mutex_lock(&gl.cap_lock);
 	for (;;) {
 		c = NULL;
@@ -1035,9 +1037,10 @@ cap_worker(void *arg)
 }
 
 /*
- * Snapshot k into the CPU image once the worker has read it; false
- * while it's still reading. wait: wait for it. If the worker failed,
- * what it held is read again the slow way, from now on.
+ * Snapshot k into the CPU image once it's read back; false while the
+ * worker is still reading it. wait: wait for it. One the main thread
+ * reads (CAP_COPIED) is read now. If a read failed, what it held is
+ * snapshotted again, and the main thread reads from then on.
  */
 static bool
 cap_read_end(int k, bool wait)
@@ -1045,22 +1048,29 @@ cap_read_end(int k, bool wait)
 	struct cap_snap *c = &gl.cap_snap[k];
 	pixman_box32_t *b;
 	size_t off = 0;
+	uint8_t *rows = c->rows;
 	int i, n, st;
 
-	pthread_mutex_lock(&gl.cap_lock);
-	while (wait && c->state == CAP_QUEUED)
-		pthread_cond_wait(&gl.cap_cond, &gl.cap_lock);
-	st = c->state;
-	pthread_mutex_unlock(&gl.cap_lock);
-	if (st == CAP_QUEUED)
-		return false;
+	if (c->state == CAP_COPIED) {
+		if (c->fbo == 0)
+			glGenFramebuffers(1, &c->fbo);
+		st = cap_snap_read(c, c->fbo, rows) ? CAP_DONE : CAP_FAILED;
+	} else {
+		pthread_mutex_lock(&gl.cap_lock);
+		while (wait && c->state == CAP_QUEUED)
+			pthread_cond_wait(&gl.cap_cond, &gl.cap_lock);
+		st = c->state;
+		pthread_mutex_unlock(&gl.cap_lock);
+		if (st == CAP_QUEUED)
+			return false;
+	}
 	if (st == CAP_DONE) {
-		/* in the order cap_read_start copied them */
+		/* in the order cap_snapshot copied them */
 		b = pixman_region32_rectangles(&c->rects, &n);
 		for (i = 0; i < n; i++) {
 			if (b[i].x2 <= b[i].x1 || b[i].y2 <= b[i].y1)
 				continue;
-			cap_copy(&b[i], c->rows + off);
+			cap_copy(&b[i], rows + off);
 			off += (size_t)(b[i].x2 - b[i].x1) *
 			    (b[i].y2 - b[i].y1) * 4;
 		}
@@ -1069,21 +1079,42 @@ cap_read_end(int k, bool wait)
 		    &c->rects);
 		if (gl.async)
 			ws_warn("renderer: screen capture readback on the "
-			    "worker failed; reading back the slow way");
+			    "worker failed; reading back on the main thread");
 		gl.async = false;
 	}
-	gl.delete_sync(c->fence);
+	if (c->fence != NULL)
+		gl.delete_sync(c->fence);
 	c->fence = NULL;
 	pixman_region32_clear(&c->rects);
 	c->state = CAP_IDLE;	/* the worker only looks for CAP_QUEUED */
 	return true;
 }
 
+/* What the CPU image lacks and no snapshot holds, drawn again, so the
+   next frame snapshots it (every snapshot was busy when it changed). */
+static void
+cap_redraw_dirty(struct ws_server *srv)
+{
+	pixman_box32_t *b;
+	ws_rect_t r;
+	int i, n, s = (int)srv->scale;
+
+	b = pixman_region32_rectangles(&gl.cap_dirty, &n);
+	for (i = 0; i < n; i++) {
+		/* backing pixels to points, rounded out */
+		r.x = b[i].x1 / s;
+		r.y = b[i].y1 / s;
+		r.width = (b[i].x2 + s - 1) / s - r.x;
+		r.height = (b[i].y2 + s - 1) / s - r.y;
+		damage_rect(srv, &r);
+	}
+}
+
 /*
- * The screen for captures, in panel pixels. Reads that landed are
- * copied in; what changed since starts reading back, and *behind (if
- * not NULL) says where the image is older than the screen. wait (and
- * the first read of a copy) reads it all now instead.
+ * The screen for captures, in panel pixels. Snapshots that were read
+ * back are copied in, oldest first, and *behind (if not NULL) says
+ * where the image is older than the screen. wait (and the first read)
+ * waits for the snapshots in flight.
  */
 static pixman_image_t *
 gles_screen_read(struct ws_server *srv, bool wait, pixman_region32_t *behind,
@@ -1100,7 +1131,7 @@ gles_screen_read(struct ws_server *srv, bool wait, pixman_region32_t *behind,
 	if (!gl.cap_on) {
 		if (!cap_start())
 			return NULL;
-		damage_all(srv);	/* the next frame draws it whole */
+		damage_all(srv);	/* the next frame snapshots it whole */
 	}
 	if (gl.cap_fresh) {
 		/* black until then */
@@ -1110,9 +1141,11 @@ gles_screen_read(struct ws_server *srv, bool wait, pixman_region32_t *behind,
 		*serial = 0;
 		return gl.cap_img;
 	}
-	wait = wait || gl.cap_sync || !gl.async;
-	/* the reads in flight, oldest first, up to one not done yet (only
-	   this thread makes a snapshot idle, so state is safe to test) */
+	gl.cap_want = true;	/* the next frame snapshots */
+	wait = wait || gl.cap_sync;
+	/* the snapshots in flight, oldest first, up to one not read yet
+	   (only this thread makes a snapshot idle, so state is safe to
+	   test) */
 	for (i = 0; i < GLES_CAP_SNAPS; i++) {
 		k = (gl.cap_next + i) % GLES_CAP_SNAPS;
 		if (gl.cap_snap[k].state == CAP_IDLE)
@@ -1120,14 +1153,8 @@ gles_screen_read(struct ws_server *srv, bool wait, pixman_region32_t *behind,
 		if (!cap_read_end(k, wait))
 			break;
 	}
-	wait = wait || !gl.async;	/* a failure turns it off */
-	if (pixman_region32_not_empty(&gl.cap_dirty)) {
-		if (wait)
-			cap_read_now(&gl.cap_dirty);
-		else if (gl.cap_snap[gl.cap_next].state == CAP_IDLE)
-			cap_read_start(gl.cap_next);
-		/* else every snapshot is in flight: the next read */
-	}
+	if (pixman_region32_not_empty(&gl.cap_dirty))
+		cap_redraw_dirty(srv);
 	gl.cap_sync = false;
 	if (behind != NULL) {
 		pixman_region32_copy(behind, &gl.cap_dirty);
@@ -1209,7 +1236,7 @@ gles_repaint(struct ws_server *srv, pixman_region32_t *region)
 		age = 0;
 	gl.egl_age = age;
 	if (gl.cap_on && gl.cap_fresh) {
-		/* the capture copy starts empty: draw it all once */
+		/* the CPU image starts empty: snapshot it all once */
 		pixman_region32_union_rect(region, region, 0, 0, srv->width,
 		    srv->height);
 		gl.cap_fresh = false;
@@ -1242,6 +1269,19 @@ gles_repaint(struct ws_server *srv, pixman_region32_t *region)
 	}
 	if (gl.nhistory < GLES_HISTORY - 1)
 		gl.nhistory++;
+	if (gl.cap_on && gl.cap_want) {
+		/* this frame goes through the screen texture, which lacks
+		   what changed since it last did (cap_dirty): draw that too */
+		pixman_box32_t *b;
+		int j, n, s = (int)srv->scale;
+
+		b = pixman_region32_rectangles(&gl.cap_dirty, &n);
+		for (j = 0; j < n; j++)
+			pixman_region32_union_rect(region, region,
+			    b[j].x1 / s, b[j].y1 / s,
+			    (unsigned)((b[j].x2 + s - 1) / s - b[j].x1 / s),
+			    (unsigned)((b[j].y2 + s - 1) / s - b[j].y1 / s));
+	}
 	if (gl.verify) {
 		pixman_box32_t *e1 = pixman_region32_extents(&gl.frame_damage);
 		pixman_box32_t *e2 = pixman_region32_extents(region);
@@ -1263,6 +1303,11 @@ gles_begin(struct ws_server *srv, pixman_region32_t *back)
 	glEnable(GL_SCISSOR_TEST);
 	if (gl.cap_on)
 		own_clip(&gl.cap_clip, back, s);
+	/* while capturing, draw into the screen texture (cap_present) */
+	gl.draw_fbo = gl.cap_on && gl.cap_want ? gl.screen_fbo : 0;
+	/* only to switch: binding the window's framebuffer again costs */
+	if (gl.draw_fbo != 0)
+		glBindFramebuffer(GL_FRAMEBUFFER, gl.draw_fbo);
 	if (gl.verify) {
 		pixman_region32_clear(&gl.mclip);
 		b = pixman_region32_rectangles(&gl.frame_damage, &n);
@@ -1501,12 +1546,6 @@ gles_draw(struct ws_server *srv, const struct ws_draw *d)
 	else
 		glDisable(GL_BLEND);
 	clipped(d->x, d->y, d->w, d->h);
-	if (gl.cap_on) {
-		/* the capture copy: the same draw, this frame's damage */
-		glBindFramebuffer(GL_FRAMEBUFFER, gl.cap_fbo);
-		clipped_in(&gl.cap_clip, d->x, d->y, d->w, d->h);
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	}
 	if (gl.verify) {
 		/* the simulated GBM buffer: the same draw, same clip */
 		glBindFramebuffer(GL_FRAMEBUFFER, gl.sim_fbo[gl.sim_cur]);
@@ -1525,7 +1564,7 @@ gles_draw(struct ws_server *srv, const struct ws_draw *d)
 			    d->smooth ? GL_LINEAR : GL_NEAREST);
 			clipped_in(&gl.mclip, d->x, d->y, d->w, d->h);
 		}
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindFramebuffer(GL_FRAMEBUFFER, gl.draw_fbo);
 	}
 }
 
@@ -1557,13 +1596,6 @@ gles_fill(struct ws_server *srv, const pixman_color_t *color,
 		pos[6] = boxes[i].x2; pos[7] = boxes[i].y2;
 		clipped(boxes[i].x1, boxes[i].y1, boxes[i].x2 - boxes[i].x1,
 		    boxes[i].y2 - boxes[i].y1);
-		if (gl.cap_on) {
-			glBindFramebuffer(GL_FRAMEBUFFER, gl.cap_fbo);
-			clipped_in(&gl.cap_clip, boxes[i].x1, boxes[i].y1,
-			    boxes[i].x2 - boxes[i].x1,
-			    boxes[i].y2 - boxes[i].y1);
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		}
 		if (gl.verify) {
 			glBindFramebuffer(GL_FRAMEBUFFER,
 			    gl.sim_fbo[gl.sim_cur]);
@@ -1573,7 +1605,7 @@ gles_fill(struct ws_server *srv, const pixman_color_t *color,
 			clipped_in(&gl.mclip, boxes[i].x1, boxes[i].y1,
 			    boxes[i].x2 - boxes[i].x1,
 			    boxes[i].y2 - boxes[i].y1);
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_FRAMEBUFFER, gl.draw_fbo);
 		}
 	}
 }
@@ -1595,7 +1627,7 @@ verify_frame(void)
 	glBindFramebuffer(GL_FRAMEBUFFER, gl.mirror_fbo);
 	glReadPixels(0, 0, (GLsizei)gl.width, (GLsizei)gl.height, GL_RGBA,
 	    GL_UNSIGNED_BYTE, m);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl.draw_fbo);
 	for (y = 0; y < gl.height; y++)
 		for (x = 0; x < gl.width; x++) {
 			/* the screen has no alpha; the mirror texture does */
@@ -1647,18 +1679,51 @@ verify_frame(void)
 		    gl.vbad);
 }
 
+/* A frame drawn into the screen texture: onto the back buffer, where
+   it was drawn (gl.clip). */
+static void
+cap_present(void)
+{
+	GLfloat w = (GLfloat)gl.width, h = (GLfloat)gl.height;
+	GLfloat pos[8] = { 0, 0, w, 0, 0, h, w, h };
+	/* the texture's rows are bottom up */
+	GLfloat uv[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glUseProgram(gl.prog_tex);
+	glUniform2f(gl.tex_screen, w, h);
+	glUniform1f(gl.tex_opacity, 1.0f);
+	glUniform1i(gl.tex_opaque, 1);
+	glUniform1i(gl.tex_swizzle, 0);
+	glBindTexture(GL_TEXTURE_2D, gl.screen_tex);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, pos);
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, uv);
+	glEnableVertexAttribArray(0);
+	glEnableVertexAttribArray(1);
+	glDisable(GL_BLEND);
+	glEnable(GL_SCISSOR_TEST);
+	clipped_in(&gl.clip, 0, 0, (int32_t)gl.width, (int32_t)gl.height);
+}
+
 static void
 gles_end(struct ws_server *srv, pixman_region32_t *back,
     pixman_region32_t *out)
 {
 	if (gl.verify)
 		verify_frame();
+	if (gl.draw_fbo != 0)
+		cap_present();
 	if (gl.cap_on) {
 		pixman_region32_union(&gl.cap_dirty, &gl.cap_dirty,
 		    &gl.cap_clip);
 		if (ws_now_usec() - gl.cap_used > GLES_CAP_IDLE_USEC)
 			cap_stop();
+		else if (gl.draw_fbo != 0 && cap_snapshot())
+			gl.cap_want = false;
 	}
+	gl.draw_fbo = 0;
 
 	glDisable(GL_SCISSOR_TEST);
 	pixman_region32_clear(&gl.clip);
@@ -1980,7 +2045,7 @@ gles_buffer_read(struct ws_server *srv, struct ws_buffer *b)
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	glReadPixels(0, 0, (GLsizei)b->width, (GLsizei)b->height, GL_RGBA,
 	    GL_UNSIGNED_BYTE, pixman_image_get_data(img));
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl.draw_fbo);
 	glDeleteFramebuffers(1, &fbo);
 	glDeleteTextures(1, &tex);
 	glViewport(0, 0, (GLsizei)gl.width, (GLsizei)gl.height);
