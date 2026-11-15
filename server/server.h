@@ -347,6 +347,7 @@ enum {
 	TIMER_OVERVIEW,
 	TIMER_DRAG,
 	TIMER_CAPTURE,
+	TIMER_REPAINT,
 };
 
 /* The window overview (overview.c). */
@@ -728,6 +729,7 @@ struct ws_server {
 	const struct ws_renderer_ops *renderer;
 	void		*renderer_data;
 	bool		present_pending;	/* waiting for page flip */
+	uint64_t	presented_usec;		/* ws_now_usec() of the last flip */
 	bool		display_active;		/* we own the VT and DRM master */
 
 	/* Mach */

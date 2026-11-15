@@ -135,6 +135,7 @@ handle_kevent(struct ws_server *srv, struct kevent *kev)
 		else if (kev->ident == TIMER_DRAG)
 			drag_timer_fire(srv);
 		/* TIMER_CAPTURE: a frame is due; the loop sends it */
+		/* TIMER_REPAINT: the repaint window opened; the loop draws */
 		return;
 	}
 	type = tag < 64 ? (int)tag : *(int *)kev->udata;

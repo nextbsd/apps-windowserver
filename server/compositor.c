@@ -250,6 +250,7 @@ compositor_present_done(struct ws_server *srv)
 	struct ws_window *w;
 
 	srv->present_pending = false;
+	srv->presented_usec = ws_now_usec();
 	for (w = srv->windows; w != NULL; w = w->next) {
 		if (w->frame_inflight) {
 			w->frame_inflight = false;
@@ -427,6 +428,47 @@ repaint_region(struct ws_server *srv, pixman_region32_t *region,
 	pixman_region32_fini(&back);
 }
 
+/*
+ * The repaint window: how long before the next vblank a frame starts,
+ * in µs; enough to draw it and still make that vblank. Waiting until
+ * then lets every window that commits in between share the frame: drawn
+ * the moment the first damage came, each window's commit took a refresh
+ * of its own, and the others waited for the next (two 60 fps windows
+ * got 30 each; an X window that commits often slowed every other).
+ * WS_REPAINT_WINDOW_MS changes it; 0 repaints at once, as before.
+ */
+#define REPAINT_WINDOW_USEC	7000
+
+static bool
+repaint_later(struct ws_server *srv)
+{
+	static int64_t window = -1;
+	uint64_t now, period, due;
+	const char *e;
+
+	if (window < 0) {
+		e = getenv("WS_REPAINT_WINDOW_MS");
+		window = e != NULL ? (int64_t)(atof(e) * 1000) :
+		    REPAINT_WINDOW_USEC;
+	}
+	if (srv->headless || window == 0 || srv->presented_usec == 0)
+		return false;
+	period = srv->refresh_mhz != 0 ?
+	    1000000000ULL / srv->refresh_mhz : 16667;
+	if ((uint64_t)window >= period)
+		return false;
+	now = ws_now_usec();
+	/* idle for a refresh or more: no frame to share, draw now */
+	if (now - srv->presented_usec >= period)
+		return false;
+	due = srv->presented_usec + period - (uint64_t)window;
+	if (now >= due)
+		return false;
+	ws_timer_set(srv, TIMER_REPAINT, (int)((due - now + 999) / 1000),
+	    true);
+	return true;
+}
+
 /* Recomposite the damaged region and hand it to the output. */
 void
 compositor_repaint(struct ws_server *srv)
@@ -448,6 +490,8 @@ compositor_repaint(struct ws_server *srv)
 			}
 		return;
 	}
+	if (repaint_later(srv))
+		return;
 	pixman_region32_init(&region);
 	pixman_region32_copy(&region, &srv->damage);
 	pixman_region32_clear(&srv->damage);
