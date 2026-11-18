@@ -576,6 +576,40 @@ int		 ws_list_keyboard_layouts(ws_connection_t *conn,
 int		 ws_list_input_devices(ws_connection_t *conn,
     void (*fn)(const ws_event_input_device_t *device, void *ctx), void *ctx);
 
+/*
+ * Displays (servers with WS_SERVER_DISPLAYS, "Displays" in WSProtocol.h;
+ * ENOTSUP from others).
+ *   ws_list_displays	fn gets each display, the main one first
+ *   ws_list_display_modes
+ *			fn gets display_id's "looks like" sizes, then its
+ *			modes (WS_DISPLAY_MODE_*)
+ *   ws_display_set_looks_like, _set_mode, _set_origin, _set_main,
+ *   ws_display_set_mirror
+ *			one change; flags WS_DISPLAY_CONFIRM makes it go
+ *			back by itself unless ws_display_keep() follows
+ *			within WS_DISPLAY_REVERT_MS
+ *   ws_display_keep, ws_display_revert
+ *			keep or undo the pending change
+ * Every connection gets WS_EVENT_DISPLAYS_CHANGED when the displays
+ * change; list them again then.
+ */
+int		 ws_list_displays(ws_connection_t *conn,
+    void (*fn)(const ws_display_info_t *display, void *ctx), void *ctx);
+int		 ws_list_display_modes(ws_connection_t *conn, uint32_t display_id,
+    void (*fn)(const ws_display_mode_t *mode, void *ctx), void *ctx);
+int		 ws_display_set_looks_like(ws_connection_t *conn,
+    uint32_t display_id, uint32_t width, uint32_t height, uint32_t flags);
+int		 ws_display_set_mode(ws_connection_t *conn, uint32_t display_id,
+    uint32_t width, uint32_t height, uint32_t refresh_mhz, uint32_t flags);
+int		 ws_display_set_origin(ws_connection_t *conn, uint32_t display_id,
+    int32_t x, int32_t y, uint32_t flags);
+int		 ws_display_set_main(ws_connection_t *conn, uint32_t display_id,
+    uint32_t flags);
+int		 ws_display_set_mirror(ws_connection_t *conn, uint32_t display_id,
+    uint32_t of, uint32_t flags);
+int		 ws_display_keep(ws_connection_t *conn);
+int		 ws_display_revert(ws_connection_t *conn);
+
 /* Names for event types and helpers, for logging. */
 const char	*ws_event_name(uint16_t type);
 
