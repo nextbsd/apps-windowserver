@@ -609,6 +609,11 @@ typedef struct ws_display_info {
 	char		connector[16];	/* "eDP-1", "DP-1", "HDMI-A-1" */
 } ws_display_info_t;
 
+/* WS_MSG_DISPLAY_CONFIGURE flags (ws_display_set_* in WSClient.h) */
+#define WS_DISPLAY_CONFIRM	0x0001	/* goes back by itself after
+					   WS_DISPLAY_REVERT_MS unless kept */
+#define WS_DISPLAY_REVERT_MS	15000
+
 /* ws_display_mode_t.kind */
 #define WS_DISPLAY_MODE_LOOKS_LIKE 1	/* a "looks like" size, in points */
 #define WS_DISPLAY_MODE_PANEL	2	/* a mode of the display: pixels at a
@@ -620,6 +625,9 @@ typedef struct ws_display_info {
 					   PANEL: the display's preferred
 					   mode */
 #define WS_DISPLAY_MODE_INTERLACED 0x0004 /* PANEL */
+#define WS_DISPLAY_MODE_CHOSEN	0x0008	/* LOOKS_LIKE, CURRENT: the user's
+					   choice; without it the display
+					   follows its default */
 
 typedef struct ws_display_mode {
 	uint32_t	display_id;

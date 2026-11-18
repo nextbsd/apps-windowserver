@@ -243,6 +243,8 @@ value_ok(const struct ws_config *cfg, const char *key)
 		return display_scale_ok(cfg->display_scale);
 	if (strcmp(key, "DisplayDefaultLooksLike") == 0)
 		return display_default_ok(cfg->display_default_looks_like);
+	if (strncmp(key, "NightShift", 10) == 0)
+		return display_night_shift_ok(cfg, key);
 	if (strcmp(key, "TilingNewWindowSplits") == 0)
 		return strcasecmp(cfg->tiling_new_window_splits, "largest") == 0 ||
 		    strcasecmp(cfg->tiling_new_window_splits, "pointer") == 0 ||

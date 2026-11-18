@@ -454,6 +454,15 @@ int		 ws_inject_swipe(ws_connection_t *conn, uint32_t fingers,
  * width x height, as a mode change would make it (tests). */
 int		 ws_inject_screen_size(ws_connection_t *conn, uint32_t width,
     uint32_t height);
+/* Headless servers with WS_SERVER_DISPLAYS (tests): plug in a display of
+   width x height pixels (mm: its size, 0 for none; edid_id NULL for a
+   made-up one), unplug one, close or open the lid. */
+int		 ws_inject_display(ws_connection_t *conn, uint32_t width,
+    uint32_t height, uint32_t mm_width, uint32_t mm_height,
+    const char *edid_id);
+int		 ws_inject_display_unplug(ws_connection_t *conn,
+    uint32_t display_id);
+int		 ws_inject_lid(ws_connection_t *conn, int closed);
 
 /*
  * The window overview (servers with WS_SERVER_OVERVIEW; tool and Dock

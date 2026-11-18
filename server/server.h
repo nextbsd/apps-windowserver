@@ -45,7 +45,7 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_MENU_BAR | WS_SERVER_ACTIVATE_RAISE | \
 				 WS_SERVER_DOCK_NOT_ACTIVE | WS_SERVER_TILING | \
 				 WS_SERVER_DRAG | WS_SERVER_CAPTURE | \
-				 WS_SERVER_SCALE)
+				 WS_SERVER_SCALE | WS_SERVER_DISPLAYS)
 
 /* The standard cursors with a built-in image (cursor.c): kinds 0 to
    WS_CURSOR_DRAG_LINK. */
@@ -121,6 +121,10 @@ struct ws_config {
 					   mode the panel runs at */
 	char	display_store[128];	/* where the per-display choices
 					   are kept */
+	/* Night Shift (display.c) */
+	char	night_shift[16];	/* Off, On or Schedule */
+	char	night_shift_schedule[16]; /* "22:00-07:00", local time */
+	int	night_shift_temperature; /* kelvin, 1900 to 6500 */
 };
 
 /* What a live change to a key needs (config.c's key table). */
@@ -250,6 +254,11 @@ struct ws_window {
 	ws_rect_t	clear_usable;	/* the usable area then */
 	ws_rect_t	clear_given;	/* the frame it was pushed to */
 	uint64_t	clear_usec;	/* when */
+	/* moved off a display that went away (display.c): it goes back
+	   when that display comes back, unless it has moved since */
+	char		home_display[48];	/* its EDID id, "" = none */
+	ws_rect_t	home_frame;	/* there, relative to its corner */
+	ws_rect_t	moved_to;	/* where it was put instead */
 	uint32_t	min_width;	/* WS_MSG_WINDOW_SET_SIZE_LIMITS, */
 	uint32_t	min_height;	/* 0 = none */
 	uint32_t	max_width;
@@ -338,6 +347,7 @@ enum ws_src_type {
 	SRC_INPUT,
 	SRC_DRM,
 	SRC_TTY,
+	SRC_HOTPLUG,
 };
 
 enum {
@@ -348,6 +358,7 @@ enum {
 	TIMER_DRAG,
 	TIMER_CAPTURE,
 	TIMER_REPAINT,
+	TIMER_DISPLAY_REVERT,
 };
 
 /* The window overview (overview.c). */
@@ -574,21 +585,33 @@ struct ws_scroll_state {
 
 /* ---- output backends ---- */
 
+struct ws_display;
+
 struct ws_output_ops {
 	const char *name;
-	/* Push the damaged part of srv->shadow to the screen. Returns true
-	 * if the frame is presented asynchronously (flip pending). */
+	/* Put `damage` (backing pixels of the desktop) on every display
+	 * that shows some of it. Returns true if the frame is presented
+	 * asynchronously (flips pending). */
 	bool	(*present)(struct ws_server *srv, pixman_region32_t *damage);
-	/* Hardware cursor: return false to fall back to software. */
+	/* Hardware cursor: img has scale pixels per point, the hot spot
+	 * is in points. Return false to fall back to software. */
 	bool	(*cursor_set)(struct ws_server *srv, pixman_image_t *img,
-		    int hot_x, int hot_y);
-	void	(*cursor_move)(struct ws_server *srv, int x, int y);
+		    uint32_t scale, double hot_x, double hot_y);
+	void	(*cursor_move)(struct ws_server *srv, double x, double y);
 	void	(*cursor_hide)(struct ws_server *srv);
 	void	(*shutdown)(struct ws_server *srv);
 	/* Switching away from a renderer with its own scanout buffers:
-	 * wait for the flip in flight, then show srv->out whole. */
+	 * wait for the flips in flight, then show the displays from
+	 * their views (pixman) whole. */
 	void	(*wait_present)(struct ws_server *srv);
 	void	(*take_screen)(struct ws_server *srv);
+	/* Displays (display.c): turn d on at its panel mode (a modeset
+	 * showing black until the next frame), or off. */
+	int	(*display_on)(struct ws_server *srv, struct ws_display *d);
+	void	(*display_off)(struct ws_server *srv, struct ws_display *d);
+	/* Night Shift: scale d's red, green and blue (0..1) */
+	void	(*gamma)(struct ws_server *srv, struct ws_display *d,
+		    double r, double g, double b);
 };
 
 /* ---- renderers ---- */
@@ -629,19 +652,24 @@ struct ws_renderer_ops {
 	/* Opaque colours replace, translucent ones blend (OVER). */
 	void	(*fill)(struct ws_server *srv, const pixman_color_t *color,
 		    const pixman_box32_t *boxes, int n);
-	/* Done drawing `back`; `out` gets what changed in panel pixels. */
+	/* Done drawing `back`; `out` gets what changed, in backing
+	 * pixels of the desktop. */
 	void	(*end)(struct ws_server *srv, pixman_region32_t *back,
 		    pixman_region32_t *out);
 	/* A renderer with its own scanout buffers (NULL: the output
-	 * copies srv->out): the DRM framebuffer of the frame just ended,
-	 * and word that the flip to it is done. */
-	bool	(*scanout)(struct ws_server *srv, uint32_t *fb_id);
-	void	(*presented)(struct ws_server *srv);
+	 * copies each display's view): display d's DRM framebuffer of
+	 * the frame just ended (false: d has nothing new), and word that
+	 * the flip to it is done. */
+	bool	(*scanout)(struct ws_server *srv, struct ws_display *d,
+		    uint32_t *fb_id);
+	void	(*presented)(struct ws_server *srv, struct ws_display *d);
 	/* A window's buffer changed: `damage` (window-local points), or
 	 * all of it when NULL. And the window is gone. */
 	void	(*window_commit)(struct ws_server *srv, struct ws_window *w,
 		    pixman_region32_t *damage);
 	void	(*window_gone)(struct ws_server *srv, struct ws_window *w);
+	/* Display d is going away (unplugged): let go of what it had. */
+	void	(*display_gone)(struct ws_server *srv, struct ws_display *d);
 	/* GPU buffers (NULL: none): what can be imported, importing and
 	 * letting go of one, and reading its pixels back for the parts of
 	 * the server that need them on the CPU (previews, captures). */
@@ -650,8 +678,8 @@ struct ws_renderer_ops {
 	void	(*buffer_gone)(struct ws_server *srv, struct ws_buffer *b);
 	pixman_image_t *(*buffer_read)(struct ws_server *srv,
 		    struct ws_buffer *b);
-	/* A renderer without srv->out (NULL: none): the screen in panel
-	 * pixels for captures, as up to date as it can be without waiting
+	/* A renderer without srv->out (NULL: none): the main display in
+	 * panel pixels for captures, as up to date as it can be without waiting
 	 * for the GPU (wait: brought all up to date); NULL when it can't.
 	 * *behind gets where the image is older than the screen, to read
 	 * again later; *serial changes whenever the image does, and is 0
@@ -679,6 +707,67 @@ struct ws_input_device {
 	struct ws_input_device *next;
 };
 
+/* A mode a display has (DRM). */
+struct ws_panel_mode {
+	uint32_t	w, h;		/* pixels */
+	uint32_t	mhz;		/* refresh, 60000 = 60 Hz */
+	bool		preferred;
+	bool		interlaced;
+};
+
+#define WS_MAX_PANEL_MODES	48
+
+/*
+ * A connected display (display.c): its modes and "looks like" sizes,
+ * where it is in the desktop, and how it is drawn. The output backend
+ * (drm.c) and the renderer keep their own state in `output` and
+ * `render`.
+ */
+struct ws_display {
+	uint32_t	id;		/* the protocol's, never 0 */
+	bool		on;		/* shown: connected and not a closed
+					   lid's panel */
+	bool		builtin;	/* a laptop's own panel */
+	bool		edid_trusted;	/* mm_width/height are real */
+	char		edid_id[48];	/* EDID vendor-product-serial */
+	char		name[32];
+	char		connector[16];	/* "eDP-1" */
+	uint32_t	mm_width;
+	uint32_t	mm_height;
+	/* its modes, and the one it runs at */
+	unsigned	npanel;
+	struct ws_panel_mode panel[WS_MAX_PANEL_MODES];
+	uint32_t	want_w;		/* the user's mode, 0 = preferred */
+	uint32_t	want_h;
+	uint32_t	want_mhz;
+	uint32_t	panel_width;	/* in use, pixels */
+	uint32_t	panel_height;
+	uint32_t	refresh_mhz;
+	/* "looks like" choices, points (HiDPI) */
+	unsigned	nmodes;
+	struct { uint32_t w, h; } modes[WS_MAX_DISPLAY_MODES];
+	unsigned	mode_default;	/* index in modes */
+	uint32_t	chosen_w;	/* the user's choice, 0 = the default */
+	uint32_t	chosen_h;
+	uint32_t	own_scale;	/* the scale it would run at alone */
+	/* in the desktop */
+	ws_rect_t	frame;		/* points */
+	uint32_t	mirror_of;	/* the display it shows, 0 = none */
+	ws_rect_t	back;		/* backing pixels it shows */
+	ws_rect_t	dest;		/* where they go on the panel, pixels
+					   (smaller for a mirror of another
+					   shape) */
+	/* the pixman renderer: back scaled to the panel (NULL when back
+	   is the panel's size and shown as is), and what the output
+	   copies from: that, or a view of the shadow */
+	pixman_image_t	*panel_image;
+	pixman_image_t	*view;
+	void		*output;	/* drm.c's */
+	void		*render;	/* the renderer's */
+	bool		flip_pending;
+	double		gamma_r, gamma_g, gamma_b;	/* Night Shift, applied */
+};
+
 struct ws_server {
 	struct ws_config cfg;		/* in effect: base + session */
 	/* settings layers (settings.c) */
@@ -694,30 +783,34 @@ struct ws_server {
 	bool		running;
 	int		kq;
 
-	/* screen: width x height points, scale backing pixels per point
-	   (display.c) */
+	/*
+	 * The desktop (display.c): width x height points around every
+	 * display, drawn at scale backing pixels per point.
+	 */
 	uint32_t	width;
 	uint32_t	height;
 	uint32_t	scale;
 	uint32_t	back_width;	/* the shadow: points times scale */
 	uint32_t	back_height;
-	uint32_t	panel_width;	/* the display's mode, pixels */
+	struct ws_display *displays[WS_MAX_DISPLAYS];	/* connected */
+	unsigned	ndisplays;
+	struct ws_display *main;	/* the main display, NULL when none
+					   is on */
+	uint32_t	next_display_id;
+	bool		lid_closed;
+	bool		started;	/* the compositor has images: display
+					   changes go all the way */
+	char		arrangement[512]; /* the display set's key in the
+					   store, "" before the first */
+	/* a change made with WS_DISPLAY_CONFIRM, until kept or reverted */
+	bool		display_pending;
+	uint64_t	display_pending_until;	/* ws_now_usec() */
+	char		*display_saved;	/* the state before it (display.c) */
+	/* The main display's, for captures, snapshots, frame pacing and
+	   ws_screen_info_t */
+	uint32_t	panel_width;
 	uint32_t	panel_height;
-	pixman_image_t	*panel;		/* the shadow scaled to the panel,
-					   when the sizes differ, else NULL */
-	pixman_image_t	*out;		/* what the panel shows: panel or
-					   shadow (not owned). The pixman
-					   renderer's; outputs, captures
-					   and snapshots read it */
-	bool		screen_internal; /* a laptop's own panel */
-	bool		edid_trusted;	/* mm_width/height are real */
-	char		display_id[48];	/* EDID vendor-product-serial */
-	char		display_name[32];
-	unsigned	nmodes;		/* "looks like" choices, points */
-	struct { uint32_t w, h; } modes[WS_MAX_DISPLAY_MODES];
-	unsigned	mode_default;	/* index in modes */
-	uint32_t	chosen_w;	/* the user's choice for this */
-	uint32_t	chosen_h;	/* display, 0 = the default */
+	pixman_image_t	*out;		/* its view (pixman), or NULL */
 	uint32_t	refresh_mhz;
 	uint32_t	mm_width;
 	uint32_t	mm_height;
@@ -899,7 +992,10 @@ struct ws_server {
 };
 
 /* ---- display.c ---- */
-void	display_set_edid(struct ws_server *srv, const uint8_t *edid,
+struct ws_display *display_add(struct ws_server *srv);
+void	display_remove(struct ws_server *srv, struct ws_display *d);
+struct ws_display *display_lookup(struct ws_server *srv, uint32_t id);
+void	display_set_edid(struct ws_display *d, const uint8_t *edid,
 	    size_t len);
 void	display_init(struct ws_server *srv);
 int	display_apply(struct ws_server *srv, bool force);
@@ -910,6 +1006,24 @@ int	display_info(struct ws_server *srv, unsigned i, char *key,
 	    size_t klen, char *value, size_t vlen);
 bool	display_scale_ok(const char *value);
 bool	display_default_ok(const char *value);
+bool	display_night_shift_ok(const struct ws_config *cfg, const char *key);
+void	display_night_shift(struct ws_server *srv);
+void	display_lid(struct ws_server *srv, bool closed);
+void	display_list(struct ws_server *srv, struct ws_client *c);
+void	display_list_modes(struct ws_server *srv, struct ws_client *c,
+	    uint32_t id);
+int	display_configure(struct ws_server *srv, const ws_req_display_t *m);
+void	display_revert_fire(struct ws_server *srv);
+int	display_inject(struct ws_server *srv, const ws_req_inject_t *m);
+void	display_housekeeping(struct ws_server *srv);
+bool	display_shows(const struct ws_display *d);
+struct ws_display *display_at(struct ws_server *srv, double x, double y);
+void	display_clamp(struct ws_server *srv, double *x, double *y);
+ws_rect_t display_main_frame(struct ws_server *srv);
+void	display_back_to_panel(const struct ws_display *d,
+	    pixman_region32_t *in, pixman_region32_t *out);
+void	display_panel_to_points(const struct ws_display *d, double px,
+	    double py, double *x, double *y);
 
 /* ---- main.c ---- */
 void	ws_kq_add_fd(struct ws_server *srv, int fd, int filter, void *udata);
@@ -957,6 +1071,7 @@ void	menu_bar_app_gone(struct ws_server *srv, struct ws_client *c,
 	    struct ws_client *heir);
 int	screen_resize(struct ws_server *srv, uint32_t width, uint32_t height);
 void	screen_changed(struct ws_server *srv);
+void	screen_displays_changed(struct ws_server *srv);
 
 /* ---- request.c ---- */
 void	request_handle(struct ws_server *srv, struct ws_mach_item *item);
@@ -1259,6 +1374,8 @@ extern const struct ws_renderer_ops gles_renderer_ops;
 int	drm_open(struct ws_server *srv);
 int	drm_start(struct ws_server *srv);
 void	drm_readable(struct ws_server *srv);
+void	drm_hotplug_readable(struct ws_server *srv);
+void	drm_housekeeping(struct ws_server *srv);
 extern const struct ws_output_ops drm_output_ops;
 
 /* ---- vt.c ---- */

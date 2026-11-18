@@ -221,6 +221,14 @@ handle_inject(struct ws_server *srv, struct ws_client *c,
 			    err == ENOTSUP ? "only a headless screen can "
 			    "change size" : "bad screen size");
 		break;
+	case WS_INJECT_DISPLAY:
+	case WS_INJECT_LID:
+		err = display_inject(srv, m);
+		if (err != 0)
+			client_error(srv, c, WS_MSG_INJECT, 0, err,
+			    err == ENOTSUP ? "only a headless server takes "
+			    "displays" : "bad display");
+		break;
 	default:
 		client_error(srv, c, WS_MSG_INJECT, 0, EINVAL,
 		    "unknown inject kind");
@@ -381,6 +389,8 @@ min_size(mach_msg_id_t id)
 		return sizeof(ws_req_cursor_t);
 	case WS_MSG_INJECT:
 		return sizeof(ws_req_inject_t);
+	case WS_MSG_DISPLAY_CONFIGURE:
+		return sizeof(ws_req_display_t);
 	case WS_MSG_DOCK_SET_EDGE:
 		return sizeof(ws_req_dock_edge_t);
 	case WS_MSG_WINDOW_SET_SIZE_LIMITS:
@@ -486,6 +496,28 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 	    ((ws_req_int_t *)(void *)h)->value : 0;
 
 	switch (id) {
+	case WS_MSG_LIST_DISPLAYS:
+		display_list(srv, c);
+		break;
+	case WS_MSG_LIST_DISPLAY_MODES:
+		display_list_modes(srv, c, h->window);
+		break;
+	case WS_MSG_DISPLAY_CONFIGURE: {
+		int err;
+
+		/* the console user's, as for the settings */
+		if (!dock_may_list(srv, item->sender_euid))
+			err = EPERM;
+		else
+			err = display_configure(srv,
+			    (const ws_req_display_t *)(const void *)h);
+		if (want_reply)
+			reply_status(item, h->seq, err);
+		else if (err != 0)
+			client_error(srv, c, (uint32_t)id, 0, err,
+			    "display change refused");
+		return;
+	}
 	case WS_MSG_DMABUF_FORMATS: {
 		ws_reply_t r;
 		int err;

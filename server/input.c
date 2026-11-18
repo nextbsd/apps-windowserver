@@ -380,14 +380,29 @@ handle_event(struct ws_server *srv, struct libinput_event *ev)
 		    srv->ptr_x + libinput_event_pointer_get_dx(p),
 		    srv->ptr_y + libinput_event_pointer_get_dy(p));
 		break;
-	case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE:
+	case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE: {
+		/* a tablet or a VM's pointer covers the main display */
+		ws_rect_t m = display_main_frame(srv);
+
 		p = libinput_event_get_pointer_event(ev);
 		pointer_motion(srv,
-		    libinput_event_pointer_get_absolute_x_transformed(p,
-		    srv->width),
-		    libinput_event_pointer_get_absolute_y_transformed(p,
-		    srv->height));
+		    m.x + libinput_event_pointer_get_absolute_x_transformed(p,
+		    (uint32_t)m.width),
+		    m.y + libinput_event_pointer_get_absolute_y_transformed(p,
+		    (uint32_t)m.height));
 		break;
+	}
+	case LIBINPUT_EVENT_SWITCH_TOGGLE: {
+		struct libinput_event_switch *sw =
+		    libinput_event_get_switch_event(ev);
+
+		/* the lid: with another display, the panel goes off
+		   (display.c) */
+		if (libinput_event_switch_get_switch(sw) == LIBINPUT_SWITCH_LID)
+			display_lid(srv, libinput_event_switch_get_switch_state(
+			    sw) == LIBINPUT_SWITCH_STATE_ON);
+		break;
+	}
 	case LIBINPUT_EVENT_POINTER_BUTTON:
 		p = libinput_event_get_pointer_event(ev);
 		count = libinput_event_pointer_get_seat_button_count(p);

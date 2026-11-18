@@ -483,14 +483,11 @@ cursor_update(struct ws_server *srv)
 		if (!visible) {
 			srv->output->cursor_hide(srv);
 			hw = true;
-		} else if (iscale == srv->scale &&
-		    srv->output->cursor_set(srv, img,
-		    (int)lround(hx * iscale * panel_x(srv, 1) / iscale),
-		    (int)lround(hy * iscale * panel_y(srv, 1) / iscale))) {
-			/* the hardware plane shows panel pixels */
-			srv->output->cursor_move(srv,
-			    (int)panel_x(srv, srv->ptr_x),
-			    (int)panel_y(srv, srv->ptr_y));
+		} else if (img != NULL && srv->output->cursor_set(srv, img,
+		    iscale, hx, hy)) {
+			/* each display's plane shows its own pixels: the
+			   output scales the image to them */
+			srv->output->cursor_move(srv, srv->ptr_x, srv->ptr_y);
 			hw = true;
 		}
 	}
@@ -505,9 +502,7 @@ cursor_moved(struct ws_server *srv)
 {
 	if (srv->cursor_hw) {
 		if (srv->display_active && srv->cursor_visible)
-			srv->output->cursor_move(srv,
-			    (int)panel_x(srv, srv->ptr_x),
-			    (int)panel_y(srv, srv->ptr_y));
+			srv->output->cursor_move(srv, srv->ptr_x, srv->ptr_y);
 		return;
 	}
 	sw_cursor_damage(srv);

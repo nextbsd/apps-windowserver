@@ -1789,6 +1789,39 @@ ws_inject_screen_size(ws_connection_t *c, uint32_t width, uint32_t height)
 }
 
 WS_API int
+ws_inject_display(ws_connection_t *c, uint32_t width, uint32_t height,
+    uint32_t mm_width, uint32_t mm_height, const char *edid_id)
+{
+	ws_req_inject_t m;
+
+	req_init(c, &m.hdr, WS_MSG_INJECT, sizeof(m), 0);
+	memset(&m.kind, 0, sizeof(m) - offsetof(ws_req_inject_t, kind));
+	m.kind = WS_INJECT_DISPLAY;
+	m.pressed = 1;
+	m.x = width;
+	m.y = height;
+	m.dx = mm_width;
+	m.dy = mm_height;
+	if (edid_id != NULL)
+		strlcpy(m.key_name, edid_id, sizeof(m.key_name));
+	if (send_oneway(c, &m.hdr) < 0)
+		return -1;
+	return ws_sync(c);
+}
+
+WS_API int
+ws_inject_display_unplug(ws_connection_t *c, uint32_t display_id)
+{
+	return inject(c, WS_INJECT_DISPLAY, 0, 0, 0, display_id, NULL);
+}
+
+WS_API int
+ws_inject_lid(ws_connection_t *c, int closed)
+{
+	return inject(c, WS_INJECT_LID, closed ? 1 : 0, 0, 0, 0, NULL);
+}
+
+WS_API int
 ws_overview(ws_connection_t *c, uint32_t request, ws_event_overview_t *state,
     void (*fn)(const ws_event_overview_item_t *, void *), void *ctx)
 {

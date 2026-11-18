@@ -107,6 +107,10 @@ static const struct ckey keys[] = {
 	    CONFIG_DISPLAY),
 	S("DisplayPanelMode", display_panel_mode, 0),
 	S("DisplayStore", display_store, 0),
+	/* Night Shift (display.c, "Displays" in WSProtocol.h) */
+	S("NightShift", night_shift, CONFIG_DISPLAY),
+	S("NightShiftSchedule", night_shift_schedule, CONFIG_DISPLAY),
+	I("NightShiftTemperature", night_shift_temperature, CONFIG_DISPLAY),
 };
 
 #define NKEYS	(sizeof(keys) / sizeof(keys[0]))
@@ -177,6 +181,10 @@ config_defaults(struct ws_config *cfg)
 	strlcpy(cfg->display_store,
 	    "/Library/Preferences/org.nextbsd.windowserver.displays.plist",
 	    sizeof(cfg->display_store));
+	strlcpy(cfg->night_shift, "Off", sizeof(cfg->night_shift));
+	strlcpy(cfg->night_shift_schedule, "22:00-07:00",
+	    sizeof(cfg->night_shift_schedule));
+	cfg->night_shift_temperature = 3400;
 }
 
 static int

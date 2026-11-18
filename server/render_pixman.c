@@ -2,22 +2,72 @@
  * Copyright (c) 2026, Joseph Maloney
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * The CPU renderer (pixman). The screen is the shadow image, the
- * backing store; when that isn't the panel's size, the damaged part is
- * scaled into srv->panel at the end of each frame, and srv->out is
- * whichever of the two the panel shows. Outputs, captures and snapshots
- * read srv->out.
+ * The CPU renderer (pixman). The desktop is the shadow image, the
+ * backing store. Each display shows its part of it (display.c): when
+ * that part is the panel's size, the display's view is that part of the
+ * shadow itself; otherwise the damaged part is scaled into the display's
+ * own panel image at the end of each frame, and the view is that.
+ * Outputs read the views; captures and snapshots read the main
+ * display's (srv->out).
  */
 
 #include <stdlib.h>
 
 #include "server.h"
 
-/* Make the shadow (and the panel image) for the current sizes. */
+static void
+views_free(struct ws_server *srv)
+{
+	struct ws_display *d;
+	unsigned i;
+
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		if (d->view != NULL && d->view != d->panel_image)
+			pixman_image_unref(d->view);
+		if (d->panel_image != NULL)
+			pixman_image_unref(d->panel_image);
+		d->view = d->panel_image = NULL;
+	}
+	srv->out = NULL;
+}
+
+/* d's view: its part of the shadow as is, or a panel image to scale it
+   into. */
+static int
+view_make(struct ws_server *srv, struct ws_display *d)
+{
+	uint32_t *bits = pixman_image_get_data(srv->shadow);
+	int stride = pixman_image_get_stride(srv->shadow);
+
+	if (d->back.width == d->dest.width &&
+	    d->back.height == d->dest.height &&
+	    d->dest.width == (int32_t)d->panel_width &&
+	    d->dest.height == (int32_t)d->panel_height) {
+		d->view = pixman_image_create_bits(PIXMAN_x8r8g8b8,
+		    d->back.width, d->back.height,
+		    (uint32_t *)((uint8_t *)bits + (size_t)d->back.y * stride +
+		    (size_t)d->back.x * 4), stride);
+		return d->view != NULL ? 0 : -1;
+	}
+	/* zeroed: a mirror's bars stay black */
+	d->panel_image = pixman_image_create_bits(PIXMAN_x8r8g8b8,
+	    (int)d->panel_width, (int)d->panel_height, NULL, 0);
+	if (d->panel_image == NULL) {
+		ws_err("can't allocate a %ux%u panel image", d->panel_width,
+		    d->panel_height);
+		return -1;
+	}
+	d->view = d->panel_image;
+	return 0;
+}
+
+/* Make the shadow, and each display's view, for the current sizes. */
 static int
 pr_init(struct ws_server *srv)
 {
-	pixman_image_t *shadow, *panel = NULL;
+	pixman_image_t *shadow;
+	unsigned i;
 
 	shadow = pixman_image_create_bits(PIXMAN_x8r8g8b8,
 	    (int)srv->back_width, (int)srv->back_height, NULL, 0);
@@ -26,35 +76,35 @@ pr_init(struct ws_server *srv)
 		    srv->back_height);
 		return -1;
 	}
-	if (srv->back_width != srv->panel_width ||
-	    srv->back_height != srv->panel_height) {
-		panel = pixman_image_create_bits(PIXMAN_x8r8g8b8,
-		    (int)srv->panel_width, (int)srv->panel_height, NULL, 0);
-		if (panel == NULL) {
-			ws_err("can't allocate a %ux%u panel image",
-			    srv->panel_width, srv->panel_height);
-			pixman_image_unref(shadow);
-			return -1;
-		}
-	}
+	views_free(srv);
 	if (srv->shadow != NULL)
 		pixman_image_unref(srv->shadow);
-	if (srv->panel != NULL)
-		pixman_image_unref(srv->panel);
 	srv->shadow = shadow;
-	srv->panel = panel;
-	srv->out = panel != NULL ? panel : shadow;
+	for (i = 0; i < srv->ndisplays; i++)
+		if (srv->displays[i]->on && view_make(srv,
+		    srv->displays[i]) < 0) {
+			views_free(srv);
+			return -1;
+		}
+	srv->out = srv->main != NULL ? srv->main->view : NULL;
 	return 0;
 }
 
 static void
 pr_fini(struct ws_server *srv)
 {
+	views_free(srv);
 	if (srv->shadow != NULL)
 		pixman_image_unref(srv->shadow);
-	if (srv->panel != NULL)
-		pixman_image_unref(srv->panel);
-	srv->shadow = srv->panel = srv->out = NULL;
+	srv->shadow = NULL;
+}
+
+/* d is unplugged: its view goes with it (display.c frees them). */
+static void
+pr_display_gone(struct ws_server *srv, struct ws_display *d)
+{
+	if (srv->out == d->view)
+		srv->out = NULL;
 }
 
 static void
@@ -135,97 +185,87 @@ pr_fill(struct ws_server *srv, const pixman_color_t *color,
 	pixman_image_unref(solid);
 }
 
-/* Backing pixels as panel pixels, rounded out (and a pixel more for the
-   filter). */
+/* Scale `region` (d's panel pixels) of d's part of the shadow into its
+   panel image. */
 static void
-region_to_panel(struct ws_server *srv, pixman_region32_t *in,
-    pixman_region32_t *out)
+resample(struct ws_server *srv, struct ws_display *d,
+    pixman_region32_t *region)
 {
-	int64_t bw = srv->back_width, bh = srv->back_height;
-	int64_t pw = srv->panel_width, ph = srv->panel_height;
-	int64_t x1, y1, x2, y2;
-	pixman_box32_t *b;
-	int i, n;
-
-	pixman_region32_init(out);
-	b = pixman_region32_rectangles(in, &n);
-	for (i = 0; i < n; i++) {
-		x1 = b[i].x1 * pw / bw - 1;
-		y1 = b[i].y1 * ph / bh - 1;
-		x2 = (b[i].x2 * pw + bw - 1) / bw + 1;
-		y2 = (b[i].y2 * ph + bh - 1) / bh + 1;
-		if (x1 < 0)
-			x1 = 0;
-		if (y1 < 0)
-			y1 = 0;
-		if (x2 > pw)
-			x2 = pw;
-		if (y2 > ph)
-			y2 = ph;
-		if (x2 > x1 && y2 > y1)
-			pixman_region32_union_rect(out, out, (int)x1, (int)y1,
-			    (unsigned)(x2 - x1), (unsigned)(y2 - y1));
-	}
-}
-
-/* Scale `region` (panel pixels) of the shadow into the panel image. */
-static void
-resample(struct ws_server *srv, pixman_region32_t *region)
-{
-	double fx = (double)srv->back_width / srv->panel_width;
-	double fy = (double)srv->back_height / srv->panel_height;
+	double fx = (double)d->back.width / d->dest.width;
+	double fy = (double)d->back.height / d->dest.height;
 	pixman_fixed_t *params = NULL;
 	pixman_transform_t t;
 	pixman_box32_t *ext;
-	int n;
+	pixman_image_t *src;
+	int n, stride = pixman_image_get_stride(srv->shadow);
 
 	if (!pixman_region32_not_empty(region))
 		return;
+	/* d's part of the shadow on its own, so the transform stays small
+	   (pixman's are 16.16) */
+	src = pixman_image_create_bits(PIXMAN_x8r8g8b8, d->back.width,
+	    d->back.height, (uint32_t *)((uint8_t *)pixman_image_get_data(
+	    srv->shadow) + (size_t)d->back.y * stride + (size_t)d->back.x * 4),
+	    stride);
+	if (src == NULL)
+		return;
 	ext = pixman_region32_extents(region);
+	/* panel pixel (px, py) samples it at (px - dest.x) * fx */
 	pixman_transform_init_scale(&t, pixman_double_to_fixed(fx),
 	    pixman_double_to_fixed(fy));
-	pixman_image_set_transform(srv->shadow, &t);
+	pixman_transform_translate(&t, NULL,
+	    pixman_double_to_fixed(-d->dest.x * fx),
+	    pixman_double_to_fixed(-d->dest.y * fy));
+	pixman_image_set_transform(src, &t);
 	if (fx > 1.5 || fy > 1.5)
 		params = pixman_filter_create_separable_convolution(&n,
 		    pixman_double_to_fixed(fx), pixman_double_to_fixed(fy),
 		    PIXMAN_KERNEL_LINEAR, PIXMAN_KERNEL_LINEAR,
 		    PIXMAN_KERNEL_BOX, PIXMAN_KERNEL_BOX, 1, 1);
 	if (params != NULL) {
-		pixman_image_set_filter(srv->shadow,
+		pixman_image_set_filter(src,
 		    PIXMAN_FILTER_SEPARABLE_CONVOLUTION, params, n);
 		free(params);
 	} else
-		pixman_image_set_filter(srv->shadow, PIXMAN_FILTER_BILINEAR,
-		    NULL, 0);
-	pixman_image_set_repeat(srv->shadow, PIXMAN_REPEAT_PAD);
-	pixman_image_set_clip_region32(srv->panel, region);
-	pixman_image_composite32(PIXMAN_OP_SRC, srv->shadow, NULL, srv->panel,
+		pixman_image_set_filter(src, PIXMAN_FILTER_BILINEAR, NULL, 0);
+	pixman_image_set_repeat(src, PIXMAN_REPEAT_PAD);
+	pixman_image_set_clip_region32(d->panel_image, region);
+	pixman_region32_intersect_rect(region, region, d->dest.x, d->dest.y,
+	    (unsigned)d->dest.width, (unsigned)d->dest.height);
+	pixman_image_set_clip_region32(d->panel_image, region);
+	pixman_image_composite32(PIXMAN_OP_SRC, src, NULL, d->panel_image,
 	    ext->x1, ext->y1, 0, 0, ext->x1, ext->y1, ext->x2 - ext->x1,
 	    ext->y2 - ext->y1);
-	pixman_image_set_clip_region32(srv->panel, NULL);
-	pixman_image_set_transform(srv->shadow, NULL);
-	pixman_image_set_filter(srv->shadow, PIXMAN_FILTER_NEAREST, NULL, 0);
-	pixman_image_set_repeat(srv->shadow, PIXMAN_REPEAT_NONE);
+	pixman_image_set_clip_region32(d->panel_image, NULL);
+	pixman_image_unref(src);
 }
 
 static void
 pr_end(struct ws_server *srv, pixman_region32_t *back,
     pixman_region32_t *out)
 {
+	pixman_region32_t panel;
+	struct ws_display *d;
+	unsigned i;
+
 	pixman_image_set_clip_region32(srv->shadow, NULL);
-	if (srv->panel != NULL) {
-		region_to_panel(srv, back, out);
-		resample(srv, out);
-	} else {
-		pixman_region32_init(out);
-		pixman_region32_copy(out, back);
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		if (!d->on || d->panel_image == NULL)
+			continue;
+		display_back_to_panel(d, back, &panel);
+		resample(srv, d, &panel);
+		pixman_region32_fini(&panel);
 	}
+	pixman_region32_init(out);
+	pixman_region32_copy(out, back);
 }
 
 const struct ws_renderer_ops pixman_renderer_ops = {
 	.name = "pixman",
 	.init = pr_init,
 	.fini = pr_fini,
+	.display_gone = pr_display_gone,
 	.begin = pr_begin,
 	.draw = pr_draw,
 	.fill = pr_fill,

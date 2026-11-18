@@ -711,8 +711,10 @@ typedef struct ws_req_cursor {
  * WS_DISPLAY_KEEP comes within WS_DISPLAY_REVERT_MS the server undoes
  * it by itself (a mode the display can't show leaves the user nothing
  * to click), as macOS's "Keep these settings?" does. WS_DISPLAY_REVERT
- * undoes it at once. A second change while one is pending keeps the
- * first and makes the new one pending.
+ * undoes it at once. Changes made with WS_DISPLAY_CONFIRM while one
+ * is pending join it: the countdown starts again, and reverting undoes
+ * them all (Displays.app's Mirror Displays is a change per display). A
+ * change without it while one is pending stays whatever happens.
  *
  * Night Shift: the settings NightShift (Off, On or Schedule),
  * NightShiftSchedule ("22:00-07:00", local time) and
@@ -1273,16 +1275,11 @@ enum {
 	WS_DISPLAY_REVERT,		/* undo the pending change now */
 };
 
-/* ws_req_display_t.flags */
-#define WS_DISPLAY_CONFIRM	0x0001	/* goes back by itself after
-					   WS_DISPLAY_REVERT_MS unless kept */
-#define WS_DISPLAY_REVERT_MS	15000
-
 typedef struct ws_req_display {
 	ws_req_header_t	hdr;
 	uint32_t	display_id;
 	uint32_t	op;		/* WS_DISPLAY_SET_*, _KEEP, _REVERT */
-	uint32_t	flags;		/* WS_DISPLAY_CONFIRM */
+	uint32_t	flags;		/* WS_DISPLAY_CONFIRM (WSTypes.h) */
 	int32_t		x;		/* SET_ORIGIN */
 	int32_t		y;
 	uint32_t	width;		/* SET_LOOKS_LIKE, SET_MODE */

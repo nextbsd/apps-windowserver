@@ -66,7 +66,7 @@ static bool
 clear_candidate(struct ws_server *srv, const struct ws_window *w, bool shown)
 {
 	const struct ws_client *c = w->owner;
-	ws_rect_t scr = { 0, 0, (int32_t)srv->width, (int32_t)srv->height };
+	ws_rect_t scr = display_main_frame(srv);
 
 	if (!w->visible || w->minimized || w->tiled || w->tile_for != NULL ||
 	    w->frame.width <= 0 || w->frame.height <= 0)
@@ -209,7 +209,7 @@ windows_keep_clear(struct ws_server *srv, const ws_rect_t *old)
 void
 window_place_clear(struct ws_server *srv, struct ws_window *w)
 {
-	ws_rect_t scr = { 0, 0, (int32_t)srv->width, (int32_t)srv->height };
+	ws_rect_t scr = display_main_frame(srv);
 	ws_rect_t r;
 
 	if (w->clear_shown)

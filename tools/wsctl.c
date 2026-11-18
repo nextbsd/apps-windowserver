@@ -73,6 +73,14 @@ usage(void)
 	    "                                kept for every user)\n"
 	    "       wsctl display scale auto|1|2|3 (force an integer scale\n"
 	    "                                for the session)\n"
+	    "       wsctl displays          (every display: id, place, mode)\n"
+	    "       wsctl displays modes ID (its \"looks like\" sizes and modes)\n"
+	    "       wsctl displays ID looks-like WxH|default [confirm]\n"
+	    "       wsctl displays ID mode WxH[@HZ]|preferred [confirm]\n"
+	    "       wsctl displays ID origin X,Y | main | mirror ID|off\n"
+	    "       wsctl displays keep|revert (the change made with confirm)\n"
+	    "       wsctl displays plug WxH [MMxMM [EDID]] | unplug ID\n"
+	    "       wsctl displays lid open|closed (headless servers: tests)\n"
 	    "       wsctl devices           (input devices)\n"
 	    "       wsctl tiling [status]   (the layout: tiled windows, in order)\n"
 	    "       wsctl tiling on|off     (WindowMode tiling or stacking)\n"
@@ -806,6 +814,117 @@ display_cmd(ws_connection_t *c, int argc, char **argv)
 	return ws_sync(c);
 }
 
+/* ---- displays ("Displays" in WSProtocol.h) ---- */
+
+static void
+print_displays(const ws_display_info_t *d, void *ctx)
+{
+	(void)ctx;
+	printf("%u %s \"%s\" %s frame=%d,%d,%dx%d usable=%d,%d,%dx%d "
+	    "scale=%u panel=%ux%u@%u.%02u mm=%ux%u%s%s%s%s",
+	    d->display_id, d->connector, d->name, d->edid_id, d->frame.x,
+	    d->frame.y, d->frame.width, d->frame.height, d->usable.x,
+	    d->usable.y, d->usable.width, d->usable.height, d->scale,
+	    d->panel_width, d->panel_height, d->refresh_mhz / 1000,
+	    d->refresh_mhz % 1000 / 10, d->mm_width, d->mm_height,
+	    (d->flags & WS_DISPLAY_MAIN) ? " main" : "",
+	    (d->flags & WS_DISPLAY_BUILTIN) ? " builtin" : "",
+	    (d->flags & WS_DISPLAY_HIDPI) ? " hidpi" : "",
+	    (d->flags & WS_DISPLAY_MIRROR) ? " mirror-of=" : "");
+	if (d->flags & WS_DISPLAY_MIRROR)
+		printf("%u", d->mirror_of);
+	if (d->flags & WS_DISPLAY_PENDING)
+		printf(" pending=%ums", d->revert_ms);
+	printf("\n");
+}
+
+static void
+print_display_mode(const ws_display_mode_t *m, void *ctx)
+{
+	(void)ctx;
+	if (m->kind == WS_DISPLAY_MODE_LOOKS_LIKE)
+		printf("looks-like %ux%u", m->width, m->height);
+	else
+		printf("mode %ux%u@%u.%02u", m->width, m->height,
+		    m->refresh_mhz / 1000, m->refresh_mhz % 1000 / 10);
+	printf("%s%s%s%s\n", (m->flags & WS_DISPLAY_MODE_DEFAULT) ?
+	    " default" : "", (m->flags & WS_DISPLAY_MODE_CURRENT) ?
+	    " current" : "", (m->flags & WS_DISPLAY_MODE_CHOSEN) ? " chosen" :
+	    "", (m->flags & WS_DISPLAY_MODE_INTERLACED) ? " interlaced" : "");
+}
+
+static int
+displays_cmd(ws_connection_t *c, int argc, char **argv)
+{
+	unsigned w, h, mw = 0, mh = 0, hz = 0;
+	uint32_t id, flags = 0;
+	const char *what;
+	int x, y, r = 0;
+
+	if (argc == 2)
+		return ws_list_displays(c, print_displays, NULL);
+	if (strcmp(argv[2], "modes") == 0 && argc == 4)
+		return ws_list_display_modes(c, (uint32_t)atoi(argv[3]),
+		    print_display_mode, NULL);
+	if (strcmp(argv[2], "keep") == 0 && argc == 3)
+		r = ws_display_keep(c);
+	else if (strcmp(argv[2], "revert") == 0 && argc == 3)
+		r = ws_display_revert(c);
+	else if (strcmp(argv[2], "plug") == 0 && argc >= 4 && argc <= 6) {
+		if (sscanf(argv[3], "%ux%u", &w, &h) != 2 || (argc >= 5 &&
+		    sscanf(argv[4], "%ux%u", &mw, &mh) != 2))
+			usage();
+		r = ws_inject_display(c, w, h, mw, mh, argc == 6 ? argv[5] :
+		    NULL);
+	} else if (strcmp(argv[2], "unplug") == 0 && argc == 4)
+		r = ws_inject_display_unplug(c, (uint32_t)atoi(argv[3]));
+	else if (strcmp(argv[2], "lid") == 0 && argc == 4)
+		r = ws_inject_lid(c, strcmp(argv[3], "closed") == 0);
+	else {
+		if (argc < 4)
+			usage();
+		id = (uint32_t)atoi(argv[2]);
+		what = argv[3];
+		if (argc >= 5 && strcmp(argv[argc - 1], "confirm") == 0) {
+			flags = WS_DISPLAY_CONFIRM;
+			argc--;
+		}
+		if (strcmp(what, "main") == 0) {
+			if (argc != 4)
+				usage();
+			r = ws_display_set_main(c, id, flags);
+		} else if (argc != 5)
+			usage();
+		else if (strcmp(what, "looks-like") == 0) {
+			if (strcasecmp(argv[4], "default") == 0)
+				w = h = 0;
+			else if (sscanf(argv[4], "%ux%u", &w, &h) != 2)
+				usage();
+			r = ws_display_set_looks_like(c, id, w, h, flags);
+		} else if (strcmp(what, "mode") == 0) {
+			if (strcasecmp(argv[4], "preferred") == 0)
+				w = h = 0;
+			else if (sscanf(argv[4], "%ux%u@%u", &w, &h, &hz) < 2)
+				usage();
+			r = ws_display_set_mode(c, id, w, h, hz * 1000, flags);
+		} else if (strcmp(what, "origin") == 0) {
+			if (sscanf(argv[4], "%d,%d", &x, &y) != 2)
+				usage();
+			r = ws_display_set_origin(c, id, x, y, flags);
+		} else if (strcmp(what, "mirror") == 0) {
+			r = ws_display_set_mirror(c, id, strcmp(argv[4],
+			    "off") == 0 ? 0 : (uint32_t)atoi(argv[4]), flags);
+		} else
+			usage();
+	}
+	if (r < 0) {
+		fprintf(stderr, "wsctl displays %s: %s\n", argv[2],
+		    strerror(errno));
+		return 2;
+	}
+	return ws_sync(c);
+}
+
 /* ---- settings ---- */
 
 static const char *const sources[] = { "built-in", "system", "session" };
@@ -1192,6 +1311,12 @@ main(int argc, char **argv)
 		r = ws_sync(c);
 	} else if (strcmp(cmd, "settings") == 0) {
 		r = settings_cmd(c, argc, argv);
+		if (r == 2) {		/* it said what failed */
+			ws_disconnect(c);
+			return 1;
+		}
+	} else if (strcmp(cmd, "displays") == 0) {
+		r = displays_cmd(c, argc, argv);
 		if (r == 2) {		/* it said what failed */
 			ws_disconnect(c);
 			return 1;

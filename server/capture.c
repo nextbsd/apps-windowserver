@@ -133,13 +133,15 @@ capture_counts(struct ws_server *srv, uint32_t *running, uint32_t *pending)
 void
 capture_indicator_rects(struct ws_server *srv, ws_rect_t r[4])
 {
-	int32_t w = (int32_t)srv->width, h = (int32_t)srv->height;
+	/* round the main display, which captures show */
+	ws_rect_t m = display_main_frame(srv);
+	int32_t x = m.x, y = m.y, w = m.width, h = m.height;
 	int32_t b = WS_CAPTURE_BORDER;
 
-	r[0] = (ws_rect_t){ 0, 0, w, b };		/* top */
-	r[1] = (ws_rect_t){ 0, h - b, w, b };		/* bottom */
-	r[2] = (ws_rect_t){ 0, b, b, h - 2 * b };	/* left */
-	r[3] = (ws_rect_t){ w - b, b, b, h - 2 * b };	/* right */
+	r[0] = (ws_rect_t){ x, y, w, b };			/* top */
+	r[1] = (ws_rect_t){ x, y + h - b, w, b };		/* bottom */
+	r[2] = (ws_rect_t){ x, y + b, b, h - 2 * b };		/* left */
+	r[3] = (ws_rect_t){ x + w - b, y + b, b, h - 2 * b };	/* right */
 }
 
 /* The streams changed: the border, and the agent's view of them. */

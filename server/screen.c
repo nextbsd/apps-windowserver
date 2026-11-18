@@ -5,9 +5,9 @@
  * The screen's usable area and screen changes (see "The screen and its
  * usable area" in WSProtocol.h).
  *
- * The usable area is the screen minus the menu bar strip along the top
- * (the Mac menu style) and the strip the Dock keeps on its edge: what
- * NSScreen's visibleFrame is on macOS. Every connection gets it in the
+ * The usable area is the main display minus the menu bar strip along
+ * its top (the Mac menu style) and the strip the Dock keeps on its edge:
+ * what NSScreen's visibleFrame is on macOS. Every connection gets it in the
  * welcome and WS_EVENT_USABLE_AREA when it changes, and the server's
  * own things (minimized-window tiles, the overview) stay inside it, and
  * windows are pushed out from under the Dock and the menu bar strip when
@@ -19,12 +19,13 @@
 
 #include "server.h"
 
-/* The menu bar strip's height, at most a quarter of the screen. */
+/* The menu bar strip's height, at most a quarter of the main display. */
 static uint32_t
-menu_bar_height(const struct ws_server *srv)
+menu_bar_height(struct ws_server *srv)
 {
-	return srv->menu_bar > srv->height / 4 ? srv->height / 4 :
-	    srv->menu_bar;
+	uint32_t h = (uint32_t)display_main_frame(srv).height;
+
+	return srv->menu_bar > h / 4 ? h / 4 : srv->menu_bar;
 }
 
 /* The usable area for the current screen, menu bar and Dock. */
@@ -34,10 +35,7 @@ screen_usable_compute(struct ws_server *srv, ws_rect_t *r)
 	uint32_t t = srv->dock_thickness;
 	uint32_t mb;
 
-	r->x = 0;
-	r->y = 0;
-	r->width = (int32_t)srv->width;
-	r->height = (int32_t)srv->height;
+	*r = display_main_frame(srv);
 
 	/*
 	 * The menu bar strip along the top comes off first: a top Dock sits
@@ -167,7 +165,7 @@ menu_bar_update(struct ws_server *srv)
 int
 menu_bar_set(struct ws_server *srv, struct ws_client *c, uint32_t height)
 {
-	if (height > srv->height / 4)
+	if (height > (uint32_t)display_main_frame(srv).height / 4)
 		return EINVAL;
 	c->menu_bar = (int32_t)height;
 	menu_bar_update(srv);
@@ -216,11 +214,31 @@ screen_changed(struct ws_server *srv)
 	}
 	screen_usable_compute(srv, &r);
 	usable_set(srv, &r);
-	if (srv->ptr_x > srv->width - 1)
-		srv->ptr_x = srv->width - 1;
-	if (srv->ptr_y > srv->height - 1)
-		srv->ptr_y = srv->height - 1;
+	display_clamp(srv, &srv->ptr_x, &srv->ptr_y);
 	damage_all(srv);
+	cursor_update(srv);
+	cursor_moved(srv);
+	pointer_recheck(srv);
+	dock_list_changed(srv);
+}
+
+/*
+ * The displays changed but the desktop kept its size and scale (one
+ * moved, a mirror came or went, the main display changed): the usable
+ * area may have, and everything is drawn again.
+ */
+void
+screen_displays_changed(struct ws_server *srv)
+{
+	ws_rect_t r;
+
+	screen_usable_compute(srv, &r);
+	if (memcmp(&r, &srv->usable, sizeof(r)) != 0 ||
+	    menu_bar_height(srv) != srv->usable_menu_bar)
+		usable_set(srv, &r);
+	display_clamp(srv, &srv->ptr_x, &srv->ptr_y);
+	damage_all(srv);
+	cursor_update(srv);
 	cursor_moved(srv);
 	pointer_recheck(srv);
 	dock_list_changed(srv);
@@ -233,22 +251,25 @@ screen_changed(struct ws_server *srv)
 int
 screen_resize(struct ws_server *srv, uint32_t width, uint32_t height)
 {
-	uint32_t ow = srv->panel_width, oh = srv->panel_height;
+	struct ws_display *d = srv->main;
+	uint32_t ow, oh;
 	int e;
 
-	if (!srv->headless)
+	if (!srv->headless || d == NULL)
 		return ENOTSUP;
 	if (width < 64 || height < 64 || width > 16384 || height > 16384)
 		return EINVAL;
-	if (width == srv->panel_width && height == srv->panel_height)
+	ow = d->panel_width;
+	oh = d->panel_height;
+	if (width == ow && height == oh)
 		return 0;
-	/* the panel's pixels; the points follow the display mode */
-	srv->panel_width = width;
-	srv->panel_height = height;
+	/* the main display's pixels; the points follow its mode */
+	d->panel_width = width;
+	d->panel_height = height;
 	e = display_apply(srv, true);
 	if (e != 0) {
-		srv->panel_width = ow;
-		srv->panel_height = oh;
+		d->panel_width = ow;
+		d->panel_height = oh;
 		(void)display_apply(srv, true);
 		return e;
 	}
