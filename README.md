@@ -60,7 +60,7 @@ What works, tested headless:
 - Windows stacked strictly by level (the libs-gui `NSWindowLevel` numbers), then by order within a level.
 - One active app. A click in an inactive app's window deactivates the old app, activates the new one, raises the window, makes it key, and then delivers the click.
 - Keys go only to the key window of the active app, with server-side key repeat.
-- Damage-tracked compositing with pixman, buffer release and frame-done events.
+- Damage-tracked compositing on the GPU with GLES2 (GBM and EGL), or with pixman on the CPU where there's no GPU (the `Renderer` setting, `auto` by default), with buffer release and frame-done events.
 - Minimized windows as live tiles along the bottom of the screen (see [Minimized windows](#minimized-windows)).
 - The usable area, the screen minus the active app's Mac-style menu bar and the Dock's strip, sent to every app, and screen size changes (see [The screen and its usable area](#the-screen-and-its-usable-area)).
 - The Dock's view of every app's windows, with change notices, activation, restoring and previews (see [The Dock](#the-dock)).
@@ -86,7 +86,7 @@ Not done yet:
 - Waiting for the GPU kext's IOKit match, and display hotplug through IOKit.
 - Touch, tablets, gestures other than swipes up and down, and switches. Per-device keyboard settings.
 - Skipping windows hidden behind opaque ones while compositing.
-- GPU compositing (EGL/GBM), several displays (HiDPI is per display, but there's one display for now).
+- Several displays (HiDPI is per display, but there's one display for now). Falling back to pixman when the GPU fails after startup.
 - A focus-stealing policy: today any app can make itself active.
 - loginwindow, the lock shield and the app switcher. Their window levels are reserved.
 

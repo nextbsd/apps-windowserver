@@ -239,8 +239,8 @@ software_renderer(const char *r)
 }
 
 /*
- * The Renderer setting: "pixman" (the default for now), "gles2", or
- * "auto" (gles2 if a GPU renders, else pixman). Opens GBM and EGL on
+ * The Renderer setting: "auto" (the default: gles2 if a GPU renders,
+ * else pixman), "gles2" (even on a software renderer) or "pixman". Opens GBM and EGL on
  * the DRM device; returns false, after saying why, to stay on pixman.
  */
 bool

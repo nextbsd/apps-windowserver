@@ -141,7 +141,7 @@ config_defaults(struct ws_config *cfg)
 	cfg->natural_scrolling = false;
 	cfg->allow_terminate = true;
 	cfg->hardware_cursor = true;
-	strlcpy(cfg->renderer, "pixman", sizeof(cfg->renderer));
+	strlcpy(cfg->renderer, "auto", sizeof(cfg->renderer));
 	/* Black where no window is. Desktop pictures come from a desktop-level
 	   window (InnerSpace, or a Dock/Workspace desktop), as on macOS. */
 	cfg->background = 0x000000;
