@@ -393,6 +393,8 @@ min_size(mach_msg_id_t id)
 		return sizeof(ws_req_display_t);
 	case WS_MSG_DOCK_SET_EDGE:
 		return sizeof(ws_req_dock_edge_t);
+	case WS_MSG_STATUS_ITEM:
+		return sizeof(ws_req_status_item_t);
 	case WS_MSG_WINDOW_SET_SIZE_LIMITS:
 		return sizeof(ws_req_size_limits_t);
 	case WS_MSG_TILING:
@@ -588,14 +590,21 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		window_clear_owner_frame(srv, w);
 		break;
 	case WS_MSG_WINDOW_SET_LEVEL:
-		window_set_level(srv, w, value);
+		if (menubar_managed(w))
+			menubar_client_level(srv, w, value);
+		else
+			window_set_level(srv, w, value);
 		break;
 	case WS_MSG_WINDOW_ORDER: {
 		ws_req_order_t *m = (void *)h;
 		int op = m->op > 0 ? WS_ORDER_ABOVE :
 		    m->op < 0 ? WS_ORDER_BELOW : WS_ORDER_OUT;
 
-		window_order(srv, w, op, window_lookup(srv, m->relative_to));
+		if (menubar_managed(w))
+			menubar_client_order(srv, w, op);
+		else
+			window_order(srv, w, op,
+			    window_lookup(srv, m->relative_to));
 		break;
 	}
 	case WS_MSG_WINDOW_SET_TITLE: {
@@ -661,7 +670,8 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		window_make_key(srv, w);
 		break;
 	case WS_MSG_WINDOW_MINIMIZE:
-		window_minimize(srv, w, value);
+		if (!menubar_managed(w))	/* not the menu bar's */
+			window_minimize(srv, w, value);
 		break;
 	case WS_MSG_WINDOW_SET_SIZE_LIMITS:
 		tiling_set_size_limits(srv, w, (ws_req_size_limits_t *)(void *)h);
@@ -870,7 +880,21 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 			    "only apps have a menu bar");
 			break;
 		}
-		err = menu_bar_set(srv, c->app, (uint32_t)value);
+		if (h->window != 0 || c->app->bar_window != NULL) {
+			struct ws_window *bw = NULL;
+
+			/* the app's bar window (WS_SERVER_STATUS_ITEMS) */
+			if (h->window != 0 &&
+			    ((bw = window_lookup(srv, h->window)) == NULL ||
+			    bw->owner != c)) {
+				client_error(srv, c, (uint32_t)id, h->window,
+				    ENOENT, "no such window");
+				break;
+			}
+			err = menubar_set_window(srv, c->app, bw,
+			    value < 0 ? 0 : (uint32_t)value);
+		} else
+			err = menu_bar_set(srv, c->app, (uint32_t)value);
 		if (err != 0)
 			client_error(srv, c, (uint32_t)id, 0, err,
 			    "bad menu bar height");
@@ -891,6 +915,22 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 	case WS_MSG_DOCK_SHOW_MINIMIZED:
 		dock_show_minimized(srv, c, value != 0);
 		break;
+	case WS_MSG_STATUS_ITEM: {
+		ws_req_status_item_t *m = (void *)h;
+		struct ws_window *sw = window_lookup(srv, h->window);
+		int err;
+
+		if (sw == NULL || sw->owner != c) {
+			client_error(srv, c, (uint32_t)id, h->window, ENOENT,
+			    "no such window");
+			break;
+		}
+		err = menubar_status_item(srv, c, sw, m->width, m->priority);
+		if (err != 0)
+			client_error(srv, c, (uint32_t)id, h->window, err,
+			    "bad status item width");
+		break;
+	}
 	case WS_MSG_DOCK_SET_EDGE: {
 		ws_req_dock_edge_t *m = (void *)h;
 

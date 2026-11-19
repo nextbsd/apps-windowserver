@@ -133,6 +133,8 @@ handle_kevent(struct ws_server *srv, struct kevent *kev)
 		}
 		else if (kev->ident == TIMER_DISPLAY_REVERT)
 			display_revert_fire(srv);
+		else if (kev->ident == TIMER_MENU_BAR)
+			menubar_timer(srv);
 		else if (kev->ident == TIMER_MOMENTUM)
 			scroll_momentum_fire(srv);
 		else if (kev->ident == TIMER_OVERVIEW)

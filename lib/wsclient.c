@@ -65,6 +65,7 @@ struct ws_connection {
 	ws_rect_t	usable;		/* WS_SERVER_USABLE_AREA, else the
 					   whole screen */
 	uint32_t	menu_bar;	/* WS_SERVER_MENU_BAR, else 0 */
+	uint32_t	status_items;	/* WS_SERVER_STATUS_ITEMS, else 0 */
 	/* events read while waiting for something else */
 	ws_event_t	*queue;
 	size_t		qhead;
@@ -577,6 +578,8 @@ connect_impl(const char *service, const char *app_name, uint32_t flags,
 		screen_rect(&c->screen, &c->usable);
 	if (c->server_flags & WS_SERVER_MENU_BAR)
 		c->menu_bar = ev.u.welcome.menu_bar;
+	if (c->server_flags & WS_SERVER_STATUS_ITEMS)
+		c->status_items = ev.u.welcome.status_items;
 	return c;
 
 fail:
@@ -741,6 +744,8 @@ note_event(ws_connection_t *c, ws_event_t *ev)
 	    ev->u.usable_area.screen_id == c->screen.screen_id) {
 		c->usable = ev->u.usable_area.usable;
 		c->menu_bar = ev->u.usable_area.menu_bar;
+		if (c->server_flags & WS_SERVER_STATUS_ITEMS)
+			c->status_items = ev->u.usable_area.status_items;
 	}
 }
 
@@ -1403,6 +1408,38 @@ WS_API int
 ws_set_menu_bar(ws_connection_t *c, uint32_t height)
 {
 	return send_int(c, WS_MSG_SET_MENU_BAR, 0, height);
+}
+
+WS_API int
+ws_set_menu_bar_window(ws_connection_t *c, uint32_t window, uint32_t height)
+{
+	if ((c->server_flags & WS_SERVER_STATUS_ITEMS) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	return send_int(c, WS_MSG_SET_MENU_BAR, window, (int32_t)height);
+}
+
+WS_API int
+ws_status_item(ws_connection_t *c, uint32_t window, uint32_t width,
+    int32_t priority)
+{
+	ws_req_status_item_t m;
+
+	if ((c->server_flags & WS_SERVER_STATUS_ITEMS) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	req_init(c, &m.hdr, WS_MSG_STATUS_ITEM, sizeof(m), window);
+	m.width = width;
+	m.priority = priority;
+	return send_oneway(c, &m.hdr);
+}
+
+WS_API uint32_t
+ws_status_items_width(ws_connection_t *c)
+{
+	return c->status_items;
 }
 
 WS_API int

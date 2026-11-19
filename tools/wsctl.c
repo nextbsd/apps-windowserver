@@ -388,6 +388,8 @@ screen_cmd(ws_connection_t *c, int argc, char **argv)
 		print_usable(&u);
 		if (ws_server_flags(c) & WS_SERVER_MENU_BAR)
 			printf("menubar %u\n", ws_menu_bar_height(c));
+		if (ws_server_flags(c) & WS_SERVER_STATUS_ITEMS)
+			printf("statusitems %u\n", ws_status_items_width(c));
 		return 0;
 	}
 	if (strcmp(argv[2], "size") == 0 && argc == 4) {

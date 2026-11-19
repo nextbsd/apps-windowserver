@@ -47,6 +47,15 @@ extern "C" {
 #define WS_LEVEL_MAIN_MENU	20	/* NSMainMenuWindowLevel */
 #define WS_LEVEL_STATUS		21	/* NSStatusWindowLevel */
 #define WS_LEVEL_DOCK		21	/* NSDockWindowLevel (deprecated) */
+/* The menu bar's levels (servers with WS_SERVER_STATUS_ITEMS, "The menu
+   bar" in WSProtocol.h), as macOS's kCGMainMenuWindowLevel and
+   kCGStatusWindowLevel: above the Dock, below pop-up menus. The server
+   puts an app's menu bar window (WS_MSG_SET_MENU_BAR with hdr.window)
+   and status items (WS_MSG_STATUS_ITEM) there itself and keeps them
+   there; a client asking for these numbers with WS_MSG_WINDOW_SET_LEVEL
+   gets an ordinary window on that level. */
+#define WS_LEVEL_MENU_BAR	24	/* kCGMainMenuWindowLevel */
+#define WS_LEVEL_STATUS_ITEM	25	/* kCGStatusWindowLevel */
 #define WS_LEVEL_MODAL_PANEL	100	/* NSModalPanelWindowLevel */
 #define WS_LEVEL_POPUP_MENU	101	/* NSPopUpMenuWindowLevel */
 #define WS_LEVEL_SCREEN_SAVER	1000	/* NSScreenSaverWindowLevel */
@@ -286,6 +295,23 @@ extern "C" {
 						   WS_MSG_DISPLAY_CONFIGURE and
 						   WS_EVENT_DISPLAYS_CHANGED
 						   ("Displays" in WSProtocol.h) */
+#define WS_SERVER_STATUS_ITEMS	0x80000000 /* the menu bar window on
+						   WS_LEVEL_MENU_BAR (WS_MSG_SET_MENU_BAR
+						   with hdr.window), shown for the
+						   active app only and swapped in one
+						   frame; status items
+						   (WS_MSG_STATUS_ITEM) and their width
+						   (`status_items` in the welcome and
+						   WS_EVENT_USABLE_AREA) ("The menu bar"
+						   in WSProtocol.h) */
+
+/* WS_MSG_STATUS_ITEM priorities: larger is further right. Equal
+   priorities go right to left in the order the items were made. */
+#define WS_STATUS_PRIORITY_APP		0	/* any app's NSStatusItem */
+#define WS_STATUS_PRIORITY_SYSTEM	1000	/* the system cluster (Input,
+						   Bluetooth, Wi-Fi, Sound,
+						   Battery) */
+#define WS_STATUS_PRIORITY_CLOCK	2000	/* the clock: rightmost */
 
 /* WS_MSG_ACTIVATE flags (ws_activate_flags). */
 #define WS_ACTIVATE_RAISE	0x0001	/* also bring the app's windows,
@@ -533,7 +559,8 @@ typedef struct ws_event_welcome {
 	/* added after protocol 1 shipped (WS_SERVER_MENU_BAR); read as 0
 	   from older servers */
 	uint32_t	menu_bar;	/* see ws_event_usable_area_t */
-	uint32_t	reserved2;
+	/* WS_SERVER_STATUS_ITEMS; 0 from older servers */
+	uint32_t	status_items;	/* see ws_event_usable_area_t */
 } ws_event_welcome_t;
 
 /*
@@ -549,7 +576,10 @@ typedef struct ws_event_welcome {
  * edge, got thicker or thinner, connected or went away, the menu bar
  * strip changed, or the screen changed (after WS_EVENT_SCREEN_CHANGED).
  * Screen coordinates. `menu_bar` is the height of the menu bar strip
- * (0 for none), which a top Dock sits directly below.
+ * (0 for none), which a top Dock sits directly below. `status_items`
+ * (servers with WS_SERVER_STATUS_ITEMS) is how far the status items
+ * reach in from the right end of the bar, in points, 0 for none: an
+ * app's menu bar stops its menus short of it.
  */
 typedef struct ws_event_usable_area {
 	uint32_t	screen_id;
@@ -559,7 +589,9 @@ typedef struct ws_event_usable_area {
 	   servers send the event without it, and it reads as 0 */
 	uint32_t	menu_bar;	/* pixels the menu bar takes from the
 					   top of the screen */
-	uint32_t	reserved2;
+	/* WS_SERVER_STATUS_ITEMS; 0 from older servers */
+	uint32_t	status_items;	/* points the status items take from
+					   the right end of the bar */
 } ws_event_usable_area_t;
 
 /*

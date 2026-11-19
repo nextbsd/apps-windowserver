@@ -74,7 +74,7 @@ LIB_OBJS	= $(LIB_SRCS:%.c=$(B)/%.o)
 HEADERS		= $(wildcard include/WindowServer/*.h)
 
 all: $(B)/WindowServer $(B)/$(LIB_SO) $(B)/$(LIB_NAME).a $(B)/wstest $(B)/wsctl \
-     $(B)/wspointer $(B)/wstiling $(B)/wsdrag $(B)/wsclear $(B)/wscapture \
+     $(B)/wspointer $(B)/wstiling $(B)/wsdrag $(B)/wsclear $(B)/wsmenubar $(B)/wscapture \
      $(B)/WindowServerClient.pc $(GLES_TOOLS)
 
 $(B)/server/%.o: server/%.c server/server.h $(HEADERS)
@@ -124,6 +124,9 @@ $(B)/wsdrag: $(B)/tools/wsdrag.o $(B)/$(LIB_NAME).a
 $(B)/wsclear: $(B)/tools/wsclear.o $(B)/$(LIB_NAME).a
 	$(CC) $(LDFLAGS) -o $@ $< $(B)/$(LIB_NAME).a $(MACH_LIBS)
 
+$(B)/wsmenubar: $(B)/tools/wsmenubar.o $(B)/$(LIB_NAME).a
+	$(CC) $(LDFLAGS) -o $@ $< $(B)/$(LIB_NAME).a $(MACH_LIBS)
+
 $(B)/wscapture: $(B)/tools/wscapture.o $(B)/$(LIB_NAME).a
 	$(CC) $(LDFLAGS) -o $@ $< $(B)/$(LIB_NAME).a $(MACH_LIBS)
 
@@ -156,7 +159,7 @@ install: all
 	$(INSTALL) -m 644 $(HEADERS) $(DESTDIR)$(INCDIR)/WindowServer/
 	$(INSTALL) -m 644 $(B)/WindowServerClient.pc $(DESTDIR)$(PKGCONFIGDIR)/
 	$(INSTALL) -m 755 $(B)/wstest $(B)/wsctl $(B)/wspointer $(B)/wstiling \
-	    $(B)/wsdrag $(B)/wsclear $(B)/wscapture \
+	    $(B)/wsdrag $(B)/wsclear $(B)/wsmenubar $(B)/wscapture \
 	    scripts/ws-session \
 	    $(DESTDIR)$(TOOLDIR)/
 	$(INSTALL) -m 644 launchd/org.nextbsd.WindowServer.plist $(DESTDIR)$(LAUNCHDDIR)/
@@ -173,6 +176,7 @@ check: all
 	sh tests/dock-clear-test.sh $(B)
 	sh tests/capture-test.sh $(B)
 	sh tests/displays-test.sh $(B)
+	sh tests/menubar-test.sh $(B)
 
 check-settings: all
 	sh tests/settings-test.sh $(B)
