@@ -753,6 +753,7 @@ struct ws_display {
 	/* in the desktop */
 	ws_rect_t	frame;		/* points */
 	uint32_t	mirror_of;	/* the display it shows, 0 = none */
+	bool		place_afresh;	/* placed as a new display next */
 	ws_rect_t	back;		/* backing pixels it shows */
 	ws_rect_t	dest;		/* where they go on the panel, pixels
 					   (smaller for a mirror of another
@@ -802,6 +803,13 @@ struct ws_server {
 					   changes go all the way */
 	char		arrangement[512]; /* the display set's key in the
 					   store, "" before the first */
+	/* the arrangement before mirroring began, to go back to when it
+	   ends (display.c) */
+	unsigned	nunmirrored;
+	struct {
+		char	edid_id[48];
+		int32_t	x, y;
+	}		unmirrored[WS_MAX_DISPLAYS];
 	/* a change made with WS_DISPLAY_CONFIRM, until kept or reverted */
 	bool		display_pending;
 	uint64_t	display_pending_until;	/* ws_now_usec() */
