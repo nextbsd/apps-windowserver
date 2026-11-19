@@ -487,7 +487,8 @@ compositor_repaint(struct ws_server *srv)
 	struct ws_window *w;
 	bool async;
 
-	if (!srv->display_active || srv->present_pending || srv->main == NULL)
+	if (!srv->display_active || srv->present_pending || srv->main == NULL ||
+	    srv->displays_asleep)
 		return;
 	pixman_region32_intersect_rect(&srv->damage, &srv->damage, 0, 0,
 	    srv->width, srv->height);

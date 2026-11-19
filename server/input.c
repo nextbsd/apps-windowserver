@@ -471,6 +471,16 @@ input_readable(struct ws_server *srv)
 	if (libinput_dispatch(srv->libinput) != 0)
 		ws_warn("libinput_dispatch failed");
 	while ((ev = libinput_get_event(srv->libinput)) != NULL) {
+		switch (libinput_event_get_type(ev)) {
+		case LIBINPUT_EVENT_DEVICE_ADDED:
+		case LIBINPUT_EVENT_DEVICE_REMOVED:
+		case LIBINPUT_EVENT_SWITCH_TOGGLE:
+			break;
+		default:
+			/* the user is back: the displays wake (display.c) */
+			display_wake_input(srv);
+			break;
+		}
 		handle_event(srv, ev);
 		libinput_event_destroy(ev);
 	}

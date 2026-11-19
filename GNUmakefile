@@ -82,7 +82,8 @@ $(B)/server/%.o: server/%.c server/server.h $(HEADERS)
 	$(CC) $(CFLAGS) $(PKG_CFLAGS) -pthread -c -o $@ $<
 
 $(B)/WindowServer: $(SERVER_OBJS)
-	$(CC) $(LDFLAGS) -pthread -o $@ $(SERVER_OBJS) $(PKG_LIBS) $(MACH_LIBS) -lm
+	$(CC) $(LDFLAGS) -pthread -o $@ $(SERVER_OBJS) $(PKG_LIBS) $(MACH_LIBS) \
+	    -lnotify -lm
 
 $(B)/lib/%.o: lib/%.c $(HEADERS)
 	@mkdir -p $(dir $@)

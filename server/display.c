@@ -31,6 +31,15 @@
  *
  * Windows of a display that goes away move to the main display, and go
  * back when it comes back, unless they've moved since.
+ *
+ * Display sleep: powerd (pmconfigd) runs the display idle timer, as on
+ * Apple silicon Macs, and publishes its decision as notify(3)
+ * "com.apple.iokit.hid.displayStatus", state 1 while the display is on
+ * and 0 once it should be off. The server checks it every couple of
+ * seconds (notify_check: notify_register_file_descriptor doesn't work
+ * yet, nextbsd-userland#617) and turns every display off (DPMS) when it
+ * becomes 0, and on again when it becomes 1 or as soon as input comes,
+ * without waiting for powerd. Nothing is drawn while they are off.
  */
 
 #include <sys/stat.h>
@@ -1652,6 +1661,13 @@ relayout(struct ws_server *srv, bool force)
 	windows_follow(srv, old, nold);
 	windows_keep_on_screen(srv, ow, oh);
 	display_night_shift(srv);
+	/* a display turned on while the others sleep sleeps too */
+	if (srv->displays_asleep && srv->output != NULL &&
+	    srv->output->blank != NULL)
+		for (i = 0; i < srv->ndisplays; i++)
+			if (srv->displays[i]->on)
+				srv->output->blank(srv, srv->displays[i],
+				    true);
 	/* the set comes back as it is now, unless part of it is off */
 	all_on = true;
 	for (i = 0; i < srv->ndisplays; i++)
@@ -2197,11 +2213,92 @@ display_night_shift(struct ws_server *srv)
 	}
 }
 
-/* Every couple of seconds (main.c): Night Shift's schedule. */
+/* ---- display sleep ---- */
+
+#define DISPLAY_STATUS_KEY	"com.apple.iokit.hid.displayStatus"
+
+/*
+ * libnotify (-lnotify). The installed <notify.h> includes <os/base.h>,
+ * which isn't installed, so the three calls used are declared here, as
+ * notify.h declares them.
+ */
+#define NOTIFY_STATUS_OK	0
+uint32_t notify_register_check(const char *, int *);
+uint32_t notify_check(int, int *);
+uint32_t notify_get_state(int, uint64_t *);
+
+/* Turn every display off (asleep) or on again. */
+void
+display_sleep(struct ws_server *srv, bool asleep)
+{
+	unsigned i;
+
+	if (asleep == srv->displays_asleep)
+		return;
+	if (asleep && srv->present_pending && srv->output != NULL &&
+	    srv->output->wait_present != NULL)
+		srv->output->wait_present(srv);
+	srv->displays_asleep = asleep;
+	ws_info("displays %s", asleep ? "asleep" : "awake");
+	if (srv->output != NULL && srv->output->blank != NULL)
+		for (i = 0; i < srv->ndisplays; i++)
+			if (srv->displays[i]->on)
+				srv->output->blank(srv, srv->displays[i],
+				    asleep);
+	/* a frame whose flips won't come now is done */
+	if (asleep && srv->present_pending)
+		compositor_present_done(srv);
+	if (!asleep) {
+		damage_all(srv);
+		cursor_moved(srv);
+	}
+}
+
+/* Input while the displays are off wakes them at once. */
+void
+display_wake_input(struct ws_server *srv)
+{
+	if (srv->displays_asleep)
+		display_sleep(srv, false);
+}
+
+/* powerd's display state: follow it when it changes. */
+static void
+display_status_check(struct ws_server *srv)
+{
+	uint64_t state = 1;
+	int changed = 0;
+
+	if (srv->headless)
+		return;
+	if (srv->display_status_token == -2 &&
+	    notify_register_check(DISPLAY_STATUS_KEY,
+	    &srv->display_status_token) != NOTIFY_STATUS_OK) {
+		srv->display_status_token = -1;
+		ws_warn("notify(3) %s: can't register; the displays never "
+		    "sleep", DISPLAY_STATUS_KEY);
+	}
+	if (srv->display_status_token < 0 ||
+	    notify_check(srv->display_status_token, &changed) !=
+	    NOTIFY_STATUS_OK || !changed ||
+	    notify_get_state(srv->display_status_token, &state) !=
+	    NOTIFY_STATUS_OK)
+		return;
+	/* only a change counts: input may have woken the displays while
+	   powerd still says 0 */
+	if ((int)(state != 0) == srv->display_status_seen)
+		return;
+	srv->display_status_seen = state != 0;
+	display_sleep(srv, state == 0);
+}
+
+/* Every couple of seconds (main.c): Night Shift's schedule, and whether
+   the displays should sleep. */
 void
 display_housekeeping(struct ws_server *srv)
 {
 	display_night_shift(srv);
+	display_status_check(srv);
 }
 
 /* ---- the lid ---- */

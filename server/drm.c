@@ -69,6 +69,8 @@ struct drm_output {
 	bool		flip_ok;
 	bool		mode_set;
 	uint32_t	gamma_size;
+	uint32_t	dpms_prop;	/* the connector's DPMS property, 0 =
+					   none */
 	/* hardware cursor */
 	uint32_t	cursor_handle;
 	uint64_t	cursor_size;
@@ -232,6 +234,24 @@ display_for(struct ws_server *srv, drmModeConnector *conn)
 	d->mm_width = conn->mmWidth;
 	d->mm_height = conn->mmHeight;
 	read_edid(drm.fd, conn->connector_id, d);
+	{
+		drmModeObjectProperties *props;
+		drmModePropertyRes *pr;
+		uint32_t k;
+
+		props = drmModeObjectGetProperties(drm.fd, conn->connector_id,
+		    DRM_MODE_OBJECT_CONNECTOR);
+		for (k = 0; props != NULL && k < props->count_props; k++) {
+			pr = drmModeGetProperty(drm.fd, props->props[k]);
+			if (pr == NULL)
+				continue;
+			if (strcmp(pr->name, "DPMS") == 0)
+				o->dpms_prop = pr->prop_id;
+			drmModeFreeProperty(pr);
+		}
+		if (props != NULL)
+			drmModeFreeObjectProperties(props);
+	}
 	if (d->edid_id[0] == '\0')
 		snprintf(d->edid_id, sizeof(d->edid_id), "unknown-%s",
 		    d->connector);
@@ -1051,6 +1071,27 @@ drm_cursor_hide(struct ws_server *srv)
 	}
 }
 
+/* ---- display sleep ---- */
+
+static void
+drm_blank(struct ws_server *srv, struct ws_display *d, bool off)
+{
+	struct drm_output *o = OUT(d);
+	int r;
+
+	(void)srv;
+	if (o == NULL || o->crtc_id == 0 || o->dpms_prop == 0)
+		return;
+	r = drmModeConnectorSetProperty(drm.fd, o->connector_id,
+	    o->dpms_prop, off ? DRM_MODE_DPMS_OFF : DRM_MODE_DPMS_ON);
+	if (r != 0)
+		ws_warn("display %s: DPMS %s: %s", d->connector,
+		    off ? "off" : "on", strerror(-r));
+	/* a flip asked for just before won't finish while it's off */
+	if (off)
+		d->flip_pending = false;
+}
+
 /* ---- Night Shift ---- */
 
 static void
@@ -1138,6 +1179,7 @@ const struct ws_output_ops drm_output_ops = {
 	.take_screen = drm_take_screen,
 	.display_on = drm_display_on,
 	.display_off = drm_display_off,
+	.blank = drm_blank,
 	.gamma = drm_gamma,
 };
 
