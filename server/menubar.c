@@ -395,6 +395,15 @@ status_items_pack(struct ws_server *srv, int32_t height, bool *changed)
 /* The display with focus, last drawn (menubar_update). */
 static uint32_t focus_drawn;
 
+/* w, the bar, isn't bar-shaped any more: its owner made it taller than
+   the strip (the NeXT menu it turns into on leaving the Mac style). */
+static bool
+bar_reshaped(struct ws_server *srv, const struct ws_window *w)
+{
+	return w->frame.height > 0 && srv->bar_strips_height > 0 &&
+	    w->frame.height > srv->bar_strips_height;
+}
+
 void
 menubar_update(struct ws_server *srv)
 {
@@ -459,9 +468,15 @@ menubar_update(struct ws_server *srv)
 	}
 	if (want != NULL) {
 		/* along the top of the display with focus, as wide as it:
-		   never across two */
+		   never across two. One its owner has made another shape
+		   (an app leaving the Mac style turns its bar into its NeXT
+		   menu before it says it has no bar) keeps its size */
 		r = strip_rect(srv, want->frame.height > 0 ?
 		    want->frame.height : h);
+		if (bar_reshaped(srv, want)) {
+			r.width = want->frame.width;
+			r.height = want->frame.height;
+		}
 		if (!rect_same(&r, &want->frame)) {
 			window_server_frame(srv, want, &r);
 			changed = true;
