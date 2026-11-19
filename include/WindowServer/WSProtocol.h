@@ -839,7 +839,10 @@ typedef struct ws_req_cursor {
  * WS_MENU_BAR_HOLD_MS. After that, and whenever the strip has no
  * app's bar on it, WindowServer draws an empty bar in the strip, in the
  * colour of the last bar it showed (the pixel at its right end, so the
- * theme's), never the desktop. A bar's pull-down menus, which the app
+ * theme's), never the desktop. It is drawn below WS_LEVEL_MAIN_MENU,
+ * so an app that places its own bar (WS_MSG_SET_MENU_BAR without a
+ * window) shows above it, and the empty bar covers the strip while such
+ * apps switch. A bar's pull-down menus, which the app
  * shows on WS_LEVEL_POPUP_MENU, are ordinary windows. The strip's
  * height and the usable area follow "The menu bar strip" above.
  *

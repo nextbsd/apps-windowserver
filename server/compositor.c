@@ -404,8 +404,10 @@ repaint_region(struct ws_server *srv, pixman_region32_t *region,
 		bool bar_drawn = !srv->bar_fallback;
 
 		for (w = srv->stack_bottom; w != NULL; w = w->above) {
-			/* the empty menu bar, under the bars' level */
-			if (!bar_drawn && w->level >= WS_LEVEL_MENU_BAR) {
+			/* the empty menu bar, under the main-menu level:
+			   below bars that older clients put at
+			   WS_LEVEL_MAIN_MENU themselves too */
+			if (!bar_drawn && w->level >= WS_LEVEL_MAIN_MENU) {
 				menubar_composite(srv, region);
 				bar_drawn = true;
 			}

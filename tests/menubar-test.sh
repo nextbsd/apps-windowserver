@@ -269,6 +269,18 @@ sleep 0.7
 "$B/wsctl" move 640 600
 expect_pixel 1240 10 202020 "the desktop: no bar, no items"
 
+# An older client that places its own bar (the strip without a window):
+# the empty bar under it, below WS_LEVEL_MAIN_MENU, covers the strip.
+"$B/wsctl" menubar 24 30 >"$LOG/old.log" 2>&1 &
+OLD=$!
+PIDS="$PIDS $OLD"
+wait_for "$LOG/old.log" "^menubar 24" 5 || fail "old-style menubar client"
+settle
+got=$(pixel 600 10)
+[ "$got" != 202020 ] && pass "an older client's strip: the empty bar ($got)" ||
+    fail "an older client's strip shows the desktop"
+expect_pixel 600 40 202020 "below the strip: the desktop"
+
 for f in "$LOG"/*.log; do
 	[ "$f" = "$LOG/server.log" ] && continue
 	grep -q "^error" "$f" && { fail "$(basename "$f" .log) got an error"; grep "^error" "$f"; }
