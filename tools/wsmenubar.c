@@ -13,6 +13,11 @@
  *	activates, and names the bar (WS_MSG_SET_MENU_BAR with the window)
  *	DELAY_MS later (a slow launch). Like GNUstep, it orders its bar
  *	out when it is deactivated and in when it is activated.
+ *   wsmenubar oldbar NAME BODY TITLE
+ *	The same app as a client from before WS_SERVER_STATUS_ITEMS: it
+ *	reports the strip (WS_MSG_SET_MENU_BAR without a window) and
+ *	keeps its bar on WS_LEVEL_MAIN_MENU, ordering it in and out
+ *	itself, for comparing app switches.
  *   wsmenubar plain NAME COLOR
  *	An app with no menu bar (an X11 app): a document window only.
  *   wsmenubar item NAME WIDTH PRIORITY COLOR
@@ -48,6 +53,7 @@ struct win {
 static ws_connection_t *conn;
 static struct win bar, doc, item;
 static volatile sig_atomic_t quit, widen, hide;
+static bool old_style;
 static uint32_t item_width;
 static int32_t item_priority;
 
@@ -177,6 +183,7 @@ usage(void)
 {
 	fprintf(stderr,
 	    "usage: wsmenubar bar NAME BODY TITLE [DELAY_MS]\n"
+	    "       wsmenubar oldbar NAME BODY TITLE\n"
 	    "       wsmenubar plain NAME COLOR\n"
 	    "       wsmenubar item NAME WIDTH PRIORITY COLOR\n");
 	exit(2);
@@ -212,13 +219,19 @@ main(int argc, char **argv)
 	printf("client %u\n", ws_client_id(conn));
 	snprintf(bar_title, sizeof(bar_title), "%s-bar", argv[2]);
 	snprintf(doc_title, sizeof(doc_title), "%s-doc", argv[2]);
-	if (strcmp(argv[1], "bar") == 0 && (argc == 5 || argc == 6)) {
+	old_style = strcmp(argv[1], "oldbar") == 0 && argc == 5;
+	if ((strcmp(argv[1], "bar") == 0 && (argc == 5 || argc == 6)) ||
+	    old_style) {
 		bar.body = (uint32_t)strtoul(argv[3], NULL, 16);
 		bar.title = (uint32_t)strtoul(argv[4], NULL, 16);
 		doc.body = bar.title;
 		delay = argc == 6 ? atoi(argv[5]) : 0;
 		make(&doc, 300, 300, 200, 150, WS_LEVEL_NORMAL, 0, doc_title);
 		ws_window_order(conn, doc.id, WS_ORDER_ABOVE, 0);
+		/* (reported first, or keeping clear of the strip would push
+		   the bar below it) */
+		if (old_style)
+			ws_set_menu_bar(conn, BAR_HEIGHT);
 		make(&bar, 0, 0, 1280, BAR_HEIGHT, WS_LEVEL_MAIN_MENU,
 		    WS_WINDOW_NO_KEY, bar_title);
 		ws_window_order(conn, bar.id, WS_ORDER_ABOVE, 0);
@@ -262,8 +275,11 @@ main(int argc, char **argv)
 			if ((uint64_t)ts.tv_sec * 1000 +
 			    (uint64_t)ts.tv_nsec / 1000000 >=
 			    start + (uint64_t)delay) {
-				ws_set_menu_bar_window(conn, bar.id,
-				    BAR_HEIGHT);
+				if (old_style)
+					ws_set_menu_bar(conn, BAR_HEIGHT);
+				else
+					ws_set_menu_bar_window(conn, bar.id,
+					    BAR_HEIGHT);
 				ws_sync(conn);
 				named = true;
 				printf("ready\n");
