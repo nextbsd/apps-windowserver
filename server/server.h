@@ -1144,6 +1144,7 @@ int	menubar_status_item(struct ws_server *srv, struct ws_client *c,
 bool	menubar_managed(const struct ws_window *w);
 void	menubar_client_order(struct ws_server *srv, struct ws_window *w,
 	    int op);
+void	menubar_client_frame(struct ws_server *srv, struct ws_window *w);
 void	menubar_client_level(struct ws_server *srv, struct ws_window *w,
 	    int32_t level);
 void	menubar_window_gone(struct ws_server *srv, struct ws_window *w);

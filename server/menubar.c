@@ -508,6 +508,34 @@ menubar_timer(struct ws_server *srv)
 
 /* ---- events ---- */
 
+/*
+ * The owner set a frame on w, its bar or a status item. Where they go
+ * is WindowServer's: the bar along the top of the display with focus,
+ * the status items packed in its strip. An owner working out the
+ * display from the frame it had would put its bar on the wrong one
+ * once the displays have moved. The bar's size stays the owner's: an
+ * app leaving the Mac style turns its bar into its NeXT menu, sized as
+ * that, before it says it has no bar.
+ */
+void
+menubar_client_frame(struct ws_server *srv, struct ws_window *w)
+{
+	ws_rect_t r;
+
+	if (w->status_item) {
+		menubar_update(srv);
+		return;
+	}
+	if (w != srv->bar_shown)
+		return;
+	r = strip_rect(srv, w->frame.height);
+	if (r.x == w->frame.x && r.y == w->frame.y)
+		return;
+	r.width = w->frame.width;
+	r.height = w->frame.height;
+	window_server_frame(srv, w, &r);
+}
+
 /* The owner ordered w (its bar or a status item): kept for later. */
 void
 menubar_client_order(struct ws_server *srv, struct ws_window *w, int op)
