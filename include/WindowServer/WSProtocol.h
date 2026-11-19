@@ -119,7 +119,9 @@ enum {
 	/* app connections (servers with WS_SERVER_MENU_BAR), see "The menu
 	   bar strip" */
 	WS_MSG_SET_MENU_BAR,		/* ws_req_int_t: height in pixels,
-					   0 = no menu bar */
+					   0 = no menu bar; hdr.window: the
+					   bar's window (servers with
+					   WS_SERVER_STATUS_ITEMS) */
 	/* servers with WS_SERVER_TILING, see "Window tiling" */
 	WS_MSG_WINDOW_SET_SIZE_LIMITS,	/* ws_req_size_limits_t */
 	WS_MSG_TILING,			/* tools and the Dock, ws_req_tiling_t;
@@ -149,6 +151,8 @@ enum {
 	WS_MSG_LIST_DISPLAY_MODES,	/* hdr.window: display id; answers on
 					   the socket */
 	WS_MSG_DISPLAY_CONFIGURE,	/* sync, ws_req_display_t */
+	/* servers with WS_SERVER_STATUS_ITEMS, see "The menu bar" */
+	WS_MSG_STATUS_ITEM,		/* ws_req_status_item_t, hdr.window */
 	WS_MSG_LAST
 };
 
@@ -370,6 +374,15 @@ typedef struct ws_req_region {
  * unique across connections.
  */
 #define WS_MAX_WINDOW_IDS	4096
+
+/* WS_MSG_STATUS_ITEM ("The menu bar"): hdr.window becomes a status
+   item `width` points wide, or stops being one with width 0. */
+typedef struct ws_req_status_item {
+	ws_req_header_t	hdr;
+	uint32_t	width;		/* points; 0 = no longer a status item */
+	int32_t		priority;	/* WS_STATUS_PRIORITY_*: larger is
+					   further right */
+} ws_req_status_item_t;
 
 typedef struct ws_req_dock_edge {	/* DOCK_SET_EDGE */
 	ws_req_header_t	hdr;
@@ -781,6 +794,89 @@ typedef struct ws_req_cursor {
  * reported, there is no strip. A report from any other inactive app is
  * kept for when it becomes active.
  */
+
+/*
+ * The menu bar (servers with WS_SERVER_STATUS_ITEMS), the way macOS
+ * builds it: nobody draws the whole bar. Each app draws its own menu
+ * bar window, and the right end of the bar is a row of status items,
+ * small windows from any process (the clock, the Dock's extras, an
+ * app's NSStatusItem). WindowServer gives them their levels, places
+ * them, and swaps the apps' bars on activation, so the strip reads as
+ * one surface that never goes away.
+ *
+ * Levels: WS_LEVEL_MENU_BAR (24, kCGMainMenuWindowLevel) for the
+ * apps' bars and WS_LEVEL_STATUS_ITEM (25) for status items, above
+ * normal windows, floating panels, the NeXT main menu (20) and the
+ * Dock (21), below modal panels and pop-up menus (101), where the
+ * bar's pull-down menus go. The server puts the windows there itself
+ * and keeps them there: WS_MSG_WINDOW_SET_LEVEL on them is remembered
+ * for when they stop being a bar or an item, and doesn't move them.
+ *
+ * The bar window. WS_MSG_SET_MENU_BAR (ws_req_int_t) with hdr.window
+ * set names the app's bar window as well as its height; hdr.window 0
+ * keeps the older meaning (the strip alone, the app places its bar
+ * itself). A named window, which must be the sender's, is the app's bar
+ * from then on: the server
+ *   - puts it on WS_LEVEL_MENU_BAR and gives it the strip's frame: the
+ *     main display's top edge, as wide as that display, `value` points
+ *     tall (WS_EVENT_WINDOW_FRAME tells the owner, and again when the
+ *     main display changes);
+ *   - shows and hides it itself: the app's WS_MSG_WINDOW_ORDER on it is
+ *     remembered but has no visible effect while it is the bar. It is
+ *     on screen while its app is active (and has committed a buffer to
+ *     it), and off screen otherwise.
+ * The app keeps drawing into it (attach, damage, commit) whether it
+ * shows or not. A new window or the same window again replaces the
+ * app's bar; `value` 0, or destroying the window, ends it (the window,
+ * if any, goes back to the level and order the app gave it).
+ *
+ * App switch: when another app becomes active, the outgoing app's bar
+ * is taken off and the incoming app's put on in the same composited
+ * frame, so the strip never shows a gap. If the incoming app has no
+ * bar to show yet (it is still launching, or busy, or it is an X11 app
+ * that never names one), the outgoing bar stays until the incoming one
+ * can be shown (its window named and a buffer committed), for at most
+ * WS_MENU_BAR_HOLD_MS. After that, and whenever the strip has no
+ * app's bar on it, WindowServer draws an empty bar in the strip, in the
+ * colour of the last bar it showed (the pixel at its right end, so the
+ * theme's), never the desktop. A bar's pull-down menus, which the app
+ * shows on WS_LEVEL_POPUP_MENU, are ordinary windows. The strip's
+ * height and the usable area follow "The menu bar strip" above.
+ *
+ * Status items. WS_MSG_STATUS_ITEM (ws_req_status_item_t), from any
+ * connection, makes hdr.window (the sender's) a status item `width`
+ * points wide, or with width 0 an ordinary window again (as destroying
+ * it does). The server puts it on WS_LEVEL_STATUS_ITEM and places it:
+ * the items are packed right to left from the right end of the main
+ * display's top edge, larger `priority` further right
+ * (WS_STATUS_PRIORITY_CLOCK rightmost, then WS_STATUS_PRIORITY_SYSTEM,
+ * apps' items at WS_STATUS_PRIORITY_APP and above), equal priorities in
+ * the order they first became items (the first one rightmost), with
+ * no space between them: an item pads its own width. Each is as tall as
+ * the strip. Sending it again changes its width or priority, and the
+ * items repack; so do they when one comes or goes, is ordered in or
+ * out, or the main display or the strip changes. Owners hear their
+ * items' frames as WS_EVENT_WINDOW_FRAME. Only items their owner has
+ * ordered in take a place. While there is no strip (no app shows a Mac
+ * menu bar: the NeXT or in-window style) status items aren't shown and
+ * take no place; they come back with the strip. Width more than half
+ * the main display's is EINVAL.
+ *
+ * A press on a status item activates nothing and makes nothing key
+ * (as on WS_WINDOW_NO_ACTIVATE | WS_WINDOW_NO_KEY windows): the active
+ * app and its bar stay. Until the next press elsewhere, the item's app
+ * may grab, warp and query the pointer as the active app may (see
+ * "Pointer grabs"), so it can pop up the item's menu below the bar and
+ * track it.
+ *
+ * Every connection learns how far the items reach in from the bar's
+ * right end, in points: `status_items` in the welcome and in
+ * WS_EVENT_USABLE_AREA, sent whenever it changes. An app's bar stops
+ * its menus short of it, leaving that part of its window to show
+ * through only where no item is (status items are above the bar). 0
+ * while there is no strip.
+ */
+#define WS_MENU_BAR_HOLD_MS	500
 
 /*
  * Window tiling (servers with WS_SERVER_TILING). Windows stack, as

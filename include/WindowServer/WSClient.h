@@ -313,6 +313,35 @@ int		 ws_deactivate(ws_connection_t *conn);
 int		 ws_set_menu_bar(ws_connection_t *conn, uint32_t height);
 
 /*
+ * The Mac menu style on servers with WS_SERVER_STATUS_ITEMS (else
+ * ENOTSUP): as ws_set_menu_bar, and `window` is this app's menu bar.
+ * WindowServer puts it on WS_LEVEL_MENU_BAR along the main display's
+ * top, and shows it while this app is active, swapping it with the
+ * outgoing app's bar in one frame (see "The menu bar" in WSProtocol.h).
+ * height 0 ends it.
+ */
+int		 ws_set_menu_bar_window(ws_connection_t *conn, uint32_t window,
+		    uint32_t height);
+
+/*
+ * Make `window` a status item `width` points wide at the right end of
+ * the menu bar, or with width 0 an ordinary window again. Larger
+ * priorities go further right (WS_STATUS_PRIORITY_*). WindowServer
+ * places it (WS_EVENT_WINDOW_FRAME); it shows while it's ordered in and
+ * there is a menu bar strip. Servers with WS_SERVER_STATUS_ITEMS, else
+ * ENOTSUP.
+ */
+int		 ws_status_item(ws_connection_t *conn, uint32_t window,
+		    uint32_t width, int32_t priority);
+
+/*
+ * How far the status items reach in from the right end of the menu
+ * bar, in points, as of the last event dispatched (0 for none, or from
+ * older servers): an app's menu bar stops its menus short of it.
+ */
+uint32_t	 ws_status_items_width(ws_connection_t *conn);
+
+/*
  * Drag and drop (servers with WS_SERVER_DRAG, else ENOTSUP; see "Drag
  * and drop" in WSProtocol.h). Put the data on the pasteboard first,
  * then hand the drag to WindowServer with ws_drag_begin while the
