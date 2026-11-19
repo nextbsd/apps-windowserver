@@ -30,7 +30,9 @@ usage(void)
 	fprintf(stderr,
 	    "usage: wsctl list\n"
 	    "       wsctl snapshot FILE.ppm\n"
-	    "       wsctl pixel X Y [X Y ...]\n"
+	    "       wsctl pixel [-d DISPLAY] X Y [X Y ...]\n"
+	    "                                (DISPLAY: an id from wsctl displays;\n"
+	    "                                its panel's pixels)\n"
 	    "       wsctl move X Y\n"
 	    "       wsctl click X Y [left|right|middle]\n"
 	    "       wsctl down|up [left|right|middle]\n"
@@ -1229,9 +1231,18 @@ main(int argc, char **argv)
 			printf("%s: %ux%u\n", argv[2], snap.width, snap.height);
 			ws_snapshot_free(&snap);
 		}
-	} else if (strcmp(cmd, "pixel") == 0 && argc >= 4 && argc % 2 == 0) {
-		r = ws_snapshot(c, &snap);
-		for (i = 2; r == 0 && i + 1 < argc; i += 2) {
+	} else if (strcmp(cmd, "pixel") == 0 && argc >= 4) {
+		uint32_t disp = 0;
+		int first = 2;
+
+		if (strcmp(argv[2], "-d") == 0 && argc >= 6) {
+			disp = (uint32_t)strtoul(argv[3], NULL, 10);
+			first = 4;
+		}
+		if ((argc - first) % 2 != 0 || argc - first < 2)
+			usage();
+		r = ws_snapshot_display(c, disp, &snap);
+		for (i = first; r == 0 && i + 1 < argc; i += 2) {
 			uint32_t x = (uint32_t)atoi(argv[i]);
 			uint32_t y = (uint32_t)atoi(argv[i + 1]);
 			const uint32_t *row;

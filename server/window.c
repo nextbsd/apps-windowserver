@@ -77,8 +77,14 @@ window_at(struct ws_server *srv, double x, double y)
 	struct ws_window *w;
 
 	for (w = srv->stack_top; w != NULL; w = w->below)
-		if (window_hit(w, x, y))
+		if (window_hit(w, x, y)) {
+			/* a copy of the menu bar on a display without
+			   focus is over the windows below it (menubar.c) */
+			if (w->level <= WS_LEVEL_STATUS_ITEM &&
+			    menubar_covers(srv, x, y))
+				return NULL;
 			return w;
+		}
 	return NULL;
 }
 
@@ -288,6 +294,8 @@ set_key_window(struct ws_server *srv, struct ws_client *a, struct ws_window *w)
 	if (w != NULL)
 		send_simple(srv, w->owner, WS_EVENT_KEY_WINDOW_GAINED, w->id, 0);
 	keyboard_focus_update(srv);
+	if (a == srv->active)
+		menubar_update(srv);	/* the bar follows the key window */
 }
 
 /*
@@ -933,7 +941,7 @@ window_commit(struct ws_server *srv, struct ws_window *w, uint32_t flags,
 	pixman_region32_clear(&w->pending_damage);
 	if (flags & WS_COMMIT_FRAME_DONE)
 		w->frame_requested = true;
-	if (w->menu_bar_window)
+	if (w->menu_bar_window || w->status_item)
 		menubar_committed(srv, w);
 }
 

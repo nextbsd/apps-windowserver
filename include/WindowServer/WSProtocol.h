@@ -77,7 +77,9 @@ enum {
 					   with WS_SERVER_ACTIVATE_RAISE),
 					   see "Activation" */
 	WS_MSG_DEACTIVATE,
-	WS_MSG_SNAPSHOT,		/* sync; image follows on the socket */
+	WS_MSG_SNAPSHOT,		/* sync; image follows on the socket;
+					   ws_req_int_t: a display id,
+					   0 = the main display */
 	WS_MSG_LIST_WINDOWS,		/* answers on the socket */
 	WS_MSG_INJECT,			/* synthetic input (see below) */
 	/* added after protocol 1 shipped (servers with WS_SERVER_MINIMIZE) */
@@ -678,7 +680,11 @@ typedef struct ws_req_cursor {
  * (ws_display_info_t.frame). ws_screen_info_t (the welcome and
  * WS_EVENT_SCREEN_CHANGED) is the smallest rectangle around them all,
  * so clients that know only one screen still see every window; the
- * usable area (WS_EVENT_USABLE_AREA) is the main display's. Parts of
+ * usable area (WS_EVENT_USABLE_AREA) is the main display's, and each
+ * display's own is ws_display_info_t.usable: its frame less its menu
+ * bar strip (every display of the desktop has one while there is a
+ * strip, see "The menu bar") and the Dock's strip when the Dock is on
+ * it. Parts of
  * that rectangle no display shows exist but can't be seen: the pointer
  * never goes there, and windows left there are moved onto a display.
  *
@@ -818,9 +824,11 @@ typedef struct ws_req_cursor {
  * itself). A named window, which must be the sender's, is the app's bar
  * from then on: the server
  *   - puts it on WS_LEVEL_MENU_BAR and gives it the strip's frame: the
- *     main display's top edge, as wide as that display, `value` points
- *     tall (WS_EVENT_WINDOW_FRAME tells the owner, and again when the
- *     main display changes);
+ *     top edge of the display with focus (below), as wide as that
+ *     display, `value` points tall (WS_EVENT_WINDOW_FRAME tells the
+ *     owner, and again whenever focus goes to another display or the
+ *     displays change); a frame the app sets on it is its own business
+ *     until the server places it again;
  *   - shows and hides it itself: the app's WS_MSG_WINDOW_ORDER on it is
  *     remembered but has no visible effect while it is the bar. It is
  *     on screen while its app is active (and has committed a buffer to
@@ -850,8 +858,8 @@ typedef struct ws_req_cursor {
  * connection, makes hdr.window (the sender's) a status item `width`
  * points wide, or with width 0 an ordinary window again (as destroying
  * it does). The server puts it on WS_LEVEL_STATUS_ITEM and places it:
- * the items are packed right to left from the right end of the main
- * display's top edge, larger `priority` further right
+ * the items are packed right to left from the right end of the top
+ * edge of the display with focus, larger `priority` further right
  * (WS_STATUS_PRIORITY_CLOCK rightmost, then WS_STATUS_PRIORITY_SYSTEM,
  * apps' items at WS_STATUS_PRIORITY_APP and above), equal priorities in
  * the order they first became items (the first one rightmost), with
@@ -878,6 +886,33 @@ typedef struct ws_req_cursor {
  * its menus short of it, leaving that part of its window to show
  * through only where no item is (status items are above the bar). 0
  * while there is no strip.
+ *
+ * Every display (apps-windowserver#100), as on macOS with separate
+ * Spaces per display. While there is a strip, every display of the
+ * desktop (on and not a mirror) has one along its top, its height (at
+ * most a quarter of that display), and its usable area
+ * (ws_display_info_t.usable) leaves it out; windows shown under it, or
+ * there when it comes, are kept clear of it as of the main display's.
+ * The live bar and the status items, the real windows, are on the
+ * display with focus. Every other display's strip shows a copy of them
+ * that WindowServer composites from the same buffers, at half opacity
+ * over the bar's colour (dimmed), the bar from that display's left end
+ * and the items as far in from its right end, so apps draw once; it
+ * is drawn just above WS_LEVEL_STATUS_ITEM, under pop-up menus and
+ * modal panels. A copy takes pointer events itself: windows below it
+ * don't get them there.
+ *
+ * Which display has focus: the one the active app's key window went
+ * to (most of it), or the one with the last press on a window that
+ * activates its app or on the desktop, whichever came last; the main
+ * display at first, and whenever the one with focus goes away or
+ * becomes a mirror. A press on a copy gives its display focus: the
+ * bar and the items move there (WS_EVENT_WINDOW_FRAME to their
+ * owners) in the same composited frame as the copies change, and the
+ * press then goes to the window under the pointer, the bar or an
+ * item, as any press does; so the bar's menu, or the item's, opens on
+ * that display. A mirror shows its source's strip. A bar never spans
+ * two displays.
  */
 #define WS_MENU_BAR_HOLD_MS	500
 

@@ -7,7 +7,10 @@
  *
  * The usable area is the main display minus the menu bar strip along
  * its top (the Mac menu style) and the strip the Dock keeps on its edge:
- * what NSScreen's visibleFrame is on macOS. Every connection gets it in the
+ * what NSScreen's visibleFrame is on macOS. Every other display of the
+ * desktop has a menu bar strip of its own too (apps-windowserver#100),
+ * and the Dock's strip when the Dock is on it: their usable areas go
+ * out in the display list (ws_display_info_t.usable). Every connection gets it in the
  * welcome and WS_EVENT_USABLE_AREA when it changes, and the server's
  * own things (minimized-window tiles, the overview) stay inside it, and
  * windows are pushed out from under the Dock and the menu bar strip when
@@ -89,6 +92,29 @@ screen_usable_compute(struct ws_server *srv, ws_rect_t *r)
 		dock_strip(srv, r);
 }
 
+/*
+ * A display that isn't the main one: its frame minus its own menu bar
+ * strip (every display that's part of the desktop has one, as on
+ * macOS; a mirror shows its source's) and the Dock's strip when the
+ * Dock is on it.
+ */
+static void
+other_usable_compute(struct ws_server *srv, const struct ws_display *d,
+    ws_rect_t *r)
+{
+	struct ws_display *dd = display_dock(srv, srv->dock_edge);
+	int32_t mb;
+
+	*r = d->frame;
+	if (!display_shows(d))
+		return;
+	mb = menubar_strip_height(srv, d);
+	r->y += mb;
+	r->height -= mb;
+	if (dd == d)
+		dock_strip(srv, r);
+}
+
 /* Any display's usable area (ws_display_info_t.usable). */
 void
 screen_usable_of(struct ws_server *srv, const struct ws_display *d,
@@ -96,49 +122,61 @@ screen_usable_of(struct ws_server *srv, const struct ws_display *d,
 {
 	if (d == srv->main && srv->usable.width > 0)
 		*r = srv->usable;
-	else if (d->id == srv->dock_display && srv->dock_usable.width > 0)
-		*r = srv->dock_usable;
 	else
-		*r = d->frame;
+		other_usable_compute(srv, d, r);
 }
 
 /*
- * The Dock on a display that isn't the main one: work its usable area
- * out again, keep windows there clear of the Dock, and if it changed,
- * tell everyone the displays changed (their usable areas are in the
- * display list).
+ * The displays other than the main one: work their usable areas out
+ * again (their menu bar strips, and the Dock when it is on one of
+ * them), keep the windows on each clear of its strips, and if any
+ * changed, tell everyone the displays changed (their usable areas are
+ * in the display list).
  */
 static void
 dock_area_update(struct ws_server *srv)
 {
-	struct ws_display *dd = display_dock(srv, srv->dock_edge);
-	ws_rect_t r = { 0, 0, 0, 0 }, old = srv->dock_usable;
-	uint32_t id = 0, old_id = srv->dock_display;
+	struct ws_display *d, *dd = display_dock(srv, srv->dock_edge);
+	ws_rect_t r, old;
+	uint32_t old_id = srv->dock_display;
+	bool changed = false;
+	unsigned i;
 
-	if (dd != NULL && dd != srv->main) {
-		id = dd->id;
+	/* the Dock's display, for the log and window_place_clear() */
+	srv->dock_display = dd != NULL && dd != srv->main ? dd->id : 0;
+	srv->dock_usable = (ws_rect_t){ 0, 0, 0, 0 };
+	if (srv->dock_display != 0) {
 		r = dd->frame;
 		dock_strip(srv, &r);
+		srv->dock_usable = r;
+		if (old_id != srv->dock_display)
+			ws_info("the Dock is on display %s", dd->connector);
 	}
-	if (id == old_id && rects_equal(&r, &old))
-		return;
-	srv->dock_display = id;
-	srv->dock_usable = r;
-	if (old_id != 0 && old_id != id) {
-		/* the Dock left that display: its windows get their frames
-		   back */
-		struct ws_display *od = display_lookup(srv, old_id);
-
-		if (od != NULL)
-			windows_keep_clear(srv, &od->frame, &old, &od->frame);
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		if (d == srv->main) {
+			d->usable = srv->usable;
+			continue;
+		}
+		other_usable_compute(srv, d, &r);
+		old = d->usable.width > 0 ? d->usable : d->frame;
+		if (d->usable.width > 0 && rects_equal(&r, &d->usable))
+			continue;
+		d->usable = r;
+		changed = true;
+		ws_info("display %s: usable area %d,%d %dx%d", d->connector,
+		    r.x, r.y, r.width, r.height);
+		if (display_shows(d)) {
+			/* a display that moved: what was inside it before
+			   counts from its new place */
+			if (old.x < d->frame.x || old.y < d->frame.y ||
+			    old.x + old.width > d->frame.x + d->frame.width ||
+			    old.y + old.height > d->frame.y + d->frame.height)
+				old = d->frame;
+			windows_keep_clear(srv, &d->frame, &old, &r);
+		}
 	}
-	if (id != 0) {
-		ws_info("the Dock is on display %s: its usable area %d,%d "
-		    "%dx%d", dd->connector, r.x, r.y, r.width, r.height);
-		windows_keep_clear(srv, &dd->frame, id == old_id ? &old :
-		    &dd->frame, &r);
-	}
-	if (srv->started)
+	if (changed && srv->started)
 		display_changed_notify(srv);
 }
 
@@ -294,6 +332,7 @@ screen_changed(struct ws_server *srv)
 	screen_usable_compute(srv, &r);
 	usable_set(srv, &r);
 	dock_area_update(srv);
+	menubar_displays_changed(srv);	/* every display's strip */
 	display_clamp(srv, &srv->ptr_x, &srv->ptr_y);
 	damage_all(srv);
 	cursor_update(srv);
@@ -317,6 +356,7 @@ screen_displays_changed(struct ws_server *srv)
 	    menu_bar_height(srv) != srv->usable_menu_bar)
 		usable_set(srv, &r);
 	dock_area_update(srv);
+	menubar_displays_changed(srv);	/* every display's strip */
 	display_clamp(srv, &srv->ptr_x, &srv->ptr_y);
 	damage_all(srv);
 	cursor_update(srv);

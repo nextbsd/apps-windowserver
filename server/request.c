@@ -238,10 +238,11 @@ handle_inject(struct ws_server *srv, struct ws_client *c,
 
 static void
 handle_snapshot(struct ws_server *srv, struct ws_client *c,
-    struct ws_mach_item *item, uint32_t seq)
+    struct ws_mach_item *item, uint32_t seq, uint32_t display)
 {
+	struct ws_display *d = NULL;
 	ws_event_t ev;
-	uint32_t stride;
+	uint32_t stride, width = srv->panel_width, height = srv->panel_height;
 	int fd;
 
 	if (!may_inject(srv, item)) {
@@ -259,15 +260,24 @@ handle_snapshot(struct ws_server *srv, struct ws_client *c,
 		ws_info("snapshot for %s (pid %d, uid %d), exempt from "
 		    "consent", c->app_name, (int)item->sender_pid,
 		    (int)item->sender_euid);
-	fd = snapshot_memfd(srv, &stride);
+	/* `value`: a display (servers with WS_SERVER_DISPLAYS), 0 = the
+	   main one */
+	if (display != 0 && (d = display_lookup(srv, display)) == NULL) {
+		reply_status(item, seq, ENOENT);
+		return;
+	}
+	if (d != NULL && d != srv->main)
+		fd = snapshot_display_memfd(srv, d, &stride, &width, &height);
+	else
+		fd = snapshot_memfd(srv, &stride);
 	if (fd < 0) {
 		reply_status(item, seq, errno);
 		return;
 	}
 	reply_status(item, seq, 0);
 	event_init(srv, &ev, WS_EVENT_SNAPSHOT, sizeof(ev.u.snapshot), 0);
-	ev.u.snapshot.width = srv->panel_width;	/* pixels */
-	ev.u.snapshot.height = srv->panel_height;
+	ev.u.snapshot.width = width;	/* pixels */
+	ev.u.snapshot.height = height;
 	ev.u.snapshot.stride = stride;
 	ev.u.snapshot.format = WS_FORMAT_XRGB8888;
 	ev.u.snapshot.fd = -1;
@@ -901,7 +911,7 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		break;
 	}
 	case WS_MSG_SNAPSHOT:
-		handle_snapshot(srv, c, item, h->seq);
+		handle_snapshot(srv, c, item, h->seq, (uint32_t)value);
 		return;
 	case WS_MSG_LIST_WINDOWS:
 		handle_list(srv, c, item, (uint32_t)value);

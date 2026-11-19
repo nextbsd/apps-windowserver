@@ -214,27 +214,34 @@ void
 window_place_clear(struct ws_server *srv, struct ws_window *w)
 {
 	ws_rect_t scr = display_main_frame(srv), u = srv->usable;
-	struct ws_display *dd = display_lookup(srv, srv->dock_display);
+	struct ws_display *d;
 	ws_rect_t r;
+	unsigned i;
 
 	if (w->clear_shown)
 		return;
 	w->clear_shown = true;
-	/* on the Dock's display when that isn't the main one */
-	if (dd != NULL && srv->dock_usable.width > 0 &&
-	    rect_overlaps(&w->frame, &dd->frame) &&
-	    !rect_overlaps(&w->frame, &scr)) {
-		scr = dd->frame;
-		u = srv->dock_usable;
-	}
+	/* on another display when it isn't on the main one: each has its
+	   own menu bar strip, and the Dock's when the Dock is there */
+	if (!rect_overlaps(&w->frame, &scr))
+		for (i = 0; i < srv->ndisplays; i++) {
+			d = srv->displays[i];
+			if (d == srv->main || !display_shows(d) ||
+			    !rect_overlaps(&w->frame, &d->frame))
+				continue;
+			scr = d->frame;
+			screen_usable_of(srv, d, &u);
+			break;
+		}
 	if (!clear_candidate(srv, w, true, &scr))
 		return;
 	r = fit(w, &w->frame, &scr, &u);
 	if (rect_eq(&r, &w->frame))
 		return;
-	ws_debug("window %u (%s) opened under the Dock: %d,%d %dx%d -> "
-	    "%d,%d %dx%d", w->id, w->owner->app_name, w->frame.x, w->frame.y,
-	    w->frame.width, w->frame.height, r.x, r.y, r.width, r.height);
+	ws_debug("window %u (%s) opened under the Dock or a menu bar strip: "
+	    "%d,%d %dx%d -> %d,%d %dx%d", w->id, w->owner->app_name,
+	    w->frame.x, w->frame.y, w->frame.width, w->frame.height, r.x, r.y,
+	    r.width, r.height);
 	window_server_frame(srv, w, &r);
 }
 

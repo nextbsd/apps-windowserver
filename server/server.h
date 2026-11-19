@@ -784,6 +784,9 @@ struct ws_display {
 	void		*render;	/* the renderer's */
 	bool		flip_pending;
 	double		gamma_r, gamma_g, gamma_b;	/* Night Shift, applied */
+	/* its usable area as last worked out, for a display that isn't
+	   the main one (screen.c): 0 x 0 before the first time */
+	ws_rect_t	usable;
 };
 
 struct ws_server {
@@ -951,6 +954,14 @@ struct ws_server {
 	uint64_t	bar_hold_until;
 	bool		bar_fallback;
 	ws_rect_t	bar_fallback_rect;
+	/* Every display's strip (apps-windowserver#100): the display
+	   with focus, where the live bar and the status items are (its
+	   id, 0 = the main display), the key window that last put it
+	   there, and the strips' height as last drawn. The others show
+	   dimmed copies. */
+	uint32_t	bar_display;
+	struct ws_window *bar_key;
+	int32_t		bar_strips_height;
 	uint32_t	bar_color;	/* 0xRRGGBB */
 	uint64_t	si_next_serial;
 	uint32_t	status_items_width;
@@ -1143,6 +1154,15 @@ void	menubar_timer(struct ws_server *srv);
 void	menubar_press(struct ws_server *srv, struct ws_window *w);
 bool	menubar_may_point(struct ws_server *srv, struct ws_client *a);
 void	menubar_composite(struct ws_server *srv, pixman_region32_t *region);
+void	menubar_composite_copies(struct ws_server *srv,
+	    pixman_region32_t *region);
+bool	menubar_covers(struct ws_server *srv, double x, double y);
+bool	menubar_copy_press(struct ws_server *srv);
+void	menubar_key_changed(struct ws_server *srv);
+void	menubar_displays_changed(struct ws_server *srv);
+struct ws_display *menubar_focus_display(struct ws_server *srv);
+int32_t	menubar_strip_height(struct ws_server *srv,
+	    const struct ws_display *d);
 void	window_stack_show(struct ws_server *srv, struct ws_window *w,
 	    bool show);
 int	screen_resize(struct ws_server *srv, uint32_t width, uint32_t height);
@@ -1430,8 +1450,12 @@ void	compositor_fini(struct ws_server *srv);
 void	compositor_repaint(struct ws_server *srv);
 void	composite_window(struct ws_server *srv, struct ws_window *w,
 	    const pixman_box32_t *ext, double opacity);
+void	composite_window_copy(struct ws_server *srv, struct ws_window *w,
+	    int32_t x, int32_t y, int32_t maxw, int32_t maxh, double opacity);
 void	compositor_present_done(struct ws_server *srv);
 int	snapshot_memfd(struct ws_server *srv, uint32_t *stride);
+int	snapshot_display_memfd(struct ws_server *srv, struct ws_display *d,
+	    uint32_t *stride, uint32_t *width, uint32_t *height);
 void	compositor_capture_overlays(struct ws_server *srv, bool hide,
 	    bool cursor);
 bool	compositor_cursor_in_shadow(struct ws_server *srv);

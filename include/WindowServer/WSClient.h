@@ -396,6 +396,10 @@ typedef struct ws_snapshot {
 } ws_snapshot_t;
 
 int		 ws_snapshot(ws_connection_t *conn, ws_snapshot_t *out);
+/* One display's panel (WS_SERVER_DISPLAYS; 0: the main display's).
+   Older servers send the main display's whatever the id. */
+int		 ws_snapshot_display(ws_connection_t *conn, uint32_t display,
+    ws_snapshot_t *out);
 void		 ws_snapshot_free(ws_snapshot_t *snap);
 /*
  * Screen capture (servers with WS_SERVER_CAPTURE, else ENOTSUP; see
