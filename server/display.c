@@ -1769,9 +1769,10 @@ any_mirror(struct ws_server *srv)
 
 /*
  * Mirroring begins: remember the arrangement, as places relative to
- * one another, so turning it off gives it back (macOS does); the
- * desktop's corner moves while mirrored, and swaps of the source
- * ("Optimize for") don't change it.
+ * one another, and the main display, so turning it off gives them back
+ * (macOS does); the desktop's corner moves while mirrored, the source
+ * becomes the main display, and swaps of the source ("Optimize for")
+ * don't change what's remembered.
  */
 static void
 unmirrored_save(struct ws_server *srv)
@@ -1780,6 +1781,8 @@ unmirrored_save(struct ws_server *srv)
 	unsigned i;
 
 	srv->nunmirrored = 0;
+	strlcpy(srv->unmirrored_main, srv->main != NULL ?
+	    srv->main->edid_id : "", sizeof(srv->unmirrored_main));
 	for (i = 0; i < srv->ndisplays; i++) {
 		d = srv->displays[i];
 		if (!display_shows(d))
@@ -1795,7 +1798,8 @@ unmirrored_save(struct ws_server *srv)
 /*
  * d stopped mirroring: its place from before. When none mirrors any
  * more, every display goes back to its place, offset so the displays
- * that stayed put stay put. A display with no place is placed anew.
+ * that stayed put stay put, and the main display from before is main
+ * again. A display with no place is placed anew.
  */
 static void
 unmirrored_restore(struct ws_server *srv, struct ws_display *d)
@@ -1836,9 +1840,14 @@ unmirrored_restore(struct ws_server *srv, struct ws_display *d)
 		}
 		o->frame.x = srv->unmirrored[k].x + dx;
 		o->frame.y = srv->unmirrored[k].y + dy;
+		if (all && srv->unmirrored_main[0] != '\0' &&
+		    strcmp(o->edid_id, srv->unmirrored_main) == 0)
+			srv->main = o;
 	}
-	if (all)
+	if (all) {
 		srv->nunmirrored = 0;
+		srv->unmirrored_main[0] = '\0';
+	}
 }
 
 /*

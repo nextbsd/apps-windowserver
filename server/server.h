@@ -820,6 +820,7 @@ struct ws_server {
 		char	edid_id[48];
 		int32_t	x, y;
 	}		unmirrored[WS_MAX_DISPLAYS];
+	char		unmirrored_main[48];	/* and the main display's EDID */
 	/* a change made with WS_DISPLAY_CONFIRM, until kept or reverted */
 	bool		display_pending;
 	uint64_t	display_pending_until;	/* ws_now_usec() */
