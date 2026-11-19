@@ -1619,9 +1619,14 @@ display_frame(struct ws_display *d, pixman_region32_t *out)
 	pixman_region32_init(&region);
 	pixman_region32_copy(&region, &own);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	if (age == 0 || age - 1 > gd->nhistory) {
-		/* a buffer of unknown age: all of it, black around a
-		   letterboxed mirror */
+	/*
+	 * history[0..nhistory) are the frames since the surface last
+	 * started over (gles_init): a buffer `age` frames old lacks
+	 * history[0..age-1). One older than nhistory was drawn before
+	 * that, for another layout: all of it, as for an unknown age,
+	 * black around a letterboxed mirror.
+	 */
+	if (age == 0 || age > gd->nhistory) {
 		pixman_region32_union_rect(&region, &region, 0, 0,
 		    gd->width, gd->height);
 		glDisable(GL_SCISSOR_TEST);
