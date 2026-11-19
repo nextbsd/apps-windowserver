@@ -319,9 +319,7 @@ settle
 settle
 expect_field "$BUILTIN" frame "0,0,1280x800" "after optimizing for the monitor, the built-in display is back on the left"
 expect_field "$EXT" frame "1280,0,1920x1080" "and the monitor on its right"
-expect_flag "$EXT" main "the monitor stays the main display"
-"$B/wsctl" displays "$BUILTIN" main || fail "main back to built-in"
-settle
+expect_flag "$BUILTIN" main "the main display from before mirroring is main again"
 expect_field "$EXT" frame "1280,0,1920x1080" "extending again, back where it was"
 expect_screen 3200x1080 "the desktop spans both again"
 
