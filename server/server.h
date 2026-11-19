@@ -609,6 +609,9 @@ struct ws_output_ops {
 	 * showing black until the next frame), or off. */
 	int	(*display_on)(struct ws_server *srv, struct ws_display *d);
 	void	(*display_off)(struct ws_server *srv, struct ws_display *d);
+	/* Display sleep: d's DPMS off (blank) or on again */
+	void	(*blank)(struct ws_server *srv, struct ws_display *d,
+		    bool off);
 	/* Night Shift: scale d's red, green and blue (0..1) */
 	void	(*gamma)(struct ws_server *srv, struct ws_display *d,
 		    double r, double g, double b);
@@ -799,6 +802,13 @@ struct ws_server {
 					   is on */
 	uint32_t	next_display_id;
 	bool		lid_closed;
+	/* display sleep (display.c): the displays are off because powerd
+	   said the display should sleep, until it says otherwise or input
+	   comes */
+	bool		displays_asleep;
+	int		display_status_token;	/* notify(3); -2 = not yet,
+						   -1 = none */
+	int		display_status_seen;	/* its last state, -1 = none */
 	bool		started;	/* the compositor has images: display
 					   changes go all the way */
 	char		arrangement[512]; /* the display set's key in the
@@ -1022,6 +1032,8 @@ bool	display_default_ok(const char *value);
 bool	display_night_shift_ok(const struct ws_config *cfg, const char *key);
 void	display_night_shift(struct ws_server *srv);
 void	display_lid(struct ws_server *srv, bool closed);
+void	display_sleep(struct ws_server *srv, bool asleep);
+void	display_wake_input(struct ws_server *srv);
 void	display_list(struct ws_server *srv, struct ws_client *c);
 void	display_list_modes(struct ws_server *srv, struct ws_client *c,
 	    uint32_t id);

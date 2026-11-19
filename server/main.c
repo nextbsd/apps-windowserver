@@ -225,6 +225,8 @@ main(int argc, char **argv)
 	srv->tty_fd = -1;
 	srv->keymap_fd = -1;
 	srv->next_client_id = 1;
+	srv->display_status_seen = -1;
+	srv->display_status_token = -2;
 	srv->next_window_id = 1;
 
 	while ((ch = getopt_long(argc, argv, "vh", longopts, NULL)) != -1) {
