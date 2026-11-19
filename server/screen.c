@@ -28,27 +28,15 @@ menu_bar_height(struct ws_server *srv)
 	return srv->menu_bar > h / 4 ? h / 4 : srv->menu_bar;
 }
 
-/* The usable area for the current screen, menu bar and Dock. */
-void
-screen_usable_compute(struct ws_server *srv, ws_rect_t *r)
+static bool rects_equal(const ws_rect_t *a, const ws_rect_t *b);
+
+/* The Dock's strip off r, its display's frame (or what's left of it).
+   Never more than half of it. */
+static void
+dock_strip(struct ws_server *srv, ws_rect_t *r)
 {
 	uint32_t t = srv->dock_thickness;
-	uint32_t mb;
 
-	*r = display_main_frame(srv);
-
-	/*
-	 * The menu bar strip along the top comes off first: a top Dock sits
-	 * directly below it, and its thickness counts from the bar down.
-	 * Checked against the screen when the app said so; the screen may
-	 * have shrunk since. Never more than a quarter of it.
-	 */
-	mb = menu_bar_height(srv);
-	r->y += (int32_t)mb;
-	r->height -= (int32_t)mb;
-
-	/* The Dock was checked against the screen when it said so; the
-	 * screen may have shrunk since. Never more than half of it. */
 	switch (srv->dock_edge) {
 	case WS_DOCK_EDGE_LEFT:
 	case WS_DOCK_EDGE_RIGHT:
@@ -69,6 +57,89 @@ screen_usable_compute(struct ws_server *srv, ws_rect_t *r)
 	default:
 		break;
 	}
+}
+
+/*
+ * The usable area for the current screen, menu bar and Dock: the main
+ * display's. The Dock's strip comes off it only when the Dock is on it
+ * (display_dock); a left or right Dock with a display beyond that edge
+ * is on that display instead.
+ */
+void
+screen_usable_compute(struct ws_server *srv, ws_rect_t *r)
+{
+	struct ws_display *dd = display_dock(srv, srv->dock_edge);
+	uint32_t mb;
+
+	*r = display_main_frame(srv);
+
+	/*
+	 * The menu bar strip along the top comes off first: a top Dock sits
+	 * directly below it, and its thickness counts from the bar down.
+	 * Checked against the screen when the app said so; the screen may
+	 * have shrunk since. Never more than a quarter of it.
+	 */
+	mb = menu_bar_height(srv);
+	r->y += (int32_t)mb;
+	r->height -= (int32_t)mb;
+
+	/* The Dock was checked against the screen when it said so; the
+	 * screen may have shrunk since. */
+	if (dd == NULL || dd == srv->main)
+		dock_strip(srv, r);
+}
+
+/* Any display's usable area (ws_display_info_t.usable). */
+void
+screen_usable_of(struct ws_server *srv, const struct ws_display *d,
+    ws_rect_t *r)
+{
+	if (d == srv->main && srv->usable.width > 0)
+		*r = srv->usable;
+	else if (d->id == srv->dock_display && srv->dock_usable.width > 0)
+		*r = srv->dock_usable;
+	else
+		*r = d->frame;
+}
+
+/*
+ * The Dock on a display that isn't the main one: work its usable area
+ * out again, keep windows there clear of the Dock, and if it changed,
+ * tell everyone the displays changed (their usable areas are in the
+ * display list).
+ */
+static void
+dock_area_update(struct ws_server *srv)
+{
+	struct ws_display *dd = display_dock(srv, srv->dock_edge);
+	ws_rect_t r = { 0, 0, 0, 0 }, old = srv->dock_usable;
+	uint32_t id = 0, old_id = srv->dock_display;
+
+	if (dd != NULL && dd != srv->main) {
+		id = dd->id;
+		r = dd->frame;
+		dock_strip(srv, &r);
+	}
+	if (id == old_id && rects_equal(&r, &old))
+		return;
+	srv->dock_display = id;
+	srv->dock_usable = r;
+	if (old_id != 0 && old_id != id) {
+		/* the Dock left that display: its windows get their frames
+		   back */
+		struct ws_display *od = display_lookup(srv, old_id);
+
+		if (od != NULL)
+			windows_keep_clear(srv, &od->frame, &old, &od->frame);
+	}
+	if (id != 0) {
+		ws_info("the Dock is on display %s: its usable area %d,%d "
+		    "%dx%d", dd->connector, r.x, r.y, r.width, r.height);
+		windows_keep_clear(srv, &dd->frame, id == old_id ? &old :
+		    &dd->frame, &r);
+	}
+	if (srv->started)
+		display_changed_notify(srv);
 }
 
 static bool
@@ -107,7 +178,12 @@ usable_set(struct ws_server *srv, const ws_rect_t *r)
 	send_usable(srv);
 	window_tiles_place(srv);
 	tiling_changed(srv);		/* tiling lays out again */
-	windows_keep_clear(srv, &old);	/* the windows that float move */
+	if (srv->main != NULL) {
+		ws_rect_t m = display_main_frame(srv);
+
+		/* the windows that float move */
+		windows_keep_clear(srv, &m, &old, &srv->usable);
+	}
 	srv->ov.dirty = true;		/* the overview lays out again */
 }
 
@@ -122,10 +198,10 @@ screen_usable_update(struct ws_server *srv)
 	ws_rect_t r;
 
 	screen_usable_compute(srv, &r);
-	if (rects_equal(&r, &srv->usable) &&
-	    menu_bar_height(srv) == srv->usable_menu_bar)
-		return;
-	usable_set(srv, &r);
+	if (!rects_equal(&r, &srv->usable) ||
+	    menu_bar_height(srv) != srv->usable_menu_bar)
+		usable_set(srv, &r);
+	dock_area_update(srv);
 }
 
 /* ---- the menu bar strip ---- */
@@ -214,6 +290,7 @@ screen_changed(struct ws_server *srv)
 	}
 	screen_usable_compute(srv, &r);
 	usable_set(srv, &r);
+	dock_area_update(srv);
 	display_clamp(srv, &srv->ptr_x, &srv->ptr_y);
 	damage_all(srv);
 	cursor_update(srv);
@@ -236,6 +313,7 @@ screen_displays_changed(struct ws_server *srv)
 	if (memcmp(&r, &srv->usable, sizeof(r)) != 0 ||
 	    menu_bar_height(srv) != srv->usable_menu_bar)
 		usable_set(srv, &r);
+	dock_area_update(srv);
 	display_clamp(srv, &srv->ptr_x, &srv->ptr_y);
 	damage_all(srv);
 	cursor_update(srv);

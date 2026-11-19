@@ -841,6 +841,34 @@ display_main_frame(struct ws_server *srv)
 	return srv->main != NULL ? srv->main->frame : r;
 }
 
+/*
+ * The display the Dock goes on for an edge, as on macOS: left or right,
+ * the display furthest that way (its outer edge, never one between two
+ * displays); top or bottom, the main display. Ties go to the main
+ * display, then to the order WS_MSG_LIST_DISPLAYS gives, as the Dock
+ * picks its screen.
+ */
+struct ws_display *
+display_dock(struct ws_server *srv, uint32_t edge)
+{
+	struct ws_display *d, *best = srv->main;
+	unsigned i;
+
+	if (best == NULL || (edge != WS_DOCK_EDGE_LEFT &&
+	    edge != WS_DOCK_EDGE_RIGHT))
+		return best;
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		if (d == srv->main || !display_shows(d))
+			continue;
+		if (edge == WS_DOCK_EDGE_LEFT ? d->frame.x < best->frame.x :
+		    d->frame.x + d->frame.width >
+		    best->frame.x + best->frame.width)
+			best = d;
+	}
+	return best;
+}
+
 /* The display showing point x, y (not a mirror), or NULL. */
 struct ws_display *
 display_at(struct ws_server *srv, double x, double y)
@@ -1157,8 +1185,7 @@ info_fill(struct ws_server *srv, const struct ws_display *d,
 		    (uint32_t)((srv->display_pending_until - now) / 1000) : 0;
 	}
 	di->frame = d->frame;
-	di->usable = d == srv->main && srv->usable.width > 0 ? srv->usable :
-	    d->frame;
+	screen_usable_of(srv, d, &di->usable);
 	di->scale = srv->scale ? srv->scale : 1;
 	di->panel_width = d->panel_width;
 	di->panel_height = d->panel_height;
@@ -1172,8 +1199,8 @@ info_fill(struct ws_server *srv, const struct ws_display *d,
 	strlcpy(di->connector, d->connector, sizeof(di->connector));
 }
 
-static void
-send_displays_changed(struct ws_server *srv)
+void
+display_changed_notify(struct ws_server *srv)
 {
 	struct ws_client *c;
 	ws_event_t ev;
@@ -1508,7 +1535,7 @@ relayout(struct ws_server *srv, bool force)
 		   desktop as it was until one comes */
 		ws_info("no display is on");
 		srv->display_active = false;
-		send_displays_changed(srv);
+		display_changed_notify(srv);
 		return;
 	}
 	for (i = 0; i < srv->ndisplays; i++) {
@@ -1611,7 +1638,7 @@ relayout(struct ws_server *srv, bool force)
 	}
 	if (overview_active(srv))
 		overview_close(srv);
-	send_displays_changed(srv);
+	display_changed_notify(srv);
 	if (minx != 0 || miny != 0) {
 		/* the desktop's corner moved: everything in it with it */
 		desktop_shift(srv, -minx, -miny);
@@ -1844,7 +1871,7 @@ display_configure(struct ws_server *srv, const ws_req_display_t *m)
 			return ENOENT;
 		ws_info("displays: keeping the new settings");
 		pending_end(srv);
-		send_displays_changed(srv);
+		display_changed_notify(srv);
 		return 0;
 	}
 	if (m->op == WS_DISPLAY_REVERT) {
