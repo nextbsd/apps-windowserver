@@ -212,6 +212,31 @@ stack_place(struct ws_server *srv, struct ws_window *w, int op,
 	}
 }
 
+/*
+ * Put w in the stack on top of its level, or take it out, for the
+ * server's own reasons (menubar.c: the menu bar windows and status
+ * items, which the server shows and hides itself). Nobody is told.
+ */
+void
+window_stack_show(struct ws_server *srv, struct ws_window *w, bool show)
+{
+	if (show == w->visible)
+		return;
+	if (show) {
+		w->visible = true;
+		stack_place(srv, w, WS_ORDER_ABOVE, NULL);
+		damage_rect(srv, &w->frame);
+		pointer_recheck(srv);
+	} else {
+		stack_unlink(srv, w);
+		w->visible = false;
+		damage_rect(srv, &w->frame);
+		pointer_window_gone(srv, w);
+		drag_window_gone(srv, w);
+	}
+	dock_list_changed(srv);
+}
+
 /* ---- key window and activation ---- */
 
 static bool
@@ -374,6 +399,7 @@ app_activate(struct ws_server *srv, struct ws_client *c, struct ws_window *key)
 	if (c == NULL) {
 		ws_debug("no active app");
 		keyboard_focus_update(srv);
+		menubar_update(srv);
 		return;
 	}
 	if (key != NULL)
@@ -386,8 +412,10 @@ app_activate(struct ws_server *srv, struct ws_client *c, struct ws_window *key)
 		send_simple(srv, c->key_window->owner,
 		    WS_EVENT_KEY_WINDOW_GAINED, c->key_window->id, 0);
 	keyboard_focus_update(srv);
-	/* Its menu bar, if it has said, sets the strip. */
+	/* Its menu bar, if it has said, sets the strip, and its bar
+	   window takes the outgoing app's place (menubar.c). */
 	menu_bar_update(srv);
+	menubar_update(srv);
 }
 
 /*
@@ -407,8 +435,8 @@ app_deactivate(struct ws_server *srv, struct ws_client *c)
 	if (srv->active != c)
 		return;
 	for (w = srv->stack_top; w != NULL; w = w->below) {
-		if (w->tile_for != NULL)
-			continue;	/* a minimized window's tile */
+		if (w->tile_for != NULL || menubar_managed(w))
+			continue;	/* a tile, a menu bar, a status item */
 		if (w->owner->app != c && !w->owner->dead &&
 		    (w->owner->flags & WS_CONNECT_TOOL) == 0 &&
 		    !dock_owns_app(srv, w->owner->app) &&
@@ -455,6 +483,8 @@ app_member_gone(struct ws_server *srv, struct ws_client *c)
 			m->app = heir;
 	heir->key_window = c->key_window;
 	c->key_window = NULL;
+	heir->bar_window = c->bar_window;
+	c->bar_window = NULL;
 	menu_bar_app_gone(srv, c, heir);
 	if (srv->active == c)
 		srv->active = heir;
@@ -574,6 +604,7 @@ window_destroy(struct ws_server *srv, struct ws_window *w)
 	struct ws_client *c = w->owner;
 
 	window_unminimize(srv, w);
+	menubar_window_gone(srv, w);
 	if (w->visible)
 		window_order(srv, w, WS_ORDER_OUT, NULL);
 	capture_window_gone(srv, w);
@@ -691,6 +722,9 @@ window_order(struct ws_server *srv, struct ws_window *w, int op,
 {
 	struct ws_client *c = w->owner;
 
+	/* The menu bar's windows are the server's to show (menubar.c). */
+	if (menubar_managed(w))
+		return;
 	/* Ordering a minimized window in restores it; ordering it out
 	 * (its app is hiding) just takes the tile away. */
 	window_unminimize(srv, w);
@@ -899,6 +933,8 @@ window_commit(struct ws_server *srv, struct ws_window *w, uint32_t flags,
 	pixman_region32_clear(&w->pending_damage);
 	if (flags & WS_COMMIT_FRAME_DONE)
 		w->frame_requested = true;
+	if (w->menu_bar_window)
+		menubar_committed(srv, w);
 }
 
 /* ---- window list (wsctl, the Dock) ---- */

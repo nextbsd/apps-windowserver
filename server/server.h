@@ -45,7 +45,8 @@ uint64_t ws_now_usec(void);
 				 WS_SERVER_MENU_BAR | WS_SERVER_ACTIVATE_RAISE | \
 				 WS_SERVER_DOCK_NOT_ACTIVE | WS_SERVER_TILING | \
 				 WS_SERVER_DRAG | WS_SERVER_CAPTURE | \
-				 WS_SERVER_SCALE | WS_SERVER_DISPLAYS)
+				 WS_SERVER_SCALE | WS_SERVER_DISPLAYS | \
+				 WS_SERVER_STATUS_ITEMS)
 
 /* The standard cursors with a built-in image (cursor.c): kinds 0 to
    WS_CURSOR_DRAG_LINK. */
@@ -263,6 +264,16 @@ struct ws_window {
 	uint32_t	min_height;	/* 0 = none */
 	uint32_t	max_width;
 	uint32_t	max_height;
+	/* the menu bar (menubar.c): the app's bar window or a status item,
+	   which the server places, stacks and shows itself; what the owner
+	   asked for meanwhile is kept for when it stops being one */
+	bool		menu_bar_window;
+	bool		status_item;
+	uint32_t	si_width;	/* points */
+	int32_t		si_priority;
+	uint64_t	si_serial;	/* when it became an item */
+	bool		client_visible;
+	int32_t		client_level;
 	struct ws_window *above;	/* visible stack, bottom -> top */
 	struct ws_window *below;
 	struct ws_window *next;		/* all windows */
@@ -302,6 +313,8 @@ struct ws_client {
 	/* WS_MSG_SET_MENU_BAR, on c->app only: the bar's height, or -1
 	   if the app never said */
 	int32_t		menu_bar;
+	/* WS_MSG_SET_MENU_BAR with a window, on c->app only (menubar.c) */
+	struct ws_window *bar_window;
 	struct ws_buffer *buffers;
 	struct ws_window *key_window;	/* app's key window (kept while
 					   inactive); set on c->app only, and
@@ -359,6 +372,7 @@ enum {
 	TIMER_CAPTURE,
 	TIMER_REPAINT,
 	TIMER_DISPLAY_REVERT,
+	TIMER_MENU_BAR,
 };
 
 /* The window overview (overview.c). */
@@ -909,6 +923,19 @@ struct ws_server {
 	   the Dock's strips, and the menu bar height last sent with it. */
 	ws_rect_t	usable;
 	uint32_t	usable_menu_bar;
+	/* The menu bar windows (menubar.c): the bar on screen, how long
+	   the outgoing one may stay for an incoming app with no bar yet,
+	   the empty bar drawn when none is on screen and its colour, the
+	   status items' serial and width, and the app whose status item
+	   was pressed last (it may grab the pointer). */
+	struct ws_window *bar_shown;
+	uint64_t	bar_hold_until;
+	bool		bar_fallback;
+	ws_rect_t	bar_fallback_rect;
+	uint32_t	bar_color;	/* 0xRRGGBB */
+	uint64_t	si_next_serial;
+	uint32_t	status_items_width;
+	struct ws_client *status_front;
 	/* The Dock's display's usable area, when that isn't the main
 	   display (a left or right Dock with a display beside the main
 	   one), else 0 x 0 (screen.c) */
@@ -1076,6 +1103,27 @@ int	menu_bar_set(struct ws_server *srv, struct ws_client *c,
 void	menu_bar_update(struct ws_server *srv);
 void	menu_bar_app_gone(struct ws_server *srv, struct ws_client *c,
 	    struct ws_client *heir);
+void	screen_send_usable(struct ws_server *srv);
+/* the menu bar windows and status items (menubar.c) */
+int	menubar_set_window(struct ws_server *srv, struct ws_client *c,
+	    struct ws_window *w, uint32_t height);
+int	menubar_status_item(struct ws_server *srv, struct ws_client *c,
+	    struct ws_window *w, uint32_t width, int32_t priority);
+bool	menubar_managed(const struct ws_window *w);
+void	menubar_client_order(struct ws_server *srv, struct ws_window *w,
+	    int op);
+void	menubar_client_level(struct ws_server *srv, struct ws_window *w,
+	    int32_t level);
+void	menubar_window_gone(struct ws_server *srv, struct ws_window *w);
+void	menubar_committed(struct ws_server *srv, struct ws_window *w);
+void	menubar_client_gone(struct ws_server *srv, struct ws_client *c);
+void	menubar_update(struct ws_server *srv);
+void	menubar_timer(struct ws_server *srv);
+void	menubar_press(struct ws_server *srv, struct ws_window *w);
+bool	menubar_may_point(struct ws_server *srv, struct ws_client *a);
+void	menubar_composite(struct ws_server *srv, pixman_region32_t *region);
+void	window_stack_show(struct ws_server *srv, struct ws_window *w,
+	    bool show);
 int	screen_resize(struct ws_server *srv, uint32_t width, uint32_t height);
 void	screen_changed(struct ws_server *srv);
 void	screen_displays_changed(struct ws_server *srv);

@@ -401,13 +401,22 @@ repaint_region(struct ws_server *srv, pixman_region32_t *region,
 			srv->renderer->fill(srv, &bg, b, n);
 		pixman_region32_fini(&uncov_back);
 		pixman_region32_fini(&uncov);
+		bool bar_drawn = !srv->bar_fallback;
+
 		for (w = srv->stack_bottom; w != NULL; w = w->above) {
+			/* the empty menu bar, under the bars' level */
+			if (!bar_drawn && w->level >= WS_LEVEL_MENU_BAR) {
+				menubar_composite(srv, region);
+				bar_drawn = true;
+			}
 			/* the border is outside the frame: drawn anyway */
 			if (w == srv->tiling.border)
 				tiling_draw_border(srv, w);
 			if (!w->culled)
 				composite_window(srv, w, ext, 1.0);
 		}
+		if (!bar_drawn)
+			menubar_composite(srv, region);
 	}
 
 	/* a drag's image, above everything but the cursor (drag.c) */

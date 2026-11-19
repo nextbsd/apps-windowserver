@@ -86,6 +86,8 @@ clear_candidate(struct ws_server *srv, const struct ws_window *w, bool shown,
 	/* an app's Mac-style menu bar sits in the strip it reserves */
 	if (w->level == WS_LEVEL_MAIN_MENU && c->app->menu_bar > 0)
 		return false;
+	if (menubar_managed(w))
+		return false;
 	/* the user is dragging it */
 	if (srv->buttons != 0 && srv->grab == w)
 		return false;

@@ -149,9 +149,10 @@ rects_equal(const ws_rect_t *a, const ws_rect_t *b)
 	    a->height == b->height;
 }
 
-/* Tell every connection the usable area. */
-static void
-send_usable(struct ws_server *srv)
+/* Tell every connection the usable area (and the menu bar's height and
+   the status items' width with it). */
+void
+screen_send_usable(struct ws_server *srv)
 {
 	struct ws_client *c;
 	ws_event_t ev;
@@ -162,6 +163,7 @@ send_usable(struct ws_server *srv)
 		ev.u.usable_area.screen_id = 1;
 		ev.u.usable_area.usable = srv->usable;
 		ev.u.usable_area.menu_bar = srv->usable_menu_bar;
+		ev.u.usable_area.status_items = srv->status_items_width;
 		client_send(srv, c, &ev, -1);
 	}
 }
@@ -175,7 +177,7 @@ usable_set(struct ws_server *srv, const ws_rect_t *r)
 	srv->usable_menu_bar = menu_bar_height(srv);
 	ws_info("usable area %d,%d %dx%d, menu bar %u", r->x, r->y, r->width,
 	    r->height, srv->usable_menu_bar);
-	send_usable(srv);
+	screen_send_usable(srv);
 	window_tiles_place(srv);
 	tiling_changed(srv);		/* tiling lays out again */
 	if (srv->main != NULL) {
@@ -185,6 +187,7 @@ usable_set(struct ws_server *srv, const ws_rect_t *r)
 		windows_keep_clear(srv, &m, &old, &srv->usable);
 	}
 	srv->ov.dirty = true;		/* the overview lays out again */
+	menubar_update(srv);		/* the bar and the status items */
 }
 
 /*

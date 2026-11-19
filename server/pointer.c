@@ -169,7 +169,7 @@ pointer_grab(struct ws_server *srv, struct ws_client *c, uint32_t mode)
 {
 	if (mode != WS_GRAB_POINTER && mode != WS_GRAB_OUTSIDE)
 		return EINVAL;
-	if ((c->flags & WS_CONNECT_TOOL) || !app_has_focus(srv, c->app) ||
+	if ((c->flags & WS_CONNECT_TOOL) || !menubar_may_point(srv, c->app) ||
 	    overview_active(srv))
 		return EPERM;
 	if (srv->pgrab != NULL && srv->pgrab != c)
@@ -201,7 +201,7 @@ pointer_warp(struct ws_server *srv, struct ws_client *c, struct ws_window *w,
 {
 	struct ws_window *t = srv->grab != NULL ? srv->grab : srv->hover;
 
-	if ((c->flags & WS_CONNECT_TOOL) || !app_has_focus(srv, c->app) ||
+	if ((c->flags & WS_CONNECT_TOOL) || !menubar_may_point(srv, c->app) ||
 	    overview_active(srv))
 		return EPERM;
 	if (srv->pgrab != c && (t == NULL || t->tile_for != NULL ||
@@ -228,7 +228,7 @@ pointer_query(struct ws_server *srv, struct ws_client *c,
 		return EPERM;
 	w = overview_active(srv) ? NULL :
 	    window_at_owned(srv, c, srv->ptr_x, srv->ptr_y);
-	if (!app_has_focus(srv, c->app) && w == NULL)
+	if (!menubar_may_point(srv, c->app) && w == NULL)
 		return EPERM;
 	memset(info, 0, sizeof(*info));
 	info->x = srv->ptr_x;
@@ -388,7 +388,11 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 			srv->grab_suppressed = false;
 			if (w == NULL || w->tile_for == NULL)
 				tile_select(srv, NULL);
-			if (w != NULL && w->tile_for == NULL) {
+			menubar_press(srv, w);
+			if (w != NULL && w->status_item) {
+				/* a status item: nothing activates, nothing
+				   becomes key (menubar.c) */
+			} else if (w != NULL && w->tile_for == NULL) {
 				c = w->owner->app;
 				/* A click outside the Dock while the user
 				   worked in it gives input back. */
