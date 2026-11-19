@@ -226,6 +226,26 @@ settle
 expect_field "$BUILTIN" frame "0,0,1280x800" "back on the left"
 expect_frame W1 "$W1" "windows back where they were"
 
+# ---- the Dock, as on macOS: a right Dock goes to the outer edge of the
+# rightmost display, a bottom one stays on the main display ----
+"$B/wsctl" dock edge right 64 30 >/dev/null 2>&1 &
+DOCKPID=$!
+settle
+sleep 0.5
+expect_usable "0,0 1280x800" "a right Dock isn't on the main display with one to its right"
+expect_field "$EXT" usable "1280,0,1856x1080" "the Dock's strip comes off the rightmost display"
+kill "$DOCKPID" 2>/dev/null; wait "$DOCKPID" 2>/dev/null
+settle
+"$B/wsctl" dock edge bottom 64 30 >/dev/null 2>&1 &
+DOCKPID=$!
+settle
+sleep 0.5
+expect_usable "0,0 1280x736" "a bottom Dock is on the main display"
+expect_field "$EXT" usable "1280,0,1920x1080" "the other display keeps all of itself"
+kill "$DOCKPID" 2>/dev/null; wait "$DOCKPID" 2>/dev/null
+settle
+expect_usable "0,0 1280x800" "no Dock: all of the main display"
+
 # ---- main display ----
 "$B/wsctl" displays "$EXT" main || fail "main"
 settle

@@ -63,10 +63,10 @@ rect_overlaps(const ws_rect_t *a, const ws_rect_t *b)
  * menu opens them.
  */
 static bool
-clear_candidate(struct ws_server *srv, const struct ws_window *w, bool shown)
+clear_candidate(struct ws_server *srv, const struct ws_window *w, bool shown,
+    const ws_rect_t *area)
 {
 	const struct ws_client *c = w->owner;
-	ws_rect_t scr = display_main_frame(srv);
 
 	if (!w->visible || w->minimized || w->tiled || w->tile_for != NULL ||
 	    w->frame.width <= 0 || w->frame.height <= 0)
@@ -89,8 +89,9 @@ clear_candidate(struct ws_server *srv, const struct ws_window *w, bool shown)
 	/* the user is dragging it */
 	if (srv->buttons != 0 && srv->grab == w)
 		return false;
-	/* windows kept off the screen (an app's offscreen helpers) */
-	return rect_overlaps(&w->frame, &scr);
+	/* windows on this display; not those kept off the screen (an
+	   app's offscreen helpers) */
+	return rect_overlaps(&w->frame, area);
 }
 
 /*
@@ -155,14 +156,15 @@ push(struct ws_server *srv, struct ws_window *w, const ws_rect_t *r)
 }
 
 /*
- * The usable area changed from *old to srv->usable: push the windows
- * out from under the Dock and the menu bar strip, and give the windows
- * pushed before back their frames where they fit again.
+ * The usable area of a display (`area`, its frame: the main display, or
+ * the one the Dock is on) changed from *old to *u: push the windows on
+ * it out from under the Dock and the menu bar strip, and give the
+ * windows pushed before back their frames where they fit again.
  */
 void
-windows_keep_clear(struct ws_server *srv, const ws_rect_t *old)
+windows_keep_clear(struct ws_server *srv, const ws_rect_t *area,
+    const ws_rect_t *old, const ws_rect_t *u)
 {
-	const ws_rect_t *u = &srv->usable;
 	struct ws_window *w;
 	ws_rect_t r;
 
@@ -173,7 +175,7 @@ windows_keep_clear(struct ws_server *srv, const ws_rect_t *old)
 			ws_debug("window %u: moved since it was pushed, "
 			    "its frame from before forgotten", w->id);
 		}
-		if (!clear_candidate(srv, w, false)) {
+		if (!clear_candidate(srv, w, false, area)) {
 			if (w->tiled)
 				w->clear_pushed = false;
 			continue;
@@ -209,15 +211,23 @@ windows_keep_clear(struct ws_server *srv, const ws_rect_t *old)
 void
 window_place_clear(struct ws_server *srv, struct ws_window *w)
 {
-	ws_rect_t scr = display_main_frame(srv);
+	ws_rect_t scr = display_main_frame(srv), u = srv->usable;
+	struct ws_display *dd = display_lookup(srv, srv->dock_display);
 	ws_rect_t r;
 
 	if (w->clear_shown)
 		return;
 	w->clear_shown = true;
-	if (!clear_candidate(srv, w, true))
+	/* on the Dock's display when that isn't the main one */
+	if (dd != NULL && srv->dock_usable.width > 0 &&
+	    rect_overlaps(&w->frame, &dd->frame) &&
+	    !rect_overlaps(&w->frame, &scr)) {
+		scr = dd->frame;
+		u = srv->dock_usable;
+	}
+	if (!clear_candidate(srv, w, true, &scr))
 		return;
-	r = fit(w, &w->frame, &scr, &srv->usable);
+	r = fit(w, &w->frame, &scr, &u);
 	if (rect_eq(&r, &w->frame))
 		return;
 	ws_debug("window %u (%s) opened under the Dock: %d,%d %dx%d -> "

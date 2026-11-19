@@ -218,10 +218,14 @@ dock_set_edge(struct ws_server *srv, struct ws_client *c, uint32_t edge,
 
 	if (edge > WS_DOCK_EDGE_BOTTOM)
 		return EINVAL;
-	/* on the main display's edge */
-	limit = (uint32_t)((edge == WS_DOCK_EDGE_LEFT ||
-	    edge == WS_DOCK_EDGE_RIGHT) ? display_main_frame(srv).width :
-	    display_main_frame(srv).height);
+	/* on its display's edge (display_dock) */
+	{
+		struct ws_display *dd = display_dock(srv, edge);
+		ws_rect_t f = dd != NULL ? dd->frame : display_main_frame(srv);
+
+		limit = (uint32_t)((edge == WS_DOCK_EDGE_LEFT ||
+		    edge == WS_DOCK_EDGE_RIGHT) ? f.width : f.height);
+	}
 	if (edge == WS_DOCK_EDGE_NONE)
 		thickness = 0;
 	else if (thickness > limit / 2)

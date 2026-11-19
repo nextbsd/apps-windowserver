@@ -909,6 +909,11 @@ struct ws_server {
 	   the Dock's strips, and the menu bar height last sent with it. */
 	ws_rect_t	usable;
 	uint32_t	usable_menu_bar;
+	/* The Dock's display's usable area, when that isn't the main
+	   display (a left or right Dock with a display beside the main
+	   one), else 0 x 0 (screen.c) */
+	uint32_t	dock_display;	/* its id, 0 = the main display's */
+	ws_rect_t	dock_usable;
 	/* window tiling (tiling.c) */
 	struct ws_tiling tiling;
 	/* drag and drop (drag.c) */
@@ -1020,6 +1025,8 @@ bool	display_shows(const struct ws_display *d);
 struct ws_display *display_at(struct ws_server *srv, double x, double y);
 void	display_clamp(struct ws_server *srv, double *x, double *y);
 ws_rect_t display_main_frame(struct ws_server *srv);
+struct ws_display *display_dock(struct ws_server *srv, uint32_t edge);
+void	display_changed_notify(struct ws_server *srv);
 void	display_back_to_panel(const struct ws_display *d,
 	    pixman_region32_t *in, pixman_region32_t *out);
 void	display_panel_to_points(const struct ws_display *d, double px,
@@ -1072,6 +1079,8 @@ void	menu_bar_app_gone(struct ws_server *srv, struct ws_client *c,
 int	screen_resize(struct ws_server *srv, uint32_t width, uint32_t height);
 void	screen_changed(struct ws_server *srv);
 void	screen_displays_changed(struct ws_server *srv);
+void	screen_usable_of(struct ws_server *srv, const struct ws_display *d,
+	    ws_rect_t *r);
 
 /* ---- request.c ---- */
 void	request_handle(struct ws_server *srv, struct ws_mach_item *item);
@@ -1132,7 +1141,8 @@ void	window_server_frame(struct ws_server *srv, struct ws_window *w,
 	    const ws_rect_t *frame);
 
 /* ---- clear.c ---- */
-void	windows_keep_clear(struct ws_server *srv, const ws_rect_t *old);
+void	windows_keep_clear(struct ws_server *srv, const ws_rect_t *area,
+	    const ws_rect_t *old, const ws_rect_t *usable);
 void	window_place_clear(struct ws_server *srv, struct ws_window *w);
 void	window_clear_owner_frame(struct ws_server *srv, struct ws_window *w);
 

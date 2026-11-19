@@ -585,7 +585,8 @@ home_rect(struct ws_server *srv, struct ws_window *w)
 			return w->tile->frame;
 		/* in the Dock: from the middle of the Dock's edge (the
 		   right one if it hasn't said) */
-		ws_rect_t m = display_main_frame(srv);
+		struct ws_display *dd = display_dock(srv, srv->dock_edge);
+		ws_rect_t m = dd != NULL ? dd->frame : display_main_frame(srv);
 
 		r.width = r.height = 64;
 		r.x = m.x + (m.width - 64) / 2;
