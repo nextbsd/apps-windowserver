@@ -1373,7 +1373,7 @@ static void
 relayout(struct ws_server *srv, bool force)
 {
 	struct old_display old[WS_MAX_DISPLAYS];
-	struct ws_display *d, *m, *placed[WS_MAX_DISPLAYS], *src;
+	struct ws_display *d, *m, *placed[WS_MAX_DISPLAYS], *src, *anchor;
 	struct ws_display *stored_main = NULL;
 	uint32_t ow = srv->width, oh = srv->height, os = srv->scale, w, h, s;
 	uint32_t opw[WS_MAX_DISPLAYS], oph[WS_MAX_DISPLAYS];
@@ -1476,33 +1476,50 @@ relayout(struct ws_server *srv, bool force)
 	}
 	srv->main = m;
 
-	/* places: the main display first, at its place, then the others
-	   nearest it first, snapped; new ones go to the right */
+	/*
+	 * Places, as macOS arranges them whichever display is main: the
+	 * built-in panel first (else the main display), at its place, then
+	 * the others with places, snapped; new ones go to the right, tops
+	 * aligned with the first.
+	 */
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		if (d->place_afresh) {
+			have[i] = false;
+			d->place_afresh = false;
+		}
+	}
+	anchor = m;
+	for (i = 0; i < srv->ndisplays; i++)
+		if (display_shows(srv->displays[i]) &&
+		    srv->displays[i]->builtin)
+			anchor = srv->displays[i];
 	n = 0;
-	if (m != NULL) {
+	if (anchor != NULL) {
 		for (i = 0; i < srv->ndisplays; i++)
-			if (srv->displays[i] == m)
+			if (srv->displays[i] == anchor)
 				break;
-		m->frame.x = have[i] ? wx[i] : 0;
-		m->frame.y = have[i] ? wy[i] : 0;
-		placed[n++] = m;
+		anchor->frame.x = have[i] ? wx[i] : 0;
+		anchor->frame.y = have[i] ? wy[i] : 0;
+		placed[n++] = anchor;
 	}
 	for (j = 0; j < 2; j++)
 		for (i = 0; i < srv->ndisplays; i++) {
 			d = srv->displays[i];
-			if (!display_shows(d) || d == m || (j == 0) != have[i])
+			if (!display_shows(d) || d == anchor ||
+			    (j == 0) != have[i])
 				continue;
 			if (have[i]) {
 				snap(d, placed, n, wx[i], wy[i]);
 			} else {
-				for (rx = m != NULL ? m->frame.x : 0, s = 0;
-				    s < n; s++)
+				for (rx = anchor != NULL ? anchor->frame.x : 0,
+				    s = 0; s < n; s++)
 					if (placed[s]->frame.x +
 					    placed[s]->frame.width > rx)
 						rx = placed[s]->frame.x +
 						    placed[s]->frame.width;
-				snap(d, placed, n, rx, m != NULL ?
-				    m->frame.y : 0);
+				snap(d, placed, n, rx, anchor != NULL ?
+				    anchor->frame.y : 0);
 			}
 			placed[n++] = d;
 		}
@@ -1722,6 +1739,91 @@ display_set_looks_like(struct ws_server *srv, const char *v)
 }
 
 /* ---- WS_MSG_DISPLAY_CONFIGURE ---- */
+
+static bool
+any_mirror(struct ws_server *srv)
+{
+	unsigned i;
+
+	for (i = 0; i < srv->ndisplays; i++)
+		if (srv->displays[i]->mirror_of != 0)
+			return (true);
+	return (false);
+}
+
+/*
+ * Mirroring begins: remember the arrangement, as places relative to
+ * one another, so turning it off gives it back (macOS does); the
+ * desktop's corner moves while mirrored, and swaps of the source
+ * ("Optimize for") don't change it.
+ */
+static void
+unmirrored_save(struct ws_server *srv)
+{
+	struct ws_display *d;
+	unsigned i;
+
+	srv->nunmirrored = 0;
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		if (!display_shows(d))
+			continue;
+		strlcpy(srv->unmirrored[srv->nunmirrored].edid_id, d->edid_id,
+		    sizeof(srv->unmirrored[0].edid_id));
+		srv->unmirrored[srv->nunmirrored].x = d->frame.x;
+		srv->unmirrored[srv->nunmirrored].y = d->frame.y;
+		srv->nunmirrored++;
+	}
+}
+
+/*
+ * d stopped mirroring: its place from before. When none mirrors any
+ * more, every display goes back to its place, offset so the displays
+ * that stayed put stay put. A display with no place is placed anew.
+ */
+static void
+unmirrored_restore(struct ws_server *srv, struct ws_display *d)
+{
+	struct ws_display *o, *ref = NULL;
+	int32_t dx = 0, dy = 0;
+	unsigned i, k;
+	bool all = !any_mirror(srv);
+
+	/* the offset: from a display that kept showing its own part */
+	for (i = 0; i < srv->ndisplays && ref == NULL; i++) {
+		o = srv->displays[i];
+		if (o == d || !display_shows(o))
+			continue;
+		for (k = 0; k < srv->nunmirrored; k++)
+			if (strcmp(srv->unmirrored[k].edid_id,
+			    o->edid_id) == 0) {
+				ref = o;
+				dx = o->frame.x - srv->unmirrored[k].x;
+				dy = o->frame.y - srv->unmirrored[k].y;
+				break;
+			}
+	}
+	for (i = 0; i < srv->ndisplays; i++) {
+		o = srv->displays[i];
+		if (!all && o != d)
+			continue;
+		if (!display_shows(o) && o != d)
+			continue;
+		for (k = 0; k < srv->nunmirrored; k++)
+			if (strcmp(srv->unmirrored[k].edid_id,
+			    o->edid_id) == 0)
+				break;
+		if (k == srv->nunmirrored) {
+			if (o == d)
+				o->place_afresh = true;
+			continue;
+		}
+		o->frame.x = srv->unmirrored[k].x + dx;
+		o->frame.y = srv->unmirrored[k].y + dy;
+	}
+	if (all)
+		srv->nunmirrored = 0;
+}
 
 /*
  * The state a confirmed change goes back to: every display's choices,
@@ -1961,22 +2063,27 @@ display_configure(struct ws_server *srv, const ws_req_display_t *m)
 	case WS_DISPLAY_SET_MIRROR:
 		if (m->arg == 0) {
 			if (d->mirror_of != 0) {
-				src = display_lookup(srv, d->mirror_of);
+				/* back where it was before mirroring, else
+				   placed as a new display */
 				d->mirror_of = 0;
-				/* to the right of what it showed */
-				if (src != NULL) {
-					d->frame.x = src->frame.x +
-					    src->frame.width;
-					d->frame.y = src->frame.y;
-				}
+				unmirrored_restore(srv, d);
 			}
 		} else {
 			src = display_lookup(srv, m->arg);
 			if (src == NULL || src == d || !src->on ||
-			    src->mirror_of != 0) {
+			    (src->mirror_of != 0 && src->mirror_of != d->id)) {
 				free(saved);
 				return EINVAL;
 			}
+			/*
+			 * src mirrored d: they trade places, src showing its
+			 * own part ("Optimize for" in Displays: the source
+			 * fills its panel, the mirrors fit its shape)
+			 */
+			if (src->mirror_of == d->id)
+				src->mirror_of = 0;
+			else if (!any_mirror(srv))
+				unmirrored_save(srv);	/* mirroring begins */
 			/* what mirrored d mirrors src now */
 			for (i = 0; i < srv->ndisplays; i++)
 				if (srv->displays[i]->mirror_of == d->id)

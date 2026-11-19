@@ -1269,7 +1269,10 @@ enum {
 					   without overlapping */
 	WS_DISPLAY_SET_MAIN,		/* it becomes the main display */
 	WS_DISPLAY_SET_MIRROR,		/* arg: the display it shows, 0: back
-					   to its own part of the desktop */
+					   to its own part of the desktop.
+					   If arg mirrors this display, the
+					   two swap: arg becomes the source
+					   (Displays' "Optimize for") */
 	WS_DISPLAY_KEEP,		/* keep the pending change (any
 					   display_id) */
 	WS_DISPLAY_REVERT,		/* undo the pending change now */

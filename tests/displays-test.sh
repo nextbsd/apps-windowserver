@@ -294,9 +294,35 @@ settle
 expect_flag "$EXT" "mirror-of=$BUILTIN" "the monitor mirrors the built-in display"
 expect_field "$EXT" frame "0,0,1280x800" "a mirror shows its source's part"
 expect_screen 1280x800 "the desktop is the built-in display's alone"
+# optimize for the monitor: the built-in display mirrors it instead
+"$B/wsctl" displays "$BUILTIN" mirror "$EXT" || fail "swap mirror"
+settle
+expect_flag "$BUILTIN" "mirror-of=$EXT" "the two swapped: the built-in display mirrors the monitor"
+expect_field "$EXT" frame "0,0,1920x1080" "the monitor shows its own part, filling it"
+expect_flag "$EXT" main "the source is the main display"
+expect_screen 1920x1080 "the desktop is the monitor's shape"
+# and back
+"$B/wsctl" displays "$EXT" mirror "$BUILTIN" || fail "swap back"
+settle
+expect_flag "$EXT" "mirror-of=$BUILTIN" "swapped back"
+expect_screen 1280x800 "the desktop is the built-in display's again"
 "$B/wsctl" displays "$EXT" mirror off || fail "mirror off"
 settle
-expect_field "$EXT" frame "1280,0,1920x1080" "extending again, on the right"
+expect_field "$BUILTIN" frame "0,0,1280x800" "the built-in display back on the left after mirroring"
+expect_field "$EXT" frame "1280,0,1920x1080" "the monitor back on its right"
+# optimized for the monitor, then mirroring off: places as before
+"$B/wsctl" displays "$EXT" mirror "$BUILTIN" || fail "mirror again"
+settle
+"$B/wsctl" displays "$BUILTIN" mirror "$EXT" || fail "optimize for the monitor"
+settle
+"$B/wsctl" displays "$BUILTIN" mirror off || fail "mirror off after optimize"
+settle
+expect_field "$BUILTIN" frame "0,0,1280x800" "after optimizing for the monitor, the built-in display is back on the left"
+expect_field "$EXT" frame "1280,0,1920x1080" "and the monitor on its right"
+expect_flag "$EXT" main "the monitor stays the main display"
+"$B/wsctl" displays "$BUILTIN" main || fail "main back to built-in"
+settle
+expect_field "$EXT" frame "1280,0,1920x1080" "extending again, back where it was"
 expect_screen 3200x1080 "the desktop spans both again"
 
 # ---- the lid ----
