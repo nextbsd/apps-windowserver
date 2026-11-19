@@ -1973,10 +1973,16 @@ display_configure(struct ws_server *srv, const ws_req_display_t *m)
 		} else {
 			src = display_lookup(srv, m->arg);
 			if (src == NULL || src == d || !src->on ||
-			    src->mirror_of != 0) {
+			    (src->mirror_of != 0 && src->mirror_of != d->id)) {
 				free(saved);
 				return EINVAL;
 			}
+			/*
+			 * src mirrored d: they trade places, src showing its
+			 * own part ("Optimize for" in Displays: the source
+			 * fills its panel, the mirrors fit its shape)
+			 */
+			src->mirror_of = 0;
 			/* what mirrored d mirrors src now */
 			for (i = 0; i < srv->ndisplays; i++)
 				if (srv->displays[i]->mirror_of == d->id)
