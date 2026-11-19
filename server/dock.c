@@ -218,8 +218,10 @@ dock_set_edge(struct ws_server *srv, struct ws_client *c, uint32_t edge,
 
 	if (edge > WS_DOCK_EDGE_BOTTOM)
 		return EINVAL;
-	limit = (edge == WS_DOCK_EDGE_LEFT || edge == WS_DOCK_EDGE_RIGHT) ?
-	    srv->width : srv->height;
+	/* on the main display's edge */
+	limit = (uint32_t)((edge == WS_DOCK_EDGE_LEFT ||
+	    edge == WS_DOCK_EDGE_RIGHT) ? display_main_frame(srv).width :
+	    display_main_frame(srv).height);
 	if (edge == WS_DOCK_EDGE_NONE)
 		thickness = 0;
 	else if (thickness > limit / 2)

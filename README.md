@@ -72,10 +72,11 @@ What works, tested headless:
 - Window tiling, switched on and off live, with the dwindle and master-and-stack layouts, gaps, an active-window border, floating windows, keys and the pointer (see [Window tiling](#window-tiling)).
 - Drag and drop between apps, mediated by the server, with the image above every window and the Dock and the cursor showing the operation (see [Drag and drop](#drag-and-drop)).
 - Screen and window capture for screen sharing and screenshots, with a Screen Recording consent prompt, an indicator and revocation (see [Screen capture](#screen-capture)).
+- Several displays, the way a MacBook does them: a display plugged in extends the desktop to the right of the built-in panel, each display gets its own "looks like" size and mode, the arrangement, main display and mirroring are kept per set of displays, windows of a display that goes away move to the main display and come back with it, and closing the lid turns the panel off while another display is on. Night Shift warms every display through its gamma ramp. See "Displays" in `WSProtocol.h`, and `wsctl displays`.
 
 Written but only compiled:
 
-- DRM/KMS output. It picks the card that has a connected display, sets the preferred mode, uses two dumb buffers with page flips (or `drmModeSetCrtc` if flips fail), and the hardware cursor, with a software cursor as fallback.
+- DRM/KMS output. It picks the card that has a connected display and drives every connected display on a CRTC of its own at its preferred mode (or the one chosen), with two dumb buffers and page flips (or `drmModeSetCrtc` if flips fail), and the hardware cursor on each, with a software cursor as fallback. Displays plugged in or out are noticed through a udev monitor of the drm subsystem (backed by IOKit on NextBSD), with a check of the connectors every couple of seconds in case an event is missed.
 - VT handling: no VT switching. The server takes over the VT that is on screen when it starts, puts it in `KD_GRAPHICS` and `K_RAW` with a raw termios, and locks switching with `VT_LOCKSWITCH`, so Ctrl+Alt+F*n* and `vidcontrol -s` can't take the screen away. It refuses to start if that VT is already in graphics mode or controlled by another process (Xorg, or another WindowServer). On exit, `SIGTERM`/`SIGINT` or a crash it unlocks switching, gives the same VT back its VT mode, `KD_TEXT`, keyboard mode and termios, and drops DRM master, so the console comes back as it was.
 - libinput on seat0 through the IOKit libudev, with xkbcommon (`evdev` rules), relative and absolute pointers, wheel and touchpad scrolling, and the touchpad settings in [Touchpad](#touchpad). Power and sleep keys are logged, never typed.
 - Dropping from root to `_windowserver` after the devices are open.
@@ -83,10 +84,10 @@ Written but only compiled:
 Not done yet:
 
 - The GNUstep backend (`libgnustep-nextbsd` in the libs-back fork) and a real `ws-session`.
-- Waiting for the GPU kext's IOKit match, and display hotplug through IOKit.
+- Waiting for the GPU kext's IOKit match.
 - Touch, tablets, gestures other than swipes up and down, and switches. Per-device keyboard settings.
 - Skipping windows hidden behind opaque ones while compositing.
-- Several displays (HiDPI is per display, but there's one display for now). Falling back to pixman when the GPU fails after startup.
+- Falling back to pixman when the GPU fails after startup. Window tiling and the overview use the main display only.
 - A focus-stealing policy: today any app can make itself active.
 - loginwindow, the lock shield and the app switcher. Their window levels are reserved.
 

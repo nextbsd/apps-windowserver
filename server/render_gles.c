@@ -6,13 +6,19 @@
  * own device. On a Raspberry Pi 5 that's vc4, and Mesa's kmsro renders
  * on v3d; on other machines whatever Mesa (or a vendor's GBM) drives.
  *
- * Each frame is drawn into a GBM surface the size of the panel; when it
- * ends, the DRM output flips to that buffer (gles_scanout) and the
- * buffer before it goes back to GBM once the flip is done
- * (gles_presented). srv->out stays NULL: the GBM buffers can't be read
- * back here (Mesa can't map a scanout buffer). Captures of the screen
- * read it with gles_screen_read instead (T8); snapshots still need the
- * pixman renderer.
+ * Each frame is drawn into the desktop: a texture (framebuffer object)
+ * of the whole backing store, which keeps everything drawn before, so a
+ * frame draws only its own damage. Then each display (display.c) gets
+ * its part of it copied, scaled where the sizes differ, into a GBM
+ * surface of its panel's size, only what that surface lacks (EGL buffer
+ * age); the DRM output flips each display to its new buffer
+ * (gles_scanout), and the buffer before goes back to GBM once the flip
+ * is done (gles_presented). That copy also scales a "looks like" size to
+ * the panel, shows a 1x display beside a 2x one, and letterboxes a
+ * mirror of another shape. srv->out stays NULL: the GBM buffers can't be
+ * read back here (Mesa can't map a scanout buffer). Captures of the
+ * screen read the main display's part with gles_screen_read instead
+ * (T8); snapshots still need the pixman renderer.
  *
  * gles_open() runs as root, before privileges are dropped, because
  * eglInitialize is where Mesa opens the render node.
@@ -21,9 +27,6 @@
  * damaged (gles_window_commit marks it, the next draw uploads it). Other
  * images (tiles, the cursor, drag images, overview previews) are still
  * uploaded whole each time they're drawn (T6).
- *
- * With EGL_EXT_buffer_age a frame repaints only what changed since the
- * GBM buffer it draws into was last on screen; without it, everything.
  *
  * GPU priority (#74): with EGL_IMG_context_priority the context asks to
  * be HIGH, so the composite jobs go ahead of a GPU-bound client's queued
@@ -39,18 +42,19 @@
  * times slower. CPU users of such a window's pixels (tiles, previews,
  * window captures) get them read back on the GPU (gles_buffer_read).
  *
- * Screen captures (T8): while something reads the screen, every draw is
- * done a second time into a texture of the panel's size, with the same
- * clip but only this frame's own damage, so the texture always holds
- * the whole screen. gles_screen_read reads back where it changed since
- * the last read, into a CPU image. Nobody reading for a few seconds
- * stops it. On GLES 3 the read goes into a pixel pack buffer with a
- * fence and lands at a later read, so it never waits for the GPU: the
- * image is a frame behind, and the reader is told where. The first
- * read after the copy starts still waits, so it gets a whole screen.
+ * Screen captures (T8): while something reads the screen, the main
+ * display's part of each frame is also copied into a texture of its
+ * panel's size, the same way as to the display. gles_screen_read reads
+ * back where it changed since the last read, into a CPU image. Nobody
+ * reading for a few seconds stops it. On GLES 3 the read goes into a
+ * pixel pack buffer with a fence and lands at a later read, so it never
+ * waits for the GPU: the image is a frame behind, and the reader is told
+ * where. The first read after the copy starts still waits, so it gets a
+ * whole screen.
  *
- * Still to come (nextbsd/nextbsd#642): a backing store of another size
- * than the panel (T7).
+ * WS_GL_VERIFY draws every frame a second time into a mirror of the
+ * desktop, the slow sure way (only the frame's own damage, every image
+ * uploaded whole), and compares the two.
  */
 
 #include <dirent.h>
@@ -134,14 +138,31 @@ struct gles_window {
 	pixman_region32_t dirty;
 };
 
+/* A display's GBM surface and its buffers (d->render). */
+struct gles_display {
+	struct gbm_surface *surface;
+	EGLSurface	egl_surface;
+	uint32_t	width, height;	/* the panel */
+	/* the backing pixels of the frames before this one, newest
+	   first (buffer age) */
+	pixman_region32_t history[GLES_HISTORY];
+	int		nhistory;
+	bool		swapped;	/* a new frame for gles_scanout */
+	struct gbm_bo	*front;		/* on screen */
+	struct gbm_bo	*retired;	/* on screen until the last flip */
+	struct gbm_bo	*pending;	/* flipped to, not yet on screen */
+};
+
 struct gles {
 	struct gbm_device *gbm;
-	struct gbm_surface *surface;
 	EGLDisplay	dpy;
 	EGLConfig	config;
 	EGLContext	ctx;
-	EGLSurface	egl_surface;
-	uint32_t	width, height;	/* the surface: the panel */
+	EGLSurface	current;	/* made current with ctx */
+	/* the desktop: the whole backing store */
+	GLuint		desk_fbo, desk_tex;
+	uint32_t	width, height;	/* its size */
+	bool		desk_fresh;	/* nothing in it yet: draw it all */
 	GLint		max_tex;	/* GL_MAX_TEXTURE_SIZE */
 	bool		bgra;		/* GL_EXT_texture_format_BGRA8888 */
 	bool		unpack_row;	/* GL_EXT_unpack_subimage */
@@ -153,41 +174,27 @@ struct gles {
 	PFNEGLCREATEIMAGEKHRPROC create_image;
 	PFNEGLDESTROYIMAGEKHRPROC destroy_image;
 	PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_texture;
-	pixman_region32_t history[GLES_HISTORY];	/* points */
-	int		nhistory;
 	GLuint		prog_tex, prog_fill;
 	GLint		tex_screen, tex_opacity, tex_opaque, tex_swizzle;
 	GLint		fill_screen, fill_color;
 	GLuint		tex;		/* reused for every image (T3) */
 	pixman_region32_t clip;		/* begin..end, backing pixels */
-	/*
-	 * WS_GL_VERIFY: a second copy of the screen, kept the slow sure
-	 * way (only each frame's own damage drawn, every image uploaded
-	 * whole), compared with each frame before it is shown.
-	 */
+	/* WS_GL_VERIFY: a second desktop, drawn the slow sure way, and
+	   compared with the first every frame */
 	bool		verify;
 	GLuint		mirror_fbo, mirror_tex;
-	/* the GBM buffers can't be read back (Mesa can't map a scanout
-	   buffer here), so they are simulated: one texture each, drawn
-	   exactly as the frame drawn into that buffer */
-#define GLES_SIM 4
-	GLuint		sim_fbo[GLES_SIM], sim_tex[GLES_SIM];
-	int		sim_of[64];	/* frame % 64 -> its sim buffer */
-	int		sim_cur;
-	pixman_region32_t frame_damage;	/* points, before buffer age */
+	pixman_region32_t frame_damage;	/* points: this frame's own */
 	pixman_region32_t mclip;	/* the mirror's clip, backing pixels */
 	uint8_t		*vpix[2];
 	unsigned long	vframes, vbad;
-	EGLint		egl_age;	/* what EGL said this frame */
-	struct { struct gbm_bo *bo; unsigned long frame; } seen[8];
-	/* screen captures (T8): the second copy of the screen, and what
-	   of it the CPU image lacks */
+	/* screen captures (T8): the main display's copy, and what of it the
+	   CPU image lacks */
 	bool		cap_on;
-	bool		cap_fresh;	/* not drawn whole yet */
+	bool		cap_fresh;	/* not copied whole yet */
 	uint64_t	cap_used;	/* ws_now_usec() of the last read */
 	GLuint		cap_fbo, cap_tex;
-	pixman_region32_t cap_clip;	/* this frame's, backing pixels */
-	pixman_region32_t cap_dirty;	/* not read back, backing pixels */
+	uint32_t	cap_w, cap_h;	/* the main display's panel */
+	pixman_region32_t cap_dirty;	/* not read back, panel pixels */
 	pixman_image_t	*cap_img;	/* x8r8g8b8, the panel's size */
 	uint8_t		*cap_rows;	/* glReadPixels lands here */
 	bool		read_bgra;	/* GL_EXT_read_format_bgra */
@@ -200,16 +207,13 @@ struct gles {
 	struct {
 		GLuint		buf;
 		gles_sync	fence;		/* NULL: not in flight */
-		pixman_region32_t rects;	/* what it holds, backing pixels */
+		pixman_region32_t rects;	/* what it holds, panel pixels */
 	} cap_pb[GLES_CAP_PBOS];
 	gles_fence_sync	fence_sync;
 	gles_client_wait_sync client_wait_sync;
 	gles_delete_sync delete_sync;
 	gles_map_buffer_range map_buffer_range;
 	gles_unmap_buffer unmap_buffer;
-	struct gbm_bo	*front;		/* on screen */
-	struct gbm_bo	*retired;	/* on screen until the last flip */
-	struct gbm_bo	*pending;	/* flipped to, not yet on screen */
 };
 
 static struct gles gl;
@@ -429,6 +433,7 @@ choose_config(void)
 }
 
 static void gles_fini(struct ws_server *srv);
+static void cap_stop(void);
 
 /*
  * GPU buffers need dmabuf import, EGLImage textures and a render node
@@ -532,53 +537,181 @@ create_context(void)
 	return ctx;
 }
 
+/* ---- displays' surfaces ---- */
+
+static bool
+make_current(EGLSurface surf)
+{
+	if (gl.current == surf)
+		return true;
+	if (!eglMakeCurrent(gl.dpy, surf, surf, gl.ctx)) {
+		ws_err("renderer: eglMakeCurrent: 0x%x", eglGetError());
+		return false;
+	}
+	gl.current = surf;
+	return true;
+}
+
+static void
+surface_free(struct ws_display *d)
+{
+	struct gles_display *gd = d->render;
+	int i;
+
+	if (gd == NULL)
+		return;
+	if (gl.current == gd->egl_surface && gd->egl_surface != EGL_NO_SURFACE) {
+		eglMakeCurrent(gl.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
+		    EGL_NO_CONTEXT);
+		gl.current = EGL_NO_SURFACE;
+	}
+	if (gd->surface != NULL) {
+		if (gd->pending != NULL)
+			gbm_surface_release_buffer(gd->surface, gd->pending);
+		if (gd->front != NULL)
+			gbm_surface_release_buffer(gd->surface, gd->front);
+		if (gd->retired != NULL)
+			gbm_surface_release_buffer(gd->surface, gd->retired);
+	}
+	if (gd->egl_surface != EGL_NO_SURFACE)
+		eglDestroySurface(gl.dpy, gd->egl_surface);
+	if (gd->surface != NULL)
+		gbm_surface_destroy(gd->surface);
+	for (i = 0; i < GLES_HISTORY; i++)
+		pixman_region32_fini(&gd->history[i]);
+	free(gd);
+	d->render = NULL;
+}
+
+/* d's GBM surface at its panel's size (the one it has, if it fits). */
+static bool
+surface_make(struct ws_display *d)
+{
+	struct gles_display *gd = d->render;
+	int i;
+
+	if (gd != NULL && gd->width == d->panel_width &&
+	    gd->height == d->panel_height)
+		return true;
+	surface_free(d);
+	gd = calloc(1, sizeof(*gd));
+	if (gd == NULL)
+		return false;
+	for (i = 0; i < GLES_HISTORY; i++)
+		pixman_region32_init(&gd->history[i]);
+	gd->egl_surface = EGL_NO_SURFACE;
+	d->render = gd;
+	gd->width = d->panel_width;
+	gd->height = d->panel_height;
+	gd->surface = gbm_surface_create(gl.gbm, gd->width, gd->height,
+	    GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+	if (gd->surface != NULL)
+		gd->egl_surface = eglCreateWindowSurface(gl.dpy, gl.config,
+		    (EGLNativeWindowType)gd->surface, NULL);
+	if (gd->egl_surface == EGL_NO_SURFACE) {
+		ws_info("renderer: no GBM surface for display %s (0x%x)",
+		    d->connector, eglGetError());
+		surface_free(d);
+		return false;
+	}
+	return true;
+}
+
+static void
+gles_display_gone(struct ws_server *srv, struct ws_display *d)
+{
+	(void)srv;
+	surface_free(d);
+}
+
+/* The desktop texture, width x height (the backing store). */
+static bool
+desk_make(uint32_t w, uint32_t h)
+{
+	if (gl.desk_fbo != 0 && gl.width == w && gl.height == h)
+		return true;
+	if (w > (uint32_t)gl.max_tex || h > (uint32_t)gl.max_tex) {
+		ws_info("renderer: gles2 can't hold a %ux%u desktop (largest "
+		    "texture %d); using pixman", w, h, gl.max_tex);
+		return false;
+	}
+	if (gl.desk_fbo != 0)
+		glDeleteFramebuffers(1, &gl.desk_fbo);
+	if (gl.desk_tex != 0)
+		glDeleteTextures(1, &gl.desk_tex);
+	glGenTextures(1, &gl.desk_tex);
+	glBindTexture(GL_TEXTURE_2D, gl.desk_tex);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)w, (GLsizei)h, 0,
+	    GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glGenFramebuffers(1, &gl.desk_fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl.desk_fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+	    GL_TEXTURE_2D, gl.desk_tex, 0);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
+	    GL_FRAMEBUFFER_COMPLETE) {
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		ws_info("renderer: no %ux%u desktop framebuffer; using pixman",
+		    w, h);
+		return false;
+	}
+	glDisable(GL_SCISSOR_TEST);
+	glClearColor(0, 0, 0, 1);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	gl.width = w;
+	gl.height = h;
+	gl.desk_fresh = true;
+	if (gl.verify) {
+		if (gl.mirror_fbo != 0)
+			glDeleteFramebuffers(1, &gl.mirror_fbo);
+		if (gl.mirror_tex != 0)
+			glDeleteTextures(1, &gl.mirror_tex);
+		glGenTextures(1, &gl.mirror_tex);
+		glBindTexture(GL_TEXTURE_2D, gl.mirror_tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)w,
+		    (GLsizei)h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glGenFramebuffers(1, &gl.mirror_fbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, gl.mirror_fbo);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		    GL_TEXTURE_2D, gl.mirror_tex, 0);
+		glClear(GL_COLOR_BUFFER_BIT);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		free(gl.vpix[0]);
+		free(gl.vpix[1]);
+		gl.vpix[0] = malloc((size_t)w * h * 4);
+		gl.vpix[1] = malloc((size_t)w * h * 4);
+	}
+	return true;
+}
+
+/* The context, once: made current with the first display's surface. */
 static int
-gles_init(struct ws_server *srv)
+context_init(struct ws_server *srv, struct ws_display *first)
 {
 	const char *ext, *renderer;
 	int i;
 
-	/* The backing store as big as the panel only, until T7. */
-	if (srv->back_width != srv->panel_width ||
-	    srv->back_height != srv->panel_height) {
-		ws_info("renderer: gles2 can't scale %ux%u to the %ux%u panel "
-		    "yet; using pixman", srv->back_width, srv->back_height,
-		    srv->panel_width, srv->panel_height);
-		return -1;
-	}
-	if (gl.ctx != EGL_NO_CONTEXT)
-		return 0;	/* same panel, same surface */
-	if (gl.dpy == EGL_NO_DISPLAY)
-		return -1;
 	eglBindAPI(EGL_OPENGL_ES_API);
 	if (!choose_config()) {
 		ws_info("renderer: no XRGB8888 EGL config; using pixman");
 		return -1;
 	}
 	gl.ctx = create_context();
-	gl.width = srv->panel_width;
-	gl.height = srv->panel_height;
-	gl.surface = gbm_surface_create(gl.gbm, gl.width, gl.height,
-	    GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
-	if (gl.ctx == EGL_NO_CONTEXT || gl.surface == NULL) {
+	if (gl.ctx == EGL_NO_CONTEXT || !surface_make(first)) {
 		ws_info("renderer: no GLES2 context or GBM surface; using "
 		    "pixman");
-		goto fail;
+		return -1;
 	}
-	gl.egl_surface = eglCreateWindowSurface(gl.dpy, gl.config,
-	    (EGLNativeWindowType)gl.surface, NULL);
-	if (gl.egl_surface == EGL_NO_SURFACE ||
-	    !eglMakeCurrent(gl.dpy, gl.egl_surface, gl.egl_surface, gl.ctx)) {
-		ws_info("renderer: EGL surface failed (0x%x); using pixman",
-		    eglGetError());
-		goto fail;
-	}
+	if (!make_current(((struct gles_display *)first->render)->egl_surface))
+		return -1;
 	renderer = (const char *)glGetString(GL_RENDERER);
 	if (strcmp(srv->cfg.renderer, "auto") == 0 &&
 	    software_renderer(renderer)) {
 		ws_info("renderer: %s is software; using pixman",
 		    renderer != NULL ? renderer : "GL");
-		goto fail;
+		return -1;
 	}
 	ext = (const char *)glGetString(GL_EXTENSIONS);
 	gl.bgra = ext != NULL && has_ext(ext, "GL_EXT_texture_format_BGRA8888");
@@ -593,7 +726,7 @@ gles_init(struct ws_server *srv)
 	gl.prog_tex = program(vs_tex, fs_tex);
 	gl.prog_fill = program(vs_fill, fs_fill);
 	if (gl.prog_tex == 0 || gl.prog_fill == 0)
-		goto fail;
+		return -1;
 	gl.tex_screen = glGetUniformLocation(gl.prog_tex, "screen");
 	gl.tex_opacity = glGetUniformLocation(gl.prog_tex, "opacity");
 	gl.tex_opaque = glGetUniformLocation(gl.prog_tex, "opaque");
@@ -606,56 +739,65 @@ gles_init(struct ws_server *srv)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
 	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-	glViewport(0, 0, (GLsizei)gl.width, (GLsizei)gl.height);
 	pixman_region32_init(&gl.clip);
 	pixman_region32_init(&gl.frame_damage);
 	pixman_region32_init(&gl.mclip);
-	pixman_region32_init(&gl.cap_clip);
 	pixman_region32_init(&gl.cap_dirty);
 	for (i = 0; i < GLES_CAP_PBOS; i++)
 		pixman_region32_init(&gl.cap_pb[i].rects);
 	gl.cap_on = false;
-	if (gl.verify) {
-		glGenTextures(1, &gl.mirror_tex);
-		glBindTexture(GL_TEXTURE_2D, gl.mirror_tex);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)gl.width,
-		    (GLsizei)gl.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-		glGenFramebuffers(1, &gl.mirror_fbo);
-		glBindFramebuffer(GL_FRAMEBUFFER, gl.mirror_fbo);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-		    GL_TEXTURE_2D, gl.mirror_tex, 0);
-		for (i = 0; i < GLES_SIM; i++) {
-			glGenTextures(1, &gl.sim_tex[i]);
-			glBindTexture(GL_TEXTURE_2D, gl.sim_tex[i]);
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-			    (GLsizei)gl.width, (GLsizei)gl.height, 0, GL_RGBA,
-			    GL_UNSIGNED_BYTE, NULL);
-			glGenFramebuffers(1, &gl.sim_fbo[i]);
-			glBindFramebuffer(GL_FRAMEBUFFER, gl.sim_fbo[i]);
-			glFramebufferTexture2D(GL_FRAMEBUFFER,
-			    GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-			    gl.sim_tex[i], 0);
-			glClearColor(1, 0, 1, 1);	/* garbage: magenta */
-			glClear(GL_COLOR_BUFFER_BIT);
-		}
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		memset(gl.sim_of, -1, sizeof(gl.sim_of));
-		gl.vpix[0] = malloc((size_t)gl.width * gl.height * 4);
-		gl.vpix[1] = malloc((size_t)gl.width * gl.height * 4);
+	if (gl.verify)
 		ws_warn("renderer: WS_GL_VERIFY: every frame is checked, slowly");
-	}
-	for (i = 0; i < GLES_HISTORY; i++)
-		pixman_region32_init(&gl.history[i]);
-	gl.nhistory = 0;
-	ws_info("renderer: gles2 on %s, %ux%u%s%s%s%s%s, GPU priority %s",
-	    renderer, gl.width,
-	    gl.height, gl.bgra ? ", BGRA textures" : "",
+	ws_info("renderer: gles2 on %s%s%s%s%s%s, largest texture %d, GPU "
+	    "priority %s", renderer, gl.bgra ? ", BGRA textures" : "",
 	    gl.unpack_row ? ", row length" : "",
 	    gl.buffer_age ? ", buffer age" : "",
 	    gl.dmabuf ? ", GPU buffers from " : "",
-	    gl.dmabuf ? gl.render_node : "",
+	    gl.dmabuf ? gl.render_node : "", gl.max_tex,
 	    gl.priority != NULL ? gl.priority :
 	    "default (no EGL_IMG_context_priority)");
+	return 0;
+}
+
+/*
+ * The desktop and every display's surface for the current layout
+ * (display.c): made the first time, and again for what changed.
+ */
+static int
+gles_init(struct ws_server *srv)
+{
+	struct ws_display *d, *first = NULL;
+	unsigned i;
+
+	if (gl.dpy == EGL_NO_DISPLAY)
+		return -1;
+	for (i = 0; i < srv->ndisplays && first == NULL; i++)
+		if (srv->displays[i]->on)
+			first = srv->displays[i];
+	if (first == NULL)
+		return -1;
+	if (gl.ctx == EGL_NO_CONTEXT && context_init(srv, first) < 0)
+		goto fail;
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		if (!d->on) {
+			surface_free(d);
+			continue;
+		}
+		if (!surface_make(d))
+			goto fail;
+		/* the surface may be new: it has nothing */
+		((struct gles_display *)d->render)->nhistory = 0;
+	}
+	if (!make_current(((struct gles_display *)first->render)->egl_surface) ||
+	    !desk_make(srv->back_width, srv->back_height))
+		goto fail;
+	if (gl.cap_on && srv->main != NULL &&
+	    (gl.cap_w != srv->main->panel_width ||
+	    gl.cap_h != srv->main->panel_height))
+		cap_stop();	/* started again at the main display's size */
+	ws_info("renderer: gles2 desktop %ux%u, %u display%s", gl.width,
+	    gl.height, srv->ndisplays, srv->ndisplays == 1 ? "" : "s");
 	return 0;
 fail:
 	gles_fini(srv);
@@ -704,21 +846,25 @@ cap_stop(void)
 }
 
 static bool
-cap_start(void)
+cap_start(struct ws_server *srv)
 {
 	int i;
 
+	if (srv->main == NULL)
+		return false;
+	gl.cap_w = srv->main->panel_width;
+	gl.cap_h = srv->main->panel_height;
 	gl.cap_img = pixman_image_create_bits(PIXMAN_x8r8g8b8,
-	    (int)gl.width, (int)gl.height, NULL, 0);
-	gl.cap_rows = malloc((size_t)gl.width * gl.height * 4);
+	    (int)gl.cap_w, (int)gl.cap_h, NULL, 0);
+	gl.cap_rows = malloc((size_t)gl.cap_w * gl.cap_h * 4);
 	if (gl.cap_img == NULL || gl.cap_rows == NULL) {
 		cap_stop();
 		return false;
 	}
 	glGenTextures(1, &gl.cap_tex);
 	glBindTexture(GL_TEXTURE_2D, gl.cap_tex);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)gl.width,
-	    (GLsizei)gl.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)gl.cap_w,
+	    (GLsizei)gl.cap_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 	glGenFramebuffers(1, &gl.cap_fbo);
 	glBindFramebuffer(GL_FRAMEBUFFER, gl.cap_fbo);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -730,6 +876,9 @@ cap_start(void)
 		cap_stop();
 		return false;
 	}
+	glDisable(GL_SCISSOR_TEST);
+	glClearColor(0, 0, 0, 1);
+	glClear(GL_COLOR_BUFFER_BIT);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	if (gl.pbo) {
 		/* each big enough for the whole screen: the rectangles of
@@ -740,7 +889,7 @@ cap_start(void)
 			glGenBuffers(1, &gl.cap_pb[i].buf);
 			glBindBuffer(GL_PIXEL_PACK_BUFFER, gl.cap_pb[i].buf);
 			glBufferData(GL_PIXEL_PACK_BUFFER,
-			    (GLsizeiptr)gl.width * gl.height * 4, NULL,
+			    (GLsizeiptr)gl.cap_w * gl.cap_h * 4, NULL,
 			    GL_STREAM_READ);
 		}
 		glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
@@ -760,26 +909,9 @@ cap_start(void)
 	gl.cap_fresh = true;
 	gl.cap_sync = true;
 	ws_info("renderer: screen capture copy started (%ux%u, %s readback%s)",
-	    gl.width, gl.height, gl.read_bgra ? "BGRA" : "RGBA",
+	    gl.cap_w, gl.cap_h, gl.read_bgra ? "BGRA" : "RGBA",
 	    gl.pbo ? ", pixel buffers" : ", blocking");
 	return true;
-}
-
-/* frame's own damage (points) at scale s, within back: the pixels a
-   copy that has every earlier frame lacks */
-static void
-own_clip(pixman_region32_t *dst, pixman_region32_t *back, int s)
-{
-	pixman_box32_t *b;
-	int i, n;
-
-	pixman_region32_clear(dst);
-	b = pixman_region32_rectangles(&gl.frame_damage, &n);
-	for (i = 0; i < n; i++)
-		pixman_region32_union_rect(dst, dst, b[i].x1 * s, b[i].y1 * s,
-		    (unsigned)((b[i].x2 - b[i].x1) * s),
-		    (unsigned)((b[i].y2 - b[i].y1) * s));
-	pixman_region32_intersect(dst, dst, back);
 }
 
 /* The rectangles to read back of r: r's own, or its extents when there
@@ -837,7 +969,7 @@ cap_read_now(pixman_region32_t *r)
 		if (w <= 0 || h <= 0)
 			continue;
 		/* GL rows are bottom up */
-		glReadPixels(b[i].x1, (GLint)gl.height - b[i].y2, w, h,
+		glReadPixels(b[i].x1, (GLint)gl.cap_h - b[i].y2, w, h,
 		    gl.read_bgra ? GL_BGRA_EXT : GL_RGBA, GL_UNSIGNED_BYTE,
 		    gl.cap_rows);
 		cap_copy(&b[i], gl.cap_rows);
@@ -867,7 +999,7 @@ cap_read_start(int k)
 		if (w <= 0 || h <= 0)
 			continue;
 		/* with a pack buffer bound, the pointer is an offset */
-		glReadPixels(b[i].x1, (GLint)gl.height - b[i].y2, w, h,
+		glReadPixels(b[i].x1, (GLint)gl.cap_h - b[i].y2, w, h,
 		    gl.read_bgra ? GL_BGRA_EXT : GL_RGBA, GL_UNSIGNED_BYTE,
 		    (void *)off);
 		off += (uintptr_t)w * h * 4;
@@ -903,7 +1035,7 @@ cap_read_end(int k, bool wait)
 	glBindBuffer(GL_PIXEL_PACK_BUFFER, gl.cap_pb[k].buf);
 	if (r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED)
 		p = gl.map_buffer_range(GL_PIXEL_PACK_BUFFER, 0,
-		    (GLsizeiptr)gl.width * gl.height * 4, GL_MAP_READ_BIT);
+		    (GLsizeiptr)gl.cap_w * gl.cap_h * 4, GL_MAP_READ_BIT);
 	if (p != NULL) {
 		/* in the order cap_read_start read them */
 		b = pixman_region32_rectangles(&gl.cap_pb[k].rects, &n);
@@ -930,7 +1062,7 @@ cap_read_end(int k, bool wait)
 }
 
 /*
- * The screen for captures, in panel pixels. Reads that landed are
+ * The main display for captures, in its panel pixels. Reads that landed are
  * copied in; what changed since starts reading back, and *behind (if
  * not NULL) says where the image is older than the screen. wait (and
  * the first read of a copy) reads it all now instead.
@@ -948,15 +1080,15 @@ gles_screen_read(struct ws_server *srv, bool wait, pixman_region32_t *behind,
 		return NULL;
 	gl.cap_used = ws_now_usec();
 	if (!gl.cap_on) {
-		if (!cap_start())
+		if (!cap_start(srv))
 			return NULL;
-		damage_all(srv);	/* the next frame draws it whole */
+		damage_all(srv);	/* the next frame copies it whole */
 	}
 	if (gl.cap_fresh) {
 		/* black until then */
 		if (behind != NULL)
 			pixman_region32_union_rect(behind, behind, 0, 0,
-			    gl.width, gl.height);
+			    gl.cap_w, gl.cap_h);
 		*serial = 0;
 		return gl.cap_img;
 	}
@@ -999,39 +1131,41 @@ static void
 gles_fini(struct ws_server *srv)
 {
 	struct ws_window *w;
-	int i;
+	unsigned i;
 
 	for (w = srv->windows; w != NULL; w = w->next)
 		gles_window_gone(srv, w);
 	if (gl.prog_tex != 0) {
 		cap_stop();
-		pixman_region32_fini(&gl.cap_clip);
 		pixman_region32_fini(&gl.cap_dirty);
 		for (i = 0; i < GLES_CAP_PBOS; i++)
 			pixman_region32_fini(&gl.cap_pb[i].rects);
 		pixman_region32_fini(&gl.clip);
-		for (i = 0; i < GLES_HISTORY; i++)
-			pixman_region32_fini(&gl.history[i]);
+		pixman_region32_fini(&gl.frame_damage);
+		pixman_region32_fini(&gl.mclip);
 	}
+	if (gl.ctx != EGL_NO_CONTEXT && gl.current != EGL_NO_SURFACE) {
+		if (gl.desk_fbo != 0)
+			glDeleteFramebuffers(1, &gl.desk_fbo);
+		if (gl.desk_tex != 0)
+			glDeleteTextures(1, &gl.desk_tex);
+		if (gl.mirror_fbo != 0)
+			glDeleteFramebuffers(1, &gl.mirror_fbo);
+		if (gl.mirror_tex != 0)
+			glDeleteTextures(1, &gl.mirror_tex);
+	}
+	gl.desk_fbo = gl.desk_tex = gl.mirror_fbo = gl.mirror_tex = 0;
+	free(gl.vpix[0]);
+	free(gl.vpix[1]);
+	gl.vpix[0] = gl.vpix[1] = NULL;
+	for (i = 0; i < srv->ndisplays; i++)
+		surface_free(srv->displays[i]);
 	if (gl.dpy != EGL_NO_DISPLAY)
 		eglMakeCurrent(gl.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
 		    EGL_NO_CONTEXT);
-	if (gl.surface != NULL) {
-		if (gl.pending != NULL)
-			gbm_surface_release_buffer(gl.surface, gl.pending);
-		if (gl.front != NULL)
-			gbm_surface_release_buffer(gl.surface, gl.front);
-		if (gl.retired != NULL)
-			gbm_surface_release_buffer(gl.surface, gl.retired);
-		gl.retired = NULL;
-	}
-	gl.pending = gl.front = NULL;
-	if (gl.egl_surface != EGL_NO_SURFACE)
-		eglDestroySurface(gl.dpy, gl.egl_surface);
+	gl.current = EGL_NO_SURFACE;
 	if (gl.ctx != EGL_NO_CONTEXT)
 		eglDestroyContext(gl.dpy, gl.ctx);
-	if (gl.surface != NULL)
-		gbm_surface_destroy(gl.surface);
 	/* never started again in this server's life (compositor.c) */
 	if (gl.dpy != EGL_NO_DISPLAY)
 		eglTerminate(gl.dpy);
@@ -1039,84 +1173,40 @@ gles_fini(struct ws_server *srv)
 		gbm_device_destroy(gl.gbm);
 	gl.dpy = EGL_NO_DISPLAY;
 	gl.gbm = NULL;
-	gl.egl_surface = EGL_NO_SURFACE;
 	gl.ctx = EGL_NO_CONTEXT;
-	gl.surface = NULL;
 	gl.prog_tex = gl.prog_fill = gl.tex = 0;
+	gl.width = gl.height = 0;
 }
 
 /* ---- drawing ---- */
 
 /*
- * The GBM buffer this frame draws into last showed the frame `age`
- * frames ago (0: unknown), so it lacks what changed since then: this
- * frame's damage and that of the age - 1 frames before it.
+ * The desktop keeps everything drawn before, so a frame draws only its
+ * own damage; a new desktop texture is drawn whole once. The displays'
+ * buffers are brought up to date from it in gles_end.
  */
 static void
 gles_repaint(struct ws_server *srv, pixman_region32_t *region)
 {
-	EGLint age = 0;
-	int i;
-
-	if (gl.buffer_age && !eglQuerySurface(gl.dpy, gl.egl_surface,
-	    EGL_BUFFER_AGE_EXT, &age))
-		age = 0;
-	gl.egl_age = age;
-	if (gl.cap_on && gl.cap_fresh) {
-		/* the capture copy starts empty: draw it all once */
+	if (gl.desk_fresh) {
 		pixman_region32_union_rect(region, region, 0, 0, srv->width,
 		    srv->height);
-		gl.cap_fresh = false;
-	}
-	if (gl.verify) {
-		/* the buffer this frame lands in: the one drawn `age` frames
-		   ago, or with age 0 one not among the last few */
-		unsigned long f = gl.vframes + 1;
-		int k = age > 0 && f >= (unsigned long)age ?
-		    gl.sim_of[(f - (unsigned long)age) % 64] : -1;
-
-		if (k < 0)
-			k = (int)(f % GLES_SIM);
-		gl.sim_cur = k;
-		gl.sim_of[f % 64] = k;
+		gl.desk_fresh = false;
 	}
 	pixman_region32_copy(&gl.frame_damage, region);
-	/* remember this frame's own damage, newest first */
-	pixman_region32_fini(&gl.history[GLES_HISTORY - 1]);
-	memmove(&gl.history[1], &gl.history[0],
-	    sizeof(gl.history[0]) * (GLES_HISTORY - 1));
-	pixman_region32_init(&gl.history[0]);
-	pixman_region32_copy(&gl.history[0], region);
-	if (age == 0 || age - 1 > gl.nhistory) {
-		pixman_region32_union_rect(region, region, 0, 0, srv->width,
-		    srv->height);
-	} else {
-		for (i = 1; i < age; i++)
-			pixman_region32_union(region, region, &gl.history[i]);
-	}
-	if (gl.nhistory < GLES_HISTORY - 1)
-		gl.nhistory++;
-	if (gl.verify) {
-		pixman_box32_t *e1 = pixman_region32_extents(&gl.frame_damage);
-		pixman_box32_t *e2 = pixman_region32_extents(region);
-
-		ws_debug("renderer: frame %lu age %d nhist %d own %d,%d-%d,%d "
-		    "drawn %d,%d-%d,%d", gl.vframes + 1, age, gl.nhistory,
-		    e1->x1, e1->y1, e1->x2, e1->y2, e2->x1, e2->y1, e2->x2,
-		    e2->y2);
-	}
 }
 
 static void
 gles_begin(struct ws_server *srv, pixman_region32_t *back)
 {
+	int s = (int)srv->scale;
 	pixman_box32_t *b;
-	int i, n, s = (int)srv->scale;
+	int i, n;
 
 	pixman_region32_copy(&gl.clip, back);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl.desk_fbo);
+	glViewport(0, 0, (GLsizei)gl.width, (GLsizei)gl.height);
 	glEnable(GL_SCISSOR_TEST);
-	if (gl.cap_on)
-		own_clip(&gl.cap_clip, back, s);
 	if (gl.verify) {
 		pixman_region32_clear(&gl.mclip);
 		b = pixman_region32_rectangles(&gl.frame_damage, &n);
@@ -1129,10 +1219,11 @@ gles_begin(struct ws_server *srv, pixman_region32_t *back)
 	}
 }
 
-/* Draw once per rectangle of `clip` that meets x, y, w, h. */
+/* Draw once per rectangle of `clip` that meets x, y, w, h, in a target
+   `height` pixels high. */
 static void
 clipped_in(pixman_region32_t *clip, int32_t x, int32_t y, int32_t w,
-    int32_t h)
+    int32_t h, uint32_t height)
 {
 	pixman_region32_t r;
 	pixman_box32_t *b;
@@ -1142,7 +1233,7 @@ clipped_in(pixman_region32_t *clip, int32_t x, int32_t y, int32_t w,
 	pixman_region32_intersect(&r, &r, clip);
 	b = pixman_region32_rectangles(&r, &n);
 	for (i = 0; i < n; i++) {
-		glScissor(b[i].x1, (GLint)gl.height - b[i].y2,
+		glScissor(b[i].x1, (GLint)height - b[i].y2,
 		    b[i].x2 - b[i].x1, b[i].y2 - b[i].y1);
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 	}
@@ -1152,7 +1243,7 @@ clipped_in(pixman_region32_t *clip, int32_t x, int32_t y, int32_t w,
 static void
 clipped(int32_t x, int32_t y, int32_t w, int32_t h)
 {
-	clipped_in(&gl.clip, x, y, w, h);
+	clipped_in(&gl.clip, x, y, w, h, gl.height);
 }
 
 /* Upload an a8r8g8b8 or x8r8g8b8 image (another format is converted). */
@@ -1355,16 +1446,7 @@ gles_draw(struct ws_server *srv, const struct ws_draw *d)
 	else
 		glDisable(GL_BLEND);
 	clipped(d->x, d->y, d->w, d->h);
-	if (gl.cap_on) {
-		/* the capture copy: the same draw, this frame's damage */
-		glBindFramebuffer(GL_FRAMEBUFFER, gl.cap_fbo);
-		clipped_in(&gl.cap_clip, d->x, d->y, d->w, d->h);
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	}
 	if (gl.verify) {
-		/* the simulated GBM buffer: the same draw, same clip */
-		glBindFramebuffer(GL_FRAMEBUFFER, gl.sim_fbo[gl.sim_cur]);
-		clipped(d->x, d->y, d->w, d->h);
 		/* the mirror: the image uploaded whole, this frame's damage */
 		glBindFramebuffer(GL_FRAMEBUFFER, gl.mirror_fbo);
 		glBindTexture(GL_TEXTURE_2D, gl.tex);
@@ -1377,9 +1459,10 @@ gles_draw(struct ws_server *srv, const struct ws_draw *d)
 			    d->smooth ? GL_LINEAR : GL_NEAREST);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
 			    d->smooth ? GL_LINEAR : GL_NEAREST);
-			clipped_in(&gl.mclip, d->x, d->y, d->w, d->h);
+			clipped_in(&gl.mclip, d->x, d->y, d->w, d->h,
+			    gl.height);
 		}
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindFramebuffer(GL_FRAMEBUFFER, gl.desk_fbo);
 	}
 }
 
@@ -1411,48 +1494,34 @@ gles_fill(struct ws_server *srv, const pixman_color_t *color,
 		pos[6] = boxes[i].x2; pos[7] = boxes[i].y2;
 		clipped(boxes[i].x1, boxes[i].y1, boxes[i].x2 - boxes[i].x1,
 		    boxes[i].y2 - boxes[i].y1);
-		if (gl.cap_on) {
-			glBindFramebuffer(GL_FRAMEBUFFER, gl.cap_fbo);
-			clipped_in(&gl.cap_clip, boxes[i].x1, boxes[i].y1,
-			    boxes[i].x2 - boxes[i].x1,
-			    boxes[i].y2 - boxes[i].y1);
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		}
 		if (gl.verify) {
-			glBindFramebuffer(GL_FRAMEBUFFER,
-			    gl.sim_fbo[gl.sim_cur]);
-			clipped(boxes[i].x1, boxes[i].y1, boxes[i].x2 - boxes[i].x1,
-			    boxes[i].y2 - boxes[i].y1);
 			glBindFramebuffer(GL_FRAMEBUFFER, gl.mirror_fbo);
 			clipped_in(&gl.mclip, boxes[i].x1, boxes[i].y1,
 			    boxes[i].x2 - boxes[i].x1,
-			    boxes[i].y2 - boxes[i].y1);
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			    boxes[i].y2 - boxes[i].y1, gl.height);
+			glBindFramebuffer(GL_FRAMEBUFFER, gl.desk_fbo);
 		}
 	}
 }
 
-/* WS_GL_VERIFY: does the frame about to be shown match the mirror? */
+/* WS_GL_VERIFY: does the desktop match the mirror? */
 static void
 verify_frame(void)
 {
 	uint32_t *a = (uint32_t *)gl.vpix[0], *m = (uint32_t *)gl.vpix[1];
 	uint32_t x, y, bad = 0, x1 = gl.width, y1 = gl.height, x2 = 0, y2 = 0;
-	EGLint age = -1;
 
 	if (a == NULL || m == NULL)
 		return;
 	glDisable(GL_SCISSOR_TEST);
-	glBindFramebuffer(GL_FRAMEBUFFER, gl.sim_fbo[gl.sim_cur]);
+	glBindFramebuffer(GL_FRAMEBUFFER, gl.desk_fbo);
 	glReadPixels(0, 0, (GLsizei)gl.width, (GLsizei)gl.height, GL_RGBA,
 	    GL_UNSIGNED_BYTE, a);
 	glBindFramebuffer(GL_FRAMEBUFFER, gl.mirror_fbo);
 	glReadPixels(0, 0, (GLsizei)gl.width, (GLsizei)gl.height, GL_RGBA,
 	    GL_UNSIGNED_BYTE, m);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	for (y = 0; y < gl.height; y++)
 		for (x = 0; x < gl.width; x++) {
-			/* the screen has no alpha; the mirror texture does */
 			if (((a[y * gl.width + x] ^ m[y * gl.width + x]) &
 			    0x00ffffff) == 0)
 				continue;
@@ -1463,64 +1532,160 @@ verify_frame(void)
 			if (y > y2) y2 = y;
 		}
 	gl.vframes++;
-	if (gl.buffer_age)
-		eglQuerySurface(gl.dpy, gl.egl_surface, EGL_BUFFER_AGE_EXT, &age);
-	if (bad != 0 && gl.vbad < 2) {
-		/* the first two: both images of the area, as PPM */
-		char path[64];
-		FILE *f;
-		int k;
-		uint32_t xx, yy, *img;
-
-		for (k = 0; k < 2; k++) {
-			img = k == 0 ? a : m;
-			snprintf(path, sizeof(path), "/tmp/verify-%lu-%s.ppm",
-			    gl.vbad, k == 0 ? "screen" : "mirror");
-			if ((f = fopen(path, "wb")) == NULL)
-				continue;
-			fprintf(f, "P6\n%u %u\n255\n", x2 - x1 + 1, y2 - y1 + 1);
-			for (yy = y2 + 1; yy-- > y1;)
-				for (xx = x1; xx <= x2; xx++) {
-					uint32_t p = img[yy * gl.width + xx];
-
-					fputc((int)(p & 0xff), f);
-					fputc((int)((p >> 8) & 0xff), f);
-					fputc((int)((p >> 16) & 0xff), f);
-				}
-			fclose(f);
-		}
-	}
 	if (bad != 0) {
 		gl.vbad++;
 		/* GL rows are bottom up: say them top down */
 		ws_warn("renderer: VERIFY frame %lu: %u pixels differ in "
-		    "%u,%u %ux%u (age %d)", gl.vframes, bad, x1,
-		    gl.height - 1 - y2, x2 - x1 + 1, y2 - y1 + 1, age);
+		    "%u,%u %ux%u", gl.vframes, bad, x1, gl.height - 1 - y2,
+		    x2 - x1 + 1, y2 - y1 + 1);
 	} else if (gl.vframes % 300 == 0)
 		ws_info("renderer: VERIFY %lu frames, %lu bad", gl.vframes,
 		    gl.vbad);
+}
+
+/*
+ * Copy `region` (panel pixels of a target w x h, the bound framebuffer)
+ * from the desktop: d's backing pixels into its dest rectangle.
+ */
+static void
+copy_out(struct ws_display *d, pixman_region32_t *region, uint32_t w,
+    uint32_t h)
+{
+	GLfloat pos[8], uv[8];
+	GLfloat x1 = d->dest.x, y1 = d->dest.y;
+	GLfloat x2 = d->dest.x + d->dest.width;
+	GLfloat y2 = d->dest.y + d->dest.height;
+	GLfloat u1 = (GLfloat)d->back.x / gl.width;
+	GLfloat u2 = (GLfloat)(d->back.x + d->back.width) / gl.width;
+	/* the desktop's rows are bottom up */
+	GLfloat v1 = 1.0f - (GLfloat)d->back.y / gl.height;
+	GLfloat v2 = 1.0f - (GLfloat)(d->back.y + d->back.height) / gl.height;
+	bool same = d->back.width == d->dest.width &&
+	    d->back.height == d->dest.height;
+
+	pos[0] = x1; pos[1] = y1; pos[2] = x2; pos[3] = y1;
+	pos[4] = x1; pos[5] = y2; pos[6] = x2; pos[7] = y2;
+	uv[0] = u1; uv[1] = v1; uv[2] = u2; uv[3] = v1;
+	uv[4] = u1; uv[5] = v2; uv[6] = u2; uv[7] = v2;
+	glViewport(0, 0, (GLsizei)w, (GLsizei)h);
+	glBindTexture(GL_TEXTURE_2D, gl.desk_tex);
+	/* scaled down 2:1, linear filtering at the pixel centres averages
+	   each 2 x 2 block */
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+	    same ? GL_NEAREST : GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+	    same ? GL_NEAREST : GL_LINEAR);
+	glUseProgram(gl.prog_tex);
+	glUniform2f(gl.tex_screen, (GLfloat)w, (GLfloat)h);
+	glUniform1f(gl.tex_opacity, 1.0f);
+	glUniform1i(gl.tex_opaque, 1);
+	glUniform1i(gl.tex_swizzle, 0);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, pos);
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, uv);
+	glEnableVertexAttribArray(0);
+	glEnableVertexAttribArray(1);
+	glDisable(GL_BLEND);
+	glEnable(GL_SCISSOR_TEST);
+	clipped_in(region, d->dest.x, d->dest.y, d->dest.width,
+	    d->dest.height, h);
+}
+
+/*
+ * Bring display d's next buffer up to date: what changed this frame on
+ * it, and what the buffer missed before (its age), copied from the
+ * desktop. Nothing changed on it: no new buffer.
+ */
+static void
+display_frame(struct ws_display *d, pixman_region32_t *out)
+{
+	struct gles_display *gd = d->render;
+	pixman_region32_t own, region;
+	EGLint age = 0;
+	int i;
+
+	gd->swapped = false;
+	display_back_to_panel(d, out, &own);
+	if (!pixman_region32_not_empty(&own)) {
+		pixman_region32_fini(&own);
+		return;
+	}
+	if (!make_current(gd->egl_surface)) {
+		pixman_region32_fini(&own);
+		return;
+	}
+	if (gl.buffer_age && !eglQuerySurface(gl.dpy, gd->egl_surface,
+	    EGL_BUFFER_AGE_EXT, &age))
+		age = 0;
+	pixman_region32_init(&region);
+	pixman_region32_copy(&region, &own);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	if (age == 0 || age - 1 > gd->nhistory) {
+		/* a buffer of unknown age: all of it, black around a
+		   letterboxed mirror */
+		pixman_region32_union_rect(&region, &region, 0, 0,
+		    gd->width, gd->height);
+		glDisable(GL_SCISSOR_TEST);
+		glClearColor(0, 0, 0, 1);
+		glClear(GL_COLOR_BUFFER_BIT);
+	} else {
+		for (i = 1; i < age; i++)
+			pixman_region32_union(&region, &region,
+			    &gd->history[i - 1]);
+	}
+	copy_out(d, &region, gd->width, gd->height);
+	/* remember this frame's own, newest first */
+	pixman_region32_fini(&gd->history[GLES_HISTORY - 1]);
+	memmove(&gd->history[1], &gd->history[0],
+	    sizeof(gd->history[0]) * (GLES_HISTORY - 1));
+	pixman_region32_init(&gd->history[0]);
+	pixman_region32_copy(&gd->history[0], &own);
+	if (gd->nhistory < GLES_HISTORY - 1)
+		gd->nhistory++;
+	pixman_region32_fini(&region);
+	pixman_region32_fini(&own);
+	glDisable(GL_SCISSOR_TEST);
+	if (!eglSwapBuffers(gl.dpy, gd->egl_surface))
+		ws_err("renderer: eglSwapBuffers (%s): 0x%x", d->connector,
+		    eglGetError());
+	else
+		gd->swapped = true;
 }
 
 static void
 gles_end(struct ws_server *srv, pixman_region32_t *back,
     pixman_region32_t *out)
 {
-	(void)back;
+	pixman_region32_t cap;
+	struct ws_display *d;
+	unsigned i;
+
 	if (gl.verify)
 		verify_frame();
-	if (gl.cap_on) {
-		pixman_region32_union(&gl.cap_dirty, &gl.cap_dirty,
-		    &gl.cap_clip);
+	glDisable(GL_SCISSOR_TEST);
+	pixman_region32_clear(&gl.clip);
+	pixman_region32_init(out);
+	pixman_region32_copy(out, back);
+	if (gl.cap_on && srv->main != NULL && srv->main->render != NULL) {
+		/* the capture copy: the main display's part, as it shows */
+		display_back_to_panel(srv->main, out, &cap);
+		if (gl.cap_fresh) {
+			pixman_region32_union_rect(&cap, &cap, 0, 0,
+			    gl.cap_w, gl.cap_h);
+			gl.cap_fresh = false;
+		}
+		glBindFramebuffer(GL_FRAMEBUFFER, gl.cap_fbo);
+		copy_out(srv->main, &cap, gl.cap_w, gl.cap_h);
+		pixman_region32_union(&gl.cap_dirty, &gl.cap_dirty, &cap);
+		pixman_region32_fini(&cap);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		if (ws_now_usec() - gl.cap_used > GLES_CAP_IDLE_USEC)
 			cap_stop();
 	}
-
-	glDisable(GL_SCISSOR_TEST);
-	pixman_region32_clear(&gl.clip);
-	if (!eglSwapBuffers(gl.dpy, gl.egl_surface))
-		ws_err("renderer: eglSwapBuffers: 0x%x", eglGetError());
-	pixman_region32_init_rect(out, 0, 0, srv->panel_width,
-	    srv->panel_height);
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		if (d->on && d->render != NULL)
+			display_frame(d, out);
+	}
 }
 
 /* ---- scanout (drm.c) ---- */
@@ -1535,10 +1700,12 @@ fb_free(struct gbm_bo *bo, void *data)
 		drmModeRmFB(gbm_device_get_fd(gbm), fb);
 }
 
-/* The frame gles_end swapped, as a DRM framebuffer to flip to. */
+/* The frame gles_end swapped on d, as a DRM framebuffer to flip to;
+   false when d has no new frame. */
 static bool
-gles_scanout(struct ws_server *srv, uint32_t *fb_id)
+gles_scanout(struct ws_server *srv, struct ws_display *d, uint32_t *fb_id)
 {
+	struct gles_display *gd = d->render;
 	uint32_t handles[4] = { 0 }, strides[4] = { 0 }, offsets[4] = { 0 };
 	uint64_t mods[4] = { 0 }, mod;
 	struct gbm_bo *bo;
@@ -1546,15 +1713,19 @@ gles_scanout(struct ws_server *srv, uint32_t *fb_id)
 	int fd, i, planes, r = -1;
 
 	(void)srv;
+	if (gd == NULL || !gd->swapped)
+		return false;
+	gd->swapped = false;
 	/* a frame that never reached the screen (a failed flip and
 	   SetCrtc): give its buffer back, or GBM runs out */
-	if (gl.pending != NULL) {
-		gbm_surface_release_buffer(gl.surface, gl.pending);
-		gl.pending = NULL;
+	if (gd->pending != NULL) {
+		gbm_surface_release_buffer(gd->surface, gd->pending);
+		gd->pending = NULL;
 	}
-	bo = gbm_surface_lock_front_buffer(gl.surface);
+	bo = gbm_surface_lock_front_buffer(gd->surface);
 	if (bo == NULL) {
-		ws_err("renderer: no front buffer to show");
+		ws_err("renderer: no front buffer to show on %s",
+		    d->connector);
 		return false;
 	}
 	fb = (uint32_t)(uintptr_t)gbm_bo_get_user_data(bo);
@@ -1569,64 +1740,45 @@ gles_scanout(struct ws_server *srv, uint32_t *fb_id)
 			mods[i] = mod;
 		}
 		if (mod != DRM_FORMAT_MOD_INVALID)
-			r = drmModeAddFB2WithModifiers(fd, gl.width, gl.height,
-			    gbm_bo_get_format(bo), handles, strides, offsets,
-			    mods, &fb, DRM_MODE_FB_MODIFIERS);
+			r = drmModeAddFB2WithModifiers(fd, gd->width,
+			    gd->height, gbm_bo_get_format(bo), handles,
+			    strides, offsets, mods, &fb,
+			    DRM_MODE_FB_MODIFIERS);
 		if (r != 0)
-			r = drmModeAddFB2(fd, gl.width, gl.height,
+			r = drmModeAddFB2(fd, gd->width, gd->height,
 			    gbm_bo_get_format(bo), handles, strides, offsets,
 			    &fb, 0);
 		if (r != 0) {
 			ws_err("renderer: drmModeAddFB2: %s", strerror(-r));
-			gbm_surface_release_buffer(gl.surface, bo);
+			gbm_surface_release_buffer(gd->surface, bo);
 			return false;
 		}
 		gbm_bo_set_user_data(bo, (void *)(uintptr_t)fb, fb_free);
 	}
-	if (gl.verify) {
-		/* the age this buffer really had, against what EGL said */
-		int j, k = -1, ns = (int)(sizeof(gl.seen) / sizeof(gl.seen[0]));
-		long real = 0;
-
-		for (j = 0; j < ns; j++)
-			if (gl.seen[j].bo == bo)
-				k = j;
-		if (k >= 0)
-			real = (long)(gl.vframes - gl.seen[k].frame);
-		else
-			for (k = 0; k < ns && gl.seen[k].bo != NULL; k++)
-				;
-		if (k < ns) {
-			gl.seen[k].bo = bo;
-			gl.seen[k].frame = gl.vframes;
-		}
-		if (real != gl.egl_age)
-			ws_warn("renderer: VERIFY frame %lu: buffer %p was %ld "
-			    "frames old, EGL said %d", gl.vframes, (void *)bo,
-			    real, gl.egl_age);
-	}
-	gl.pending = bo;
+	gd->pending = bo;
 	*fb_id = fb;
 	return true;
 }
 
-/* The flip to the last scanout buffer is done: the one before is free. */
+/* The flip to d's last scanout buffer is done: the one before is free. */
 static void
-gles_presented(struct ws_server *srv)
+gles_presented(struct ws_server *srv, struct ws_display *d)
 {
+	struct gles_display *gd = d->render;
+
 	(void)srv;
-	if (gl.pending == NULL)
+	if (gd == NULL || gd->pending == NULL)
 		return;
 	/*
 	 * The buffer the flip left may still be scanned out for a moment
 	 * after the flip's event (the vc4 HVS latches later): drawing
 	 * into it then shows half a frame. Keep it one more flip.
 	 */
-	if (gl.retired != NULL)
-		gbm_surface_release_buffer(gl.surface, gl.retired);
-	gl.retired = gl.front;
-	gl.front = gl.pending;
-	gl.pending = NULL;
+	if (gd->retired != NULL)
+		gbm_surface_release_buffer(gd->surface, gd->retired);
+	gd->retired = gd->front;
+	gd->front = gd->pending;
+	gd->pending = NULL;
 }
 
 /* ---- windows ---- */
@@ -1851,6 +2003,7 @@ const struct ws_renderer_ops gles_renderer_ops = {
 	.end = gles_end,
 	.scanout = gles_scanout,
 	.presented = gles_presented,
+	.display_gone = gles_display_gone,
 	.window_commit = gles_window_commit,
 	.window_gone = gles_window_gone,
 	.dmabuf_formats = gles_dmabuf_formats,

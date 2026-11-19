@@ -585,21 +585,23 @@ home_rect(struct ws_server *srv, struct ws_window *w)
 			return w->tile->frame;
 		/* in the Dock: from the middle of the Dock's edge (the
 		   right one if it hasn't said) */
+		ws_rect_t m = display_main_frame(srv);
+
 		r.width = r.height = 64;
-		r.x = ((int32_t)srv->width - 64) / 2;
-		r.y = ((int32_t)srv->height - 64) / 2;
+		r.x = m.x + (m.width - 64) / 2;
+		r.y = m.y + (m.height - 64) / 2;
 		switch (srv->dock_edge) {
 		case WS_DOCK_EDGE_LEFT:
-			r.x = 0;
+			r.x = m.x;
 			break;
 		case WS_DOCK_EDGE_TOP:
-			r.y = 0;
+			r.y = m.y;
 			break;
 		case WS_DOCK_EDGE_BOTTOM:
-			r.y = (int32_t)srv->height - 64;
+			r.y = m.y + m.height - 64;
 			break;
 		default:
-			r.x = (int32_t)srv->width - 64;
+			r.x = m.x + m.width - 64;
 			break;
 		}
 		return r;

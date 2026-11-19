@@ -281,6 +281,11 @@ extern "C" {
 						   Only while the server composites
 						   on a GPU. */
 #define WS_MAX_DMABUF_FORMATS	5	/* in WS_MSG_DMABUF_FORMATS' reply */
+#define WS_SERVER_DISPLAYS	0x40000000 /* several displays: WS_MSG_LIST_DISPLAYS,
+						   WS_MSG_LIST_DISPLAY_MODES,
+						   WS_MSG_DISPLAY_CONFIGURE and
+						   WS_EVENT_DISPLAYS_CHANGED
+						   ("Displays" in WSProtocol.h) */
 
 /* WS_MSG_ACTIVATE flags (ws_activate_flags). */
 #define WS_ACTIVATE_RAISE	0x0001	/* also bring the app's windows,
@@ -363,6 +368,13 @@ extern "C" {
 /* added after protocol 1 shipped (WS_SERVER_SCREEN_CHANGES) */
 #define WS_INJECT_SCREEN_SIZE	9	/* headless servers only: the screen
 					   becomes x by y pixels (tests) */
+/* added with WS_SERVER_DISPLAYS; headless servers only (tests) */
+#define WS_INJECT_DISPLAY	10	/* pressed 1: plug in a display of x
+					   by y pixels (dx by dy mm, key_name
+					   its EDID id, "" for a made-up one);
+					   pressed 0: unplug display `button` */
+#define WS_INJECT_LID		11	/* pressed 1: the lid closes, 0: it
+					   opens */
 
 /* Gesture phases (WS_INJECT_SWIPE). */
 #define WS_GESTURE_BEGIN	1
@@ -483,6 +495,15 @@ enum {
 					   WS_MSG_CAPTURE_LIST */
 	WS_EVENT_CAPTURE_REVOKED,	/* ws_event_capture_revoked_t: to the
 					   consent agent */
+	/* WS_SERVER_DISPLAYS ("Displays" in WSProtocol.h) */
+	WS_EVENT_DISPLAYS_CHANGED,	/* no payload: to every connection when
+					   a display comes or goes, or one's
+					   mode, place or role changes; list
+					   them again */
+	WS_EVENT_DISPLAY,		/* ws_display_info_t, answers
+					   WS_MSG_LIST_DISPLAYS */
+	WS_EVENT_DISPLAY_MODE,		/* ws_display_mode_t, answers
+					   WS_MSG_LIST_DISPLAY_MODES */
 	WS_EVENT_MAX
 };
 
@@ -540,6 +561,82 @@ typedef struct ws_event_usable_area {
 					   top of the screen */
 	uint32_t	reserved2;
 } ws_event_usable_area_t;
+
+/*
+ * Displays (servers with WS_SERVER_DISPLAYS; "Displays" in WSProtocol.h).
+ * Every display is a rectangle of the desktop, in points; the screen of
+ * ws_screen_info_t is the smallest rectangle around them all.
+ */
+#define WS_MAX_DISPLAYS		8
+
+/* ws_display_info_t.flags */
+#define WS_DISPLAY_MAIN		0x0001	/* the main display: the menu bar,
+					   the Dock and new windows */
+#define WS_DISPLAY_BUILTIN	0x0002	/* a laptop's own panel */
+#define WS_DISPLAY_MIRROR	0x0004	/* shows mirror_of's part of the
+					   desktop; frame is that display's */
+#define WS_DISPLAY_HIDPI	0x0008	/* its default "looks like" size is
+					   2x */
+#define WS_DISPLAY_PENDING	0x0010	/* changed with WS_DISPLAY_CONFIRM:
+					   goes back in revert_ms unless
+					   kept (WS_DISPLAY_KEEP) */
+
+typedef struct ws_display_info {
+	uint32_t	display_id;	/* the server's, never 0; the same
+					   while the display stays connected */
+	uint32_t	flags;		/* WS_DISPLAY_* */
+	ws_rect_t	frame;		/* points, in the desktop */
+	ws_rect_t	usable;		/* points: the frame minus the menu bar
+					   and the Dock's strips (the main
+					   display's), as NSScreen's
+					   visibleFrame */
+	uint32_t	scale;		/* backing pixels per point windows on
+					   it are drawn with (the desktop's,
+					   ws_screen_info_t.scale) */
+	uint32_t	panel_width;	/* the mode the display runs at, */
+	uint32_t	panel_height;	/* pixels */
+	uint32_t	refresh_mhz;	/* 60000 = 60 Hz */
+	uint32_t	mm_width;	/* physical size, 0 if unknown */
+	uint32_t	mm_height;
+	uint32_t	mirror_of;	/* WS_DISPLAY_MIRROR: the display it
+					   shows, else 0 */
+	uint32_t	revert_ms;	/* WS_DISPLAY_PENDING: milliseconds
+					   left, else 0 */
+	char		name[32];	/* the monitor's own (EDID), or
+					   "Built-in Display" */
+	char		edid_id[48];	/* EDID vendor-product-serial: the
+					   display's lasting identity */
+	char		connector[16];	/* "eDP-1", "DP-1", "HDMI-A-1" */
+} ws_display_info_t;
+
+/* WS_MSG_DISPLAY_CONFIGURE flags (ws_display_set_* in WSClient.h) */
+#define WS_DISPLAY_CONFIRM	0x0001	/* goes back by itself after
+					   WS_DISPLAY_REVERT_MS unless kept */
+#define WS_DISPLAY_REVERT_MS	15000
+
+/* ws_display_mode_t.kind */
+#define WS_DISPLAY_MODE_LOOKS_LIKE 1	/* a "looks like" size, in points */
+#define WS_DISPLAY_MODE_PANEL	2	/* a mode of the display: pixels at a
+					   refresh rate */
+
+/* ws_display_mode_t.flags */
+#define WS_DISPLAY_MODE_CURRENT	0x0001	/* in use */
+#define WS_DISPLAY_MODE_DEFAULT	0x0002	/* LOOKS_LIKE: the display's default;
+					   PANEL: the display's preferred
+					   mode */
+#define WS_DISPLAY_MODE_INTERLACED 0x0004 /* PANEL */
+#define WS_DISPLAY_MODE_CHOSEN	0x0008	/* LOOKS_LIKE, CURRENT: the user's
+					   choice; without it the display
+					   follows its default */
+
+typedef struct ws_display_mode {
+	uint32_t	display_id;
+	uint32_t	kind;		/* WS_DISPLAY_MODE_* */
+	uint32_t	flags;		/* WS_DISPLAY_MODE_* */
+	uint32_t	width;		/* points (LOOKS_LIKE) or pixels */
+	uint32_t	height;
+	uint32_t	refresh_mhz;	/* PANEL */
+} ws_display_mode_t;
 
 typedef struct ws_event_app {
 	uint32_t	other_client;	/* the app on the other side, or 0 */
@@ -1241,6 +1338,8 @@ typedef struct ws_event {
 		ws_event_capture_activity_t capture_activity;
 		ws_event_capture_info_t	capture_info;
 		ws_event_capture_revoked_t capture_revoked;
+		ws_display_info_t	display;
+		ws_display_mode_t	display_mode;
 		uint8_t			raw[232];
 	} u;
 } ws_event_t;

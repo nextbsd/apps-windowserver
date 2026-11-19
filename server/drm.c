@@ -2,15 +2,24 @@
  * Copyright (c) 2026, Joseph Maloney
  * SPDX-License-Identifier: BSD-2-Clause
  *
- * DRM/KMS output: legacy modesetting with two dumb buffers and page
- * flips, plus the hardware cursor plane when the driver has one.
+ * DRM/KMS output: legacy modesetting, a CRTC per connected display with
+ * two dumb buffers and page flips, plus the hardware cursor plane when
+ * the driver has one.
  *
- * With the pixman renderer the screen is a shadow image in system
- * memory; present() copies only damaged rectangles into the back buffer
- * (each dumb buffer remembers what it missed), then flips. Reading from
- * dumb buffers, which may be write-combined, is avoided. A renderer with
- * its own scanout buffers (GLES on GBM) hands present() a framebuffer
- * to flip to instead.
+ * With the pixman renderer each display shows its view (display.c): its
+ * part of the shadow image, or that part scaled to its panel. present()
+ * copies only damaged rectangles into the back buffer (each dumb buffer
+ * remembers what it missed), then flips. Reading from dumb buffers,
+ * which may be write-combined, is avoided. A renderer with its own
+ * scanout buffers (GLES on GBM) hands present() a framebuffer per
+ * display to flip to instead.
+ *
+ * Displays come and go (E40 T1): connector hotplug reaches userland as a
+ * udev event of the drm subsystem (libudev is backed by IOKit on
+ * NextBSD, which hears the kernel's connector events), and every couple
+ * of seconds the connectors' last known states are checked as well, in
+ * case an event was missed. Either way, the connectors are probed again
+ * and display.c lays the desktop out anew.
  *
  * WS_FLIP_STATS=1 logs, every 5 seconds of flipping, how evenly the
  * flips reached the screen (flip_stats), which is how smooth a window
@@ -23,6 +32,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +40,7 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include <libudev.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -45,135 +56,335 @@ struct drm_fb {
 	pixman_region32_t missing;	/* damage not yet copied here */
 };
 
+/* A display's CRTC, buffers and cursor (d->output). */
 struct drm_output {
-	int		fd;
-	char		path[64];
 	uint32_t	connector_id;
+	int		connection;	/* DRM_MODE_CONNECTED... last seen */
 	uint32_t	crtc_id;
+	uint32_t	crtc_index;
 	drmModeModeInfo	mode;
 	drmModeCrtc	*saved_crtc;
 	struct drm_fb	fb[2];
 	int		front;
 	bool		flip_ok;
 	bool		mode_set;
+	uint32_t	gamma_size;
 	/* hardware cursor */
 	uint32_t	cursor_handle;
-	uint32_t	cursor_w;
-	uint32_t	cursor_h;
 	uint64_t	cursor_size;
 	void		*cursor_map;
 	bool		cursor_ok;
 	bool		cursor_shown;
-	int		cursor_hot_x;
+	int		cursor_hot_x;	/* panel pixels */
 	int		cursor_hot_y;
 };
 
-static struct drm_output drm;
+static struct {
+	int		fd;
+	char		path[64];
+	uint32_t	crtcs_used;	/* by index */
+	uint32_t	cursor_w;
+	uint32_t	cursor_h;
+	bool		cursor_cap;
+	struct udev_monitor *monitor;
+	/* every connector's state as last probed */
+	struct { uint32_t id; int connection; } seen[32];
+	unsigned nseen;
+	/* the hardware cursor's image, its scale and hot spot (points) */
+	pixman_image_t	*cursor_img;
+	uint32_t	cursor_scale;
+	double		cursor_hx;
+	double		cursor_hy;
+	bool		cursor_on;
+} drm = { .fd = -1 };
 
-/* ---- device selection ---- */
+#define OUT(d)	((struct drm_output *)(d)->output)
 
-/* DisplayPanelMode: "Preferred", or "WxH" / "WxH@Hz" naming one of the
-   connector's modes. */
-static const char *panel_mode_want;
+/* ---- connectors ---- */
 
-static void
-pick_mode(drmModeConnector *conn, struct drm_output *out)
+static const char *
+connector_type_name(uint32_t t)
 {
-	unsigned w = 0, h = 0, hz = 0;
-	int j, n;
-
-	out->mode = conn->modes[0];
-	for (j = 0; j < conn->count_modes; j++)
-		if (conn->modes[j].type & DRM_MODE_TYPE_PREFERRED) {
-			out->mode = conn->modes[j];
-			break;
-		}
-	if (panel_mode_want == NULL ||
-	    strcasecmp(panel_mode_want, "Preferred") == 0)
-		return;
-	n = sscanf(panel_mode_want, "%ux%u@%u", &w, &h, &hz);
-	if (n < 2) {
-		ws_warn("DisplayPanelMode %s: not WxH[@Hz]", panel_mode_want);
-		return;
+	switch (t) {
+	case DRM_MODE_CONNECTOR_VGA:		return "VGA";
+	case DRM_MODE_CONNECTOR_DVII:		return "DVI-I";
+	case DRM_MODE_CONNECTOR_DVID:		return "DVI-D";
+	case DRM_MODE_CONNECTOR_DVIA:		return "DVI-A";
+	case DRM_MODE_CONNECTOR_LVDS:		return "LVDS";
+	case DRM_MODE_CONNECTOR_DisplayPort:	return "DP";
+	case DRM_MODE_CONNECTOR_HDMIA:		return "HDMI-A";
+	case DRM_MODE_CONNECTOR_HDMIB:		return "HDMI-B";
+	case DRM_MODE_CONNECTOR_eDP:		return "eDP";
+	case DRM_MODE_CONNECTOR_VIRTUAL:	return "Virtual";
+	case DRM_MODE_CONNECTOR_DSI:		return "DSI";
+	case DRM_MODE_CONNECTOR_DPI:		return "DPI";
+	default:				return "Unknown";
 	}
-	for (j = 0; j < conn->count_modes; j++)
-		if (conn->modes[j].hdisplay == w &&
-		    conn->modes[j].vdisplay == h &&
-		    (n < 3 || conn->modes[j].vrefresh == hz)) {
-			out->mode = conn->modes[j];
-			return;
-		}
-	ws_warn("DisplayPanelMode %s: the display has no such mode; using "
-	    "%ux%u", panel_mode_want, out->mode.hdisplay, out->mode.vdisplay);
 }
 
+static struct ws_display *
+display_of_connector(struct ws_server *srv, uint32_t id)
+{
+	unsigned i;
+
+	for (i = 0; i < srv->ndisplays; i++)
+		if (srv->displays[i]->output != NULL &&
+		    OUT(srv->displays[i])->connector_id == id)
+			return srv->displays[i];
+	return NULL;
+}
+
+/* The connector's EDID into d (display.c reads it). */
+static void
+read_edid(int fd, uint32_t connector_id, struct ws_display *d)
+{
+	drmModeObjectProperties *props;
+	drmModePropertyRes *pr;
+	drmModePropertyBlobRes *blob;
+	uint32_t k;
+
+	props = drmModeObjectGetProperties(fd, connector_id,
+	    DRM_MODE_OBJECT_CONNECTOR);
+	for (k = 0; props != NULL && k < props->count_props; k++) {
+		pr = drmModeGetProperty(fd, props->props[k]);
+		if (pr == NULL)
+			continue;
+		if (strcmp(pr->name, "EDID") == 0 &&
+		    props->prop_values[k] != 0 &&
+		    (blob = drmModeGetPropertyBlob(fd,
+		    (uint32_t)props->prop_values[k])) != NULL) {
+			display_set_edid(d, blob->data, blob->length);
+			drmModeFreePropertyBlob(blob);
+		}
+		drmModeFreeProperty(pr);
+	}
+	if (props != NULL)
+		drmModeFreeObjectProperties(props);
+}
+
+static uint32_t
+mode_mhz(const drmModeModeInfo *m)
+{
+	uint64_t num, den;
+
+	/* the exact rate, as clock / total pixels, when the timings say */
+	if (m->htotal != 0 && m->vtotal != 0) {
+		num = (uint64_t)m->clock * 1000000ULL;
+		den = (uint64_t)m->htotal * m->vtotal;
+		if (m->flags & DRM_MODE_FLAG_INTERLACE)
+			num *= 2;
+		if (m->flags & DRM_MODE_FLAG_DBLSCAN)
+			den *= 2;
+		if (m->vscan > 1)
+			den *= m->vscan;
+		return (uint32_t)((num + den / 2) / den);
+	}
+	return m->vrefresh * 1000;
+}
+
+/* d's modes from the connector. */
+static void
+read_modes(drmModeConnector *conn, struct ws_display *d)
+{
+	int j;
+
+	d->npanel = 0;
+	for (j = 0; j < conn->count_modes && d->npanel < WS_MAX_PANEL_MODES;
+	    j++) {
+		struct ws_panel_mode *pm = &d->panel[d->npanel++];
+
+		pm->w = conn->modes[j].hdisplay;
+		pm->h = conn->modes[j].vdisplay;
+		pm->mhz = mode_mhz(&conn->modes[j]);
+		pm->preferred = (conn->modes[j].type &
+		    DRM_MODE_TYPE_PREFERRED) != 0;
+		pm->interlaced = (conn->modes[j].flags &
+		    DRM_MODE_FLAG_INTERLACE) != 0;
+	}
+}
+
+/* A new display for a connected connector. */
+static struct ws_display *
+display_for(struct ws_server *srv, drmModeConnector *conn)
+{
+	struct ws_display *d;
+	struct drm_output *o;
+
+	d = display_add(srv);
+	if (d == NULL)
+		return NULL;
+	o = calloc(1, sizeof(*o));
+	if (o == NULL) {
+		display_remove(srv, d);
+		return NULL;
+	}
+	pixman_region32_init(&o->fb[0].missing);
+	pixman_region32_init(&o->fb[1].missing);
+	o->connector_id = conn->connector_id;
+	o->connection = conn->connection;
+	d->output = o;
+	snprintf(d->connector, sizeof(d->connector), "%s-%u",
+	    connector_type_name(conn->connector_type),
+	    conn->connector_type_id);
+	d->builtin = conn->connector_type == DRM_MODE_CONNECTOR_eDP ||
+	    conn->connector_type == DRM_MODE_CONNECTOR_LVDS ||
+	    conn->connector_type == DRM_MODE_CONNECTOR_DSI;
+	d->mm_width = conn->mmWidth;
+	d->mm_height = conn->mmHeight;
+	read_edid(drm.fd, conn->connector_id, d);
+	if (d->edid_id[0] == '\0')
+		snprintf(d->edid_id, sizeof(d->edid_id), "unknown-%s",
+		    d->connector);
+	read_modes(conn, d);
+	ws_info("display %s connected: %u modes%s", d->connector, d->npanel,
+	    d->builtin ? ", built in" : "");
+	return d;
+}
+
+/*
+ * Probe the connectors: a display for each newly connected one, and
+ * displays whose connector went away removed. Returns whether anything
+ * changed. probe: ask the driver to detect again (slow on some), else
+ * take what it last knew.
+ */
 static bool
-pick_connector(int fd, struct drm_output *out)
+probe(struct ws_server *srv, bool force_probe)
 {
 	drmModeRes *res;
 	drmModeConnector *conn;
-	drmModeEncoder *enc;
-	uint32_t crtc = 0;
-	int i, j, k;
-	bool found = false;
+	struct ws_display *d;
+	bool seen[WS_MAX_DISPLAYS], changed = false;
+	unsigned i;
+	int c;
 
-	res = drmModeGetResources(fd);
+	res = drmModeGetResources(drm.fd);
 	if (res == NULL)
 		return false;
-	for (i = 0; i < res->count_connectors && !found; i++) {
-		conn = drmModeGetConnector(fd, res->connectors[i]);
+	memset(seen, 0, sizeof(seen));
+	drm.nseen = 0;
+	for (c = 0; c < res->count_connectors; c++) {
+		conn = force_probe ? drmModeGetConnector(drm.fd,
+		    res->connectors[c]) : drmModeGetConnectorCurrent(drm.fd,
+		    res->connectors[c]);
 		if (conn == NULL)
 			continue;
-		if (conn->connection != DRM_MODE_CONNECTED ||
-		    conn->count_modes == 0) {
+		if (drm.nseen < sizeof(drm.seen) / sizeof(drm.seen[0])) {
+			drm.seen[drm.nseen].id = conn->connector_id;
+			drm.seen[drm.nseen].connection = conn->connection;
+			drm.nseen++;
+		}
+		d = display_of_connector(srv, conn->connector_id);
+		if (conn->connection == DRM_MODE_CONNECTED &&
+		    conn->count_modes == 0 && !force_probe) {
+			/* connected, but its modes aren't known yet */
 			drmModeFreeConnector(conn);
-			continue;
-		}
-		/* DisplayPanelMode, else the preferred mode, else the
-		   first one */
-		pick_mode(conn, out);
-		/* the CRTC already driving it, else any compatible one */
-		if (conn->encoder_id != 0 &&
-		    (enc = drmModeGetEncoder(fd, conn->encoder_id)) != NULL) {
-			crtc = enc->crtc_id;
-			drmModeFreeEncoder(enc);
-		}
-		for (j = 0; crtc == 0 && j < conn->count_encoders; j++) {
-			enc = drmModeGetEncoder(fd, conn->encoders[j]);
-			if (enc == NULL)
+			conn = drmModeGetConnector(drm.fd, res->connectors[c]);
+			if (conn == NULL)
 				continue;
-			for (k = 0; k < res->count_crtcs; k++)
-				if (enc->possible_crtcs & (1u << k)) {
-					crtc = res->crtcs[k];
-					break;
-				}
-			drmModeFreeEncoder(enc);
 		}
-		if (crtc != 0) {
-			out->connector_id = conn->connector_id;
-			out->crtc_id = crtc;
-			found = true;
+		if (conn->connection == DRM_MODE_CONNECTED &&
+		    conn->count_modes > 0) {
+			if (d == NULL) {
+				d = display_for(srv, conn);
+				changed = changed || d != NULL;
+			} else if (force_probe) {
+				read_modes(conn, d);
+			}
 		}
+		if (d != NULL && conn->connection == DRM_MODE_CONNECTED &&
+		    conn->count_modes > 0)
+			for (i = 0; i < srv->ndisplays; i++)
+				if (srv->displays[i] == d)
+					seen[i] = true;
 		drmModeFreeConnector(conn);
 	}
 	drmModeFreeResources(res);
-	return found;
+	/* the ones that went */
+	for (i = srv->ndisplays; i-- > 0;) {
+		d = srv->displays[i];
+		if (seen[i] || d->output == NULL)
+			continue;
+		ws_info("display %s disconnected", d->connector);
+		if (d->on && srv->running)
+			drm_output_ops.display_off(srv, d);
+		if (srv->renderer != NULL && srv->renderer->display_gone !=
+		    NULL)
+			srv->renderer->display_gone(srv, d);
+		pixman_region32_fini(&OUT(d)->fb[0].missing);
+		pixman_region32_fini(&OUT(d)->fb[1].missing);
+		free(d->output);
+		d->output = NULL;
+		display_remove(srv, d);
+		changed = true;
+	}
+	return changed;
 }
 
-static int
-open_card(const char *path, struct drm_output *out)
+/* A connector changed (hotplug): probe, and lay the desktop out again. */
+static void
+hotplug(struct ws_server *srv)
 {
-	int fd;
+	if (drm.fd < 0)
+		return;
+	if (!probe(srv, true))
+		return;
+	ws_info("displays changed: %u connected", srv->ndisplays);
+	(void)display_apply(srv, true);
+}
 
-	fd = open(path, O_RDWR | O_CLOEXEC);
-	if (fd < 0)
-		return -1;
-	if (!pick_connector(fd, out)) {
-		close(fd);
-		return -1;
+void
+drm_hotplug_readable(struct ws_server *srv)
+{
+	struct udev_device *dev;
+	const char *hp;
+	bool any = false;
+
+	if (drm.monitor == NULL)
+		return;
+	while ((dev = udev_monitor_receive_device(drm.monitor)) != NULL) {
+		hp = udev_device_get_property_value(dev, "HOTPLUG");
+		if (hp != NULL && strcmp(hp, "1") == 0)
+			any = true;
+		udev_device_unref(dev);
 	}
-	strlcpy(out->path, path, sizeof(out->path));
-	return fd;
+	if (any)
+		hotplug(srv);
+}
+
+/*
+ * Every couple of seconds: has a connector changed state without an
+ * event? Only what the driver last knew is asked (no probe), so this is
+ * cheap; hotplug() probes when it has.
+ */
+void
+drm_housekeeping(struct ws_server *srv)
+{
+	drmModeRes *res;
+	drmModeConnector *conn;
+	bool changed = false;
+	unsigned k;
+	int c;
+
+	if (drm.fd < 0)
+		return;
+	res = drmModeGetResources(drm.fd);
+	if (res == NULL)
+		return;
+	for (c = 0; c < res->count_connectors && !changed; c++) {
+		conn = drmModeGetConnectorCurrent(drm.fd, res->connectors[c]);
+		if (conn == NULL)
+			continue;
+		for (k = 0; k < drm.nseen; k++)
+			if (drm.seen[k].id == conn->connector_id)
+				break;
+		if (k == drm.nseen ||
+		    drm.seen[k].connection != (int)conn->connection)
+			changed = true;
+		drmModeFreeConnector(conn);
+	}
+	drmModeFreeResources(res);
+	if (changed)
+		hotplug(srv);
 }
 
 /* ---- dumb buffers ---- */
@@ -183,6 +394,7 @@ fb_create(int fd, struct drm_fb *fb, uint32_t w, uint32_t h)
 {
 	uint64_t offset;
 
+	pixman_region32_fini(&fb->missing);
 	memset(fb, 0, sizeof(*fb));
 	pixman_region32_init(&fb->missing);
 	if (drmModeCreateDumbBuffer(fd, w, h, 32, 0, &fb->handle, &fb->pitch,
@@ -199,6 +411,7 @@ fb_create(int fd, struct drm_fb *fb, uint32_t w, uint32_t h)
 		fb->map = NULL;
 		return -1;
 	}
+	memset(fb->map, 0, fb->size);	/* black until the first frame */
 	fb->image = pixman_image_create_bits(PIXMAN_x8r8g8b8, (int)w, (int)h,
 	    fb->map, (int)fb->pitch);
 	return fb->image != NULL ? 0 : -1;
@@ -215,42 +428,266 @@ fb_destroy(int fd, struct drm_fb *fb)
 		drmModeRmFB(fd, fb->fb_id);
 	if (fb->handle != 0)
 		drmModeDestroyDumbBuffer(fd, fb->handle);
-	pixman_region32_fini(&fb->missing);
-	memset(fb, 0, sizeof(*fb));
+	pixman_region32_clear(&fb->missing);
+	fb->image = NULL;
+	fb->map = NULL;
+	fb->fb_id = fb->handle = 0;
 }
 
 static void
-fb_copy(struct ws_server *srv, struct drm_fb *fb)
+fb_copy(struct ws_display *d, struct drm_fb *fb)
 {
 	pixman_box32_t *ext;
 
-	if (srv->out == NULL || !pixman_region32_not_empty(&fb->missing))
+	if (d->view == NULL || fb->image == NULL ||
+	    !pixman_region32_not_empty(&fb->missing))
 		return;
 	pixman_image_set_clip_region32(fb->image, &fb->missing);
 	ext = pixman_region32_extents(&fb->missing);
-	pixman_image_composite32(PIXMAN_OP_SRC, srv->out, NULL, fb->image,
+	pixman_image_composite32(PIXMAN_OP_SRC, d->view, NULL, fb->image,
 	    ext->x1, ext->y1, 0, 0, ext->x1, ext->y1, ext->x2 - ext->x1,
 	    ext->y2 - ext->y1);
 	pixman_image_set_clip_region32(fb->image, NULL);
 	pixman_region32_clear(&fb->missing);
 }
 
+/* Show the front dumb buffer at d's mode, all of d's view in it (copy),
+   or as it is (black after drm_display_on). */
 static int
-modeset(struct ws_server *srv)
+modeset(struct ws_server *srv, struct ws_display *d, bool copy)
 {
-	struct drm_fb *fb = &drm.fb[drm.front];
+	struct drm_output *o = OUT(d);
+	struct drm_fb *fb = &o->fb[o->front];
 	int r;
 
-	pixman_region32_union_rect(&fb->missing, &fb->missing, 0, 0,
-	    srv->panel_width, srv->panel_height);
-	fb_copy(srv, fb);
-	r = drmModeSetCrtc(drm.fd, drm.crtc_id, fb->fb_id, 0, 0,
-	    &drm.connector_id, 1, &drm.mode);
+	(void)srv;
+	if (copy) {
+		pixman_region32_union_rect(&fb->missing, &fb->missing, 0, 0,
+		    d->panel_width, d->panel_height);
+		fb_copy(d, fb);
+	}
+	r = drmModeSetCrtc(drm.fd, o->crtc_id, fb->fb_id, 0, 0,
+	    &o->connector_id, 1, &o->mode);
 	if (r != 0) {
-		ws_err("drmModeSetCrtc: %s", strerror(-r));
+		ws_err("display %s: drmModeSetCrtc: %s", d->connector,
+		    strerror(-r));
 		return -1;
 	}
-	drm.mode_set = true;
+	o->mode_set = true;
+	return 0;
+}
+
+/* ---- turning displays on and off (display.c) ---- */
+
+/* A CRTC for the connector: the one driving it already, else a free one
+   it can use. */
+static bool
+pick_crtc(struct drm_output *o)
+{
+	drmModeRes *res;
+	drmModeConnector *conn;
+	drmModeEncoder *enc;
+	uint32_t crtc = 0, index = 0;
+	int j, k;
+
+	res = drmModeGetResources(drm.fd);
+	conn = drmModeGetConnector(drm.fd, o->connector_id);
+	if (res == NULL || conn == NULL) {
+		if (res != NULL)
+			drmModeFreeResources(res);
+		if (conn != NULL)
+			drmModeFreeConnector(conn);
+		return false;
+	}
+	if (conn->encoder_id != 0 &&
+	    (enc = drmModeGetEncoder(drm.fd, conn->encoder_id)) != NULL) {
+		for (k = 0; k < res->count_crtcs; k++)
+			if (res->crtcs[k] == enc->crtc_id &&
+			    (drm.crtcs_used & (1u << k)) == 0) {
+				crtc = enc->crtc_id;
+				index = (uint32_t)k;
+			}
+		drmModeFreeEncoder(enc);
+	}
+	for (j = 0; crtc == 0 && j < conn->count_encoders; j++) {
+		enc = drmModeGetEncoder(drm.fd, conn->encoders[j]);
+		if (enc == NULL)
+			continue;
+		for (k = 0; k < res->count_crtcs; k++)
+			if ((enc->possible_crtcs & (1u << k)) &&
+			    (drm.crtcs_used & (1u << k)) == 0) {
+				crtc = res->crtcs[k];
+				index = (uint32_t)k;
+				break;
+			}
+		drmModeFreeEncoder(enc);
+	}
+	drmModeFreeConnector(conn);
+	drmModeFreeResources(res);
+	if (crtc == 0)
+		return false;
+	o->crtc_id = crtc;
+	o->crtc_index = index;
+	drm.crtcs_used |= 1u << index;
+	return true;
+}
+
+/* The DRM mode for d's panel size and rate. */
+static bool
+find_mode(struct ws_display *d, drmModeModeInfo *out)
+{
+	drmModeConnector *conn;
+	int j, best = -1;
+
+	conn = drmModeGetConnectorCurrent(drm.fd, OUT(d)->connector_id);
+	if (conn == NULL)
+		return false;
+	for (j = 0; j < conn->count_modes; j++) {
+		if (conn->modes[j].hdisplay != d->panel_width ||
+		    conn->modes[j].vdisplay != d->panel_height)
+			continue;
+		if (mode_mhz(&conn->modes[j]) == d->refresh_mhz) {
+			best = j;
+			break;
+		}
+		if (best < 0 || (conn->modes[j].type &
+		    DRM_MODE_TYPE_PREFERRED))
+			best = j;
+	}
+	if (best >= 0)
+		*out = conn->modes[best];
+	drmModeFreeConnector(conn);
+	return best >= 0;
+}
+
+static void
+cursor_buffer_free(struct drm_output *o)
+{
+	if (o->cursor_map != NULL)
+		munmap(o->cursor_map, o->cursor_size);
+	if (o->cursor_handle != 0)
+		drmModeDestroyDumbBuffer(drm.fd, o->cursor_handle);
+	o->cursor_map = NULL;
+	o->cursor_handle = 0;
+	o->cursor_ok = false;
+}
+
+static void
+cursor_buffer_make(struct drm_output *o)
+{
+	uint64_t offset;
+	uint32_t pitch;
+
+	if (!drm.cursor_cap || o->cursor_handle != 0)
+		return;
+	if (drmModeCreateDumbBuffer(drm.fd, drm.cursor_w, drm.cursor_h, 32, 0,
+	    &o->cursor_handle, &pitch, &o->cursor_size) != 0)
+		return;
+	if (pitch != drm.cursor_w * 4 ||
+	    drmModeMapDumbBuffer(drm.fd, o->cursor_handle, &offset) != 0) {
+		cursor_buffer_free(o);
+		return;
+	}
+	o->cursor_map = mmap(NULL, o->cursor_size, PROT_READ | PROT_WRITE,
+	    MAP_SHARED, drm.fd, (off_t)offset);
+	if (o->cursor_map == MAP_FAILED) {
+		o->cursor_map = NULL;
+		cursor_buffer_free(o);
+		return;
+	}
+	o->cursor_ok = true;
+}
+
+static void
+drm_display_off(struct ws_server *srv, struct ws_display *d)
+{
+	struct drm_output *o = OUT(d);
+
+	(void)srv;
+	if (o == NULL || o->crtc_id == 0)
+		return;
+	if (o->cursor_shown)
+		drmModeSetCursor(drm.fd, o->crtc_id, 0, 0, 0);
+	o->cursor_shown = false;
+	if (o->saved_crtc != NULL && srv->running) {
+		/* off: no framebuffer, no connector */
+		drmModeSetCrtc(drm.fd, o->crtc_id, 0, 0, 0, NULL, 0, NULL);
+	}
+	if (o->saved_crtc != NULL)
+		drmModeFreeCrtc(o->saved_crtc);
+	o->saved_crtc = NULL;
+	fb_destroy(drm.fd, &o->fb[0]);
+	fb_destroy(drm.fd, &o->fb[1]);
+	cursor_buffer_free(o);
+	drm.crtcs_used &= ~(1u << o->crtc_index);
+	o->crtc_id = 0;
+	o->mode_set = false;
+	d->flip_pending = false;
+}
+
+/*
+ * Turn d on at its panel mode: a CRTC, two black dumb buffers of the
+ * mode's size, and a modeset showing one. The renderer draws the next
+ * frame, which the output flips to.
+ */
+static int
+drm_display_on(struct ws_server *srv, struct ws_display *d)
+{
+	struct drm_output *o = OUT(d);
+	drmModeModeInfo mode;
+
+	if (o == NULL)
+		return -1;
+	if (!find_mode(d, &mode)) {
+		ws_err("display %s: no %ux%u mode", d->connector,
+		    d->panel_width, d->panel_height);
+		return -1;
+	}
+	if (o->crtc_id != 0 && o->mode_set &&
+	    memcmp(&mode, &o->mode, sizeof(mode)) == 0 &&
+	    o->fb[0].image != NULL)
+		return 0;	/* as it is */
+	if (o->crtc_id == 0) {
+		if (!pick_crtc(o)) {
+			ws_warn("display %s: no CRTC free for it",
+			    d->connector);
+			return -1;
+		}
+		o->saved_crtc = drmModeGetCrtc(drm.fd, o->crtc_id);
+	}
+	/* while the renderer's buffers may still be on screen: they go
+	   after this shows the new buffers */
+	d->flip_pending = false;
+	o->mode = mode;
+	if (fb_create(drm.fd, &o->fb[0], d->panel_width,
+	    d->panel_height) < 0 || fb_create(drm.fd, &o->fb[1],
+	    d->panel_width, d->panel_height) < 0) {
+		ws_err("display %s: can't create dumb buffers", d->connector);
+		drm_display_off(srv, d);
+		return -1;
+	}
+	o->front = 0;
+	o->flip_ok = true;
+	o->gamma_size = 0;
+	{
+		drmModeCrtc *c = drmModeGetCrtc(drm.fd, o->crtc_id);
+
+		if (c != NULL) {
+			o->gamma_size = (uint32_t)c->gamma_size;
+			drmModeFreeCrtc(c);
+		}
+	}
+	d->gamma_r = d->gamma_g = d->gamma_b = 1.0;	/* set again */
+	if (srv->cfg.hardware_cursor)
+		cursor_buffer_make(o);
+	if (srv->running && modeset(srv, d, false) < 0) {
+		drm_display_off(srv, d);
+		return -1;
+	}
+	ws_info("display %s: %ux%u@%u.%02u on crtc %u%s", d->connector,
+	    d->panel_width, d->panel_height, d->refresh_mhz / 1000,
+	    d->refresh_mhz % 1000 / 10, o->crtc_id,
+	    o->cursor_ok ? ", hardware cursor" : "");
 	return 0;
 }
 
@@ -306,20 +743,42 @@ flip_stats(struct ws_server *srv, unsigned int sec, unsigned int usec)
 	}
 }
 
+static struct ws_server *flip_srv;
+
+/* The frame is presented once every display it went to has flipped. */
+static void
+frame_maybe_done(struct ws_server *srv)
+{
+	unsigned i;
+
+	for (i = 0; i < srv->ndisplays; i++)
+		if (srv->displays[i]->flip_pending)
+			return;
+	if (srv->present_pending)
+		compositor_present_done(srv);
+}
+
 static void
 flip_handler(int fd, unsigned int seq, unsigned int sec, unsigned int usec,
     void *data)
 {
-	struct ws_server *srv = data;
+	struct ws_server *srv = flip_srv;
+	uint32_t id = (uint32_t)(uintptr_t)data;
+	struct ws_display *d;
 
 	(void)fd;
 	(void)seq;
-	flip_stats(srv, sec, usec);
+	d = display_lookup(srv, id);
+	if (d == NULL || !d->flip_pending)
+		return;		/* unplugged meanwhile */
+	if (d == srv->main)
+		flip_stats(srv, sec, usec);
+	d->flip_pending = false;
 	if (srv->renderer->presented != NULL)
-		srv->renderer->presented(srv);
+		srv->renderer->presented(srv, d);
 	else
-		drm.front ^= 1;
-	compositor_present_done(srv);
+		OUT(d)->front ^= 1;
+	frame_maybe_done(srv);
 }
 
 void
@@ -330,36 +789,45 @@ drm_readable(struct ws_server *srv)
 	memset(&ctx, 0, sizeof(ctx));
 	ctx.version = 2;
 	ctx.page_flip_handler = flip_handler;
-	(void)srv;
+	flip_srv = srv;
 	drmHandleEvent(drm.fd, &ctx);
 }
 
-/* Show framebuffer fb_id: a flip if the driver can, else SetCrtc. */
+/* Show framebuffer fb_id on d: a flip if the driver can (true: one is
+   pending), else SetCrtc. */
 static bool
-show(struct ws_server *srv, uint32_t fb_id)
+show(struct ws_server *srv, struct ws_display *d, uint32_t fb_id)
 {
+	struct drm_output *o = OUT(d);
 	int r;
 
-	if (drm.flip_ok) {
-		r = drmModePageFlip(drm.fd, drm.crtc_id, fb_id,
-		    DRM_MODE_PAGE_FLIP_EVENT, srv);
-		if (r == 0)
-			return true;	/* flip_handler finishes the frame */
-		ws_warn("drmModePageFlip: %s; using SetCrtc", strerror(-r));
-		drm.flip_ok = false;
+	if (o->flip_ok && o->mode_set) {
+		r = drmModePageFlip(drm.fd, o->crtc_id, fb_id,
+		    DRM_MODE_PAGE_FLIP_EVENT, (void *)(uintptr_t)d->id);
+		if (r == 0) {
+			d->flip_pending = true;
+			return true;	/* flip_handler finishes it */
+		}
+		ws_warn("display %s: drmModePageFlip: %s; using SetCrtc",
+		    d->connector, strerror(-r));
+		o->flip_ok = false;
 	}
-	r = drmModeSetCrtc(drm.fd, drm.crtc_id, fb_id, 0, 0,
-	    &drm.connector_id, 1, &drm.mode);
+	r = drmModeSetCrtc(drm.fd, o->crtc_id, fb_id, 0, 0,
+	    &o->connector_id, 1, &o->mode);
 	if (r != 0)
-		ws_warn("drmModeSetCrtc: %s", strerror(-r));
-	else if (srv->renderer->presented != NULL)
-		srv->renderer->presented(srv);
-	else
-		drm.front ^= 1;
+		ws_warn("display %s: drmModeSetCrtc: %s", d->connector,
+		    strerror(-r));
+	else {
+		o->mode_set = true;
+		if (srv->renderer->presented != NULL)
+			srv->renderer->presented(srv, d);
+		else
+			o->front ^= 1;
+	}
 	return false;
 }
 
-/* Wait (a little) for the flip in flight to finish. */
+/* Wait (a little) for the flips in flight to finish. */
 static void
 drm_wait_present(struct ws_server *srv)
 {
@@ -371,140 +839,289 @@ drm_wait_present(struct ws_server *srv)
 			drm_readable(srv);
 }
 
-/* Show the whole of srv->out from a dumb buffer (renderer switch). */
+/* Show every display's whole view from a dumb buffer (renderer switch). */
 static void
 drm_take_screen(struct ws_server *srv)
 {
-	drm.flip_ok = true;
-	(void)modeset(srv);
+	struct ws_display *d;
+	unsigned i;
+
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		if (!d->on || d->output == NULL || OUT(d)->crtc_id == 0)
+			continue;
+		OUT(d)->flip_ok = true;
+		(void)modeset(srv, d, true);
+	}
 }
 
 static bool
 drm_present(struct ws_server *srv, pixman_region32_t *damage)
 {
-	struct drm_fb *back = &drm.fb[drm.front ^ 1];
+	struct ws_display *d;
+	struct drm_output *o;
+	struct drm_fb *back;
+	pixman_region32_t panel;
 	uint32_t fb_id;
+	bool async = false;
+	unsigned i;
 
-	if (srv->renderer->scanout != NULL)
-		return srv->renderer->scanout(srv, &fb_id) &&
-		    show(srv, fb_id);
-	pixman_region32_union(&drm.fb[0].missing, &drm.fb[0].missing, damage);
-	pixman_region32_union(&drm.fb[1].missing, &drm.fb[1].missing, damage);
-	fb_copy(srv, back);
-	return show(srv, back->fb_id);
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		o = OUT(d);
+		if (!d->on || o == NULL || o->crtc_id == 0 || d->flip_pending)
+			continue;
+		if (srv->renderer->scanout != NULL) {
+			if (srv->renderer->scanout(srv, d, &fb_id) &&
+			    show(srv, d, fb_id))
+				async = true;
+			continue;
+		}
+		display_back_to_panel(d, damage, &panel);
+		if (!pixman_region32_not_empty(&panel)) {
+			pixman_region32_fini(&panel);
+			continue;
+		}
+		pixman_region32_union(&o->fb[0].missing, &o->fb[0].missing,
+		    &panel);
+		pixman_region32_union(&o->fb[1].missing, &o->fb[1].missing,
+		    &panel);
+		pixman_region32_fini(&panel);
+		back = &o->fb[o->front ^ 1];
+		fb_copy(d, back);
+		if (show(srv, d, back->fb_id))
+			async = true;
+	}
+	return async;
 }
 
 /* ---- hardware cursor ---- */
 
-static void
-cursor_setup(void)
+/* Panel pixels per point on d. */
+static double
+display_ppp(const struct ws_display *d)
 {
-	uint64_t w = 64, h = 64, offset;
-	uint32_t pitch;
-
-	drmGetCap(drm.fd, DRM_CAP_CURSOR_WIDTH, &w);
-	drmGetCap(drm.fd, DRM_CAP_CURSOR_HEIGHT, &h);
-	if (w == 0 || h == 0 || w > 256 || h > 256)
-		w = h = 64;
-	drm.cursor_w = (uint32_t)w;
-	drm.cursor_h = (uint32_t)h;
-	if (drmModeCreateDumbBuffer(drm.fd, drm.cursor_w, drm.cursor_h, 32, 0,
-	    &drm.cursor_handle, &pitch, &drm.cursor_size) != 0)
-		return;
-	if (pitch != drm.cursor_w * 4 ||
-	    drmModeMapDumbBuffer(drm.fd, drm.cursor_handle, &offset) != 0)
-		goto fail;
-	drm.cursor_map = mmap(NULL, drm.cursor_size, PROT_READ | PROT_WRITE,
-	    MAP_SHARED, drm.fd, (off_t)offset);
-	if (drm.cursor_map == MAP_FAILED) {
-		drm.cursor_map = NULL;
-		goto fail;
-	}
-	drm.cursor_ok = true;
-	return;
-fail:
-	drmModeDestroyDumbBuffer(drm.fd, drm.cursor_handle);
-	drm.cursor_handle = 0;
+	return d->frame.width > 0 ? (double)d->dest.width / d->frame.width :
+	    1.0;
 }
 
+/* Load the cursor image into d's buffer, scaled to d's pixels per point. */
 static bool
-drm_cursor_set(struct ws_server *srv, pixman_image_t *img, int hot_x,
-    int hot_y)
+cursor_load(struct ws_display *d)
 {
+	struct drm_output *o = OUT(d);
 	pixman_image_t *dst;
-	int r;
+	pixman_transform_t t;
+	double f = display_ppp(d) / (drm.cursor_scale ? drm.cursor_scale : 1);
+	int w = pixman_image_get_width(drm.cursor_img);
+	int h = pixman_image_get_height(drm.cursor_img);
+	int dw = (int)lround(w * f), dh = (int)lround(h * f), r;
 
-	(void)srv;
-	if (!drm.cursor_ok ||
-	    pixman_image_get_width(img) > (int)drm.cursor_w ||
-	    pixman_image_get_height(img) > (int)drm.cursor_h)
+	if (!o->cursor_ok || dw > (int)drm.cursor_w || dh > (int)drm.cursor_h ||
+	    dw <= 0 || dh <= 0)
 		return false;
-	memset(drm.cursor_map, 0, drm.cursor_size);
+	memset(o->cursor_map, 0, o->cursor_size);
 	dst = pixman_image_create_bits(PIXMAN_a8r8g8b8, (int)drm.cursor_w,
-	    (int)drm.cursor_h, drm.cursor_map, (int)drm.cursor_w * 4);
+	    (int)drm.cursor_h, o->cursor_map, (int)drm.cursor_w * 4);
 	if (dst == NULL)
 		return false;
-	pixman_image_composite32(PIXMAN_OP_SRC, img, NULL, dst, 0, 0, 0, 0,
-	    0, 0, pixman_image_get_width(img), pixman_image_get_height(img));
+	if (fabs(f - 1.0) > 1e-6) {
+		pixman_transform_init_scale(&t, pixman_double_to_fixed(1.0 / f),
+		    pixman_double_to_fixed(1.0 / f));
+		pixman_image_set_transform(drm.cursor_img, &t);
+		pixman_image_set_filter(drm.cursor_img,
+		    PIXMAN_FILTER_BILINEAR, NULL, 0);
+	}
+	pixman_image_composite32(PIXMAN_OP_SRC, drm.cursor_img, NULL, dst, 0,
+	    0, 0, 0, 0, 0, dw, dh);
+	pixman_image_set_transform(drm.cursor_img, NULL);
+	pixman_image_set_filter(drm.cursor_img, PIXMAN_FILTER_NEAREST, NULL,
+	    0);
 	pixman_image_unref(dst);
-	r = drmModeSetCursor2(drm.fd, drm.crtc_id, drm.cursor_handle,
-	    drm.cursor_w, drm.cursor_h, hot_x, hot_y);
+	o->cursor_hot_x = (int)lround(drm.cursor_hx * display_ppp(d));
+	o->cursor_hot_y = (int)lround(drm.cursor_hy * display_ppp(d));
+	r = drmModeSetCursor2(drm.fd, o->crtc_id, o->cursor_handle,
+	    drm.cursor_w, drm.cursor_h, o->cursor_hot_x, o->cursor_hot_y);
 	if (r != 0)
-		r = drmModeSetCursor(drm.fd, drm.crtc_id, drm.cursor_handle,
+		r = drmModeSetCursor(drm.fd, o->crtc_id, o->cursor_handle,
 		    drm.cursor_w, drm.cursor_h);
 	if (r != 0) {
-		ws_warn("hardware cursor unavailable (%s); using software",
-		    strerror(-r));
-		drm.cursor_ok = false;
+		ws_warn("display %s: hardware cursor unavailable (%s)",
+		    d->connector, strerror(-r));
+		o->cursor_ok = false;
 		return false;
 	}
-	drm.cursor_hot_x = hot_x;
-	drm.cursor_hot_y = hot_y;
-	drm.cursor_shown = true;
+	o->cursor_shown = true;
 	return true;
 }
 
 static void
-drm_cursor_move(struct ws_server *srv, int x, int y)
+drm_cursor_move(struct ws_server *srv, double x, double y)
 {
-	(void)srv;
-	if (drm.cursor_shown)
-		drmModeMoveCursor(drm.fd, drm.crtc_id, x - drm.cursor_hot_x,
-		    y - drm.cursor_hot_y);
+	struct ws_display *d, *at;
+	struct drm_output *o;
+	double px, py;
+	unsigned i;
+
+	if (!drm.cursor_on)
+		return;
+	at = display_at(srv, x, y);
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		o = OUT(d);
+		if (!d->on || o == NULL || o->crtc_id == 0)
+			continue;
+		/* shown where the pointer is, and on that display's
+		   mirrors */
+		if (at == NULL || (d != at && d->mirror_of != at->id)) {
+			if (o->cursor_shown) {
+				drmModeSetCursor(drm.fd, o->crtc_id, 0, 0, 0);
+				o->cursor_shown = false;
+			}
+			continue;
+		}
+		if (!o->cursor_shown && !cursor_load(d))
+			continue;
+		px = d->dest.x + (x - d->frame.x) * display_ppp(d);
+		py = d->dest.y + (y - d->frame.y) * display_ppp(d);
+		drmModeMoveCursor(drm.fd, o->crtc_id,
+		    (int)floor(px) - o->cursor_hot_x,
+		    (int)floor(py) - o->cursor_hot_y);
+	}
+}
+
+/*
+ * The cursor image (scale pixels per point, hot spot in points). True if
+ * every display can show it on its cursor plane, scaled to its pixels.
+ */
+static bool
+drm_cursor_set(struct ws_server *srv, pixman_image_t *img, uint32_t scale,
+    double hot_x, double hot_y)
+{
+	struct ws_display *d;
+	struct drm_output *o;
+	double f;
+	unsigned i;
+
+	if (!drm.cursor_cap)
+		return false;
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		o = OUT(d);
+		if (!d->on || o == NULL)
+			continue;
+		f = display_ppp(d) / (scale ? scale : 1);
+		if (!o->cursor_ok ||
+		    lround(pixman_image_get_width(img) * f) >
+		    (long)drm.cursor_w ||
+		    lround(pixman_image_get_height(img) * f) >
+		    (long)drm.cursor_h)
+			return false;
+	}
+	if (drm.cursor_img != NULL)
+		pixman_image_unref(drm.cursor_img);
+	drm.cursor_img = pixman_image_ref(img);
+	drm.cursor_scale = scale;
+	drm.cursor_hx = hot_x;
+	drm.cursor_hy = hot_y;
+	drm.cursor_on = true;
+	/* loaded again on each display where it shows */
+	for (i = 0; i < srv->ndisplays; i++) {
+		o = OUT(srv->displays[i]);
+		if (o != NULL)
+			o->cursor_shown = false;
+	}
+	drm_cursor_move(srv, srv->ptr_x, srv->ptr_y);
+	return true;
 }
 
 static void
 drm_cursor_hide(struct ws_server *srv)
 {
-	(void)srv;
-	if (drm.cursor_shown)
-		drmModeSetCursor(drm.fd, drm.crtc_id, 0, 0, 0);
-	drm.cursor_shown = false;
+	struct drm_output *o;
+	unsigned i;
+
+	drm.cursor_on = false;
+	for (i = 0; i < srv->ndisplays; i++) {
+		o = OUT(srv->displays[i]);
+		if (o != NULL && o->cursor_shown && o->crtc_id != 0)
+			drmModeSetCursor(drm.fd, o->crtc_id, 0, 0, 0);
+		if (o != NULL)
+			o->cursor_shown = false;
+	}
 }
 
-/* ---- shutdown: the console's CRTC back, DRM master dropped ---- */
+/* ---- Night Shift ---- */
+
+static void
+drm_gamma(struct ws_server *srv, struct ws_display *d, double r, double g,
+    double b)
+{
+	struct drm_output *o = OUT(d);
+	uint16_t *red, *green, *blue;
+	uint32_t i, n;
+	double v;
+	int e;
+
+	(void)srv;
+	if (o == NULL || o->crtc_id == 0 || o->gamma_size < 2)
+		return;
+	n = o->gamma_size;
+	red = malloc(n * sizeof(uint16_t) * 3);
+	if (red == NULL)
+		return;
+	green = red + n;
+	blue = green + n;
+	for (i = 0; i < n; i++) {
+		v = (double)i / (n - 1) * 65535.0;
+		red[i] = (uint16_t)lround(v * r);
+		green[i] = (uint16_t)lround(v * g);
+		blue[i] = (uint16_t)lround(v * b);
+	}
+	e = drmModeCrtcSetGamma(drm.fd, o->crtc_id, n, red, green, blue);
+	if (e != 0)
+		ws_warn("display %s: drmModeCrtcSetGamma: %s", d->connector,
+		    strerror(-e));
+	free(red);
+}
+
+/* ---- shutdown: the console's CRTCs back, DRM master dropped ---- */
 
 static void
 drm_shutdown(struct ws_server *srv)
 {
-	(void)srv;
+	struct ws_display *d;
+	struct drm_output *o;
+	unsigned i;
+
 	if (drm.fd < 0)
 		return;
 	drm_cursor_hide(srv);
-	if (drm.saved_crtc != NULL) {
-		drmModeSetCrtc(drm.fd, drm.saved_crtc->crtc_id,
-		    drm.saved_crtc->buffer_id, drm.saved_crtc->x,
-		    drm.saved_crtc->y, &drm.connector_id, 1,
-		    &drm.saved_crtc->mode);
-		drmModeFreeCrtc(drm.saved_crtc);
-		drm.saved_crtc = NULL;
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		o = OUT(d);
+		if (o == NULL)
+			continue;
+		if (o->saved_crtc != NULL) {
+			drmModeSetCrtc(drm.fd, o->saved_crtc->crtc_id,
+			    o->saved_crtc->buffer_id, o->saved_crtc->x,
+			    o->saved_crtc->y, &o->connector_id, 1,
+			    &o->saved_crtc->mode);
+			drmModeFreeCrtc(o->saved_crtc);
+			o->saved_crtc = NULL;
+		}
+		if (o->gamma_size >= 2)
+			drm_gamma(srv, d, 1.0, 1.0, 1.0);
+		fb_destroy(drm.fd, &o->fb[0]);
+		fb_destroy(drm.fd, &o->fb[1]);
+		cursor_buffer_free(o);
 	}
-	fb_destroy(drm.fd, &drm.fb[0]);
-	fb_destroy(drm.fd, &drm.fb[1]);
-	if (drm.cursor_map != NULL)
-		munmap(drm.cursor_map, drm.cursor_size);
-	if (drm.cursor_handle != 0)
-		drmModeDestroyDumbBuffer(drm.fd, drm.cursor_handle);
+	if (drm.cursor_img != NULL)
+		pixman_image_unref(drm.cursor_img);
+	drm.cursor_img = NULL;
+	if (drm.monitor != NULL)
+		udev_monitor_unref(drm.monitor);
+	drm.monitor = NULL;
 	drmDropMaster(drm.fd);
 	close(drm.fd);
 	drm.fd = -1;
@@ -519,32 +1136,77 @@ const struct ws_output_ops drm_output_ops = {
 	.shutdown = drm_shutdown,
 	.wait_present = drm_wait_present,
 	.take_screen = drm_take_screen,
+	.display_on = drm_display_on,
+	.display_off = drm_display_off,
+	.gamma = drm_gamma,
 };
+
+/* ---- opening ---- */
+
+/* Does the card have a connected display? */
+static bool
+card_connected(int fd)
+{
+	drmModeRes *res;
+	drmModeConnector *conn;
+	bool found = false;
+	int i;
+
+	res = drmModeGetResources(fd);
+	if (res == NULL)
+		return false;
+	for (i = 0; i < res->count_connectors && !found; i++) {
+		conn = drmModeGetConnector(fd, res->connectors[i]);
+		if (conn == NULL)
+			continue;
+		found = conn->connection == DRM_MODE_CONNECTED &&
+		    conn->count_modes > 0;
+		drmModeFreeConnector(conn);
+	}
+	drmModeFreeResources(res);
+	return found;
+}
+
+static int
+open_card(const char *path)
+{
+	int fd;
+
+	fd = open(path, O_RDWR | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	if (!card_connected(fd)) {
+		close(fd);
+		return -1;
+	}
+	strlcpy(drm.path, path, sizeof(drm.path));
+	return fd;
+}
 
 /*
  * Open the card that has a connected display (or cfg.drm_device),
- * become DRM master and set the preferred mode. Called as root,
- * before privileges are dropped; the same process keeps master.
+ * become DRM master, and make a display for each connected connector.
+ * Called as root, before privileges are dropped; the same process keeps
+ * master. The displays are turned on by drm_start, once the desktop is
+ * laid out (display.c).
  *
  * TODO: wait for the GPU kext's IOKit match before probing
- * (nextbsd/nextbsd#390), and connector hotplug through IOKit.
+ * (nextbsd/nextbsd#390).
  */
 int
 drm_open(struct ws_server *srv)
 {
 	char path[64];
-	uint64_t cap = 0;
+	uint64_t cap = 0, w = 64, h = 64;
 	int i;
 
-	memset(&drm, 0, sizeof(drm));
 	drm.fd = -1;
-	panel_mode_want = srv->cfg.display_panel_mode;
 	if (srv->cfg.drm_device[0] != '\0') {
-		drm.fd = open_card(srv->cfg.drm_device, &drm);
+		drm.fd = open_card(srv->cfg.drm_device);
 	} else {
 		for (i = 0; i < 16 && drm.fd < 0; i++) {
 			snprintf(path, sizeof(path), "/dev/dri/card%d", i);
-			drm.fd = open_card(path, &drm);
+			drm.fd = open_card(path);
 		}
 	}
 	if (drm.fd < 0) {
@@ -562,77 +1224,79 @@ drm_open(struct ws_server *srv)
 		ws_err("%s: no dumb buffer support", drm.path);
 		goto fail;
 	}
-	srv->panel_width = drm.mode.hdisplay;
-	srv->panel_height = drm.mode.vdisplay;
-	srv->refresh_mhz = drm.mode.vrefresh * 1000;
-	snprintf(srv->screen_name, sizeof(srv->screen_name), "%s", drm.mode.name);
-	{
-		drmModeConnector *conn = drmModeGetConnector(drm.fd,
-		    drm.connector_id);
-		drmModeObjectProperties *props;
-		drmModePropertyRes *pr;
-		drmModePropertyBlobRes *blob;
-		uint32_t k;
-
-		if (conn != NULL) {
-			srv->mm_width = conn->mmWidth;
-			srv->mm_height = conn->mmHeight;
-			srv->screen_internal =
-			    conn->connector_type == DRM_MODE_CONNECTOR_eDP ||
-			    conn->connector_type == DRM_MODE_CONNECTOR_LVDS ||
-			    conn->connector_type == DRM_MODE_CONNECTOR_DSI;
-			drmModeFreeConnector(conn);
-		}
-		/* the EDID: which display it is, and if its size is real
-		   (display.c) */
-		props = drmModeObjectGetProperties(drm.fd, drm.connector_id,
-		    DRM_MODE_OBJECT_CONNECTOR);
-		for (k = 0; props != NULL && k < props->count_props; k++) {
-			pr = drmModeGetProperty(drm.fd, props->props[k]);
-			if (pr == NULL)
-				continue;
-			if (strcmp(pr->name, "EDID") == 0 &&
-			    props->prop_values[k] != 0 &&
-			    (blob = drmModeGetPropertyBlob(drm.fd,
-			    (uint32_t)props->prop_values[k])) != NULL) {
-				display_set_edid(srv, blob->data, blob->length);
-				drmModeFreePropertyBlob(blob);
-			}
-			drmModeFreeProperty(pr);
-		}
-		if (props != NULL)
-			drmModeFreeObjectProperties(props);
+	if (srv->cfg.hardware_cursor) {
+		drmGetCap(drm.fd, DRM_CAP_CURSOR_WIDTH, &w);
+		drmGetCap(drm.fd, DRM_CAP_CURSOR_HEIGHT, &h);
+		if (w == 0 || h == 0 || w > 256 || h > 256)
+			w = h = 64;
+		drm.cursor_w = (uint32_t)w;
+		drm.cursor_h = (uint32_t)h;
+		drm.cursor_cap = true;
 	}
-	drm.saved_crtc = drmModeGetCrtc(drm.fd, drm.crtc_id);
-	if (fb_create(drm.fd, &drm.fb[0], srv->panel_width,
-	    srv->panel_height) < 0 ||
-	    fb_create(drm.fd, &drm.fb[1], srv->panel_width,
-	    srv->panel_height) < 0) {
-		ws_err("%s: can't create dumb buffers", drm.path);
+	(void)probe(srv, true);
+	if (srv->ndisplays == 0) {
+		ws_err("%s: no connected display", drm.path);
 		goto fail;
 	}
-	drm.flip_ok = true;
-	if (srv->cfg.hardware_cursor)
-		cursor_setup();
 #ifdef WS_HAVE_GLES
 	/* As root: EGL opens the render node (render_gles.c). */
 	if (gles_open(srv, drm.fd))
 		srv->renderer = &gles_renderer_ops;
 #endif
 	srv->output = &drm_output_ops;
-	ws_info("%s: %ux%u@%u connector %u crtc %u%s", drm.path,
-	    srv->panel_width, srv->panel_height, drm.mode.vrefresh, drm.connector_id, drm.crtc_id,
-	    drm.cursor_ok ? ", hardware cursor" : "");
+	ws_info("%s: %u display%s connected", drm.path, srv->ndisplays,
+	    srv->ndisplays == 1 ? "" : "s");
 	return drm.fd;
 fail:
 	drm_shutdown(srv);
 	return -1;
 }
 
-/* The first modeset happens once the compositor has a shadow image. */
+/*
+ * The first modesets happen once the compositor has images: every
+ * display that is on gets its CRTC, then hotplug events are listened
+ * for.
+ */
 int
 drm_start(struct ws_server *srv)
 {
+	struct ws_display *d;
+	unsigned i, n = 0;
+
 	ws_kq_add_fd(srv, drm.fd, EVFILT_READ, (void *)(uintptr_t)SRC_DRM);
-	return modeset(srv);
+	for (i = 0; i < srv->ndisplays; i++) {
+		d = srv->displays[i];
+		if (!d->on)
+			continue;
+		if (drm_display_on(srv, d) < 0 || modeset(srv, d, true) < 0) {
+			d->on = false;
+			continue;
+		}
+		n++;
+	}
+	if (n == 0)
+		return -1;
+	if (srv->udev == NULL)
+		srv->udev = udev_new();
+	if (srv->udev != NULL &&
+	    (drm.monitor = udev_monitor_new_from_netlink(srv->udev,
+	    "udev")) != NULL) {
+		udev_monitor_filter_add_match_subsystem_devtype(drm.monitor,
+		    "drm", NULL);
+		if (udev_monitor_enable_receiving(drm.monitor) == 0 &&
+		    udev_monitor_get_fd(drm.monitor) >= 0)
+			ws_kq_add_fd(srv, udev_monitor_get_fd(drm.monitor),
+			    EVFILT_READ, (void *)(uintptr_t)SRC_HOTPLUG);
+		else {
+			udev_monitor_unref(drm.monitor);
+			drm.monitor = NULL;
+		}
+	}
+	if (drm.monitor == NULL)
+		ws_warn("no udev monitor: display hotplug is checked every "
+		    "couple of seconds");
+	if (n < srv->ndisplays)
+		(void)display_apply(srv, true);	/* without the ones that
+						   failed */
+	return 0;
 }

@@ -9,11 +9,12 @@
  * backend then puts the same region on the screen (DRM) or does nothing
  * (headless).
  *
- * HiDPI (display.c): positions are points, the backing store is scale
- * pixels per point. Images are drawn at their own pixels per point
- * (shadow_image); one of another scale is scaled. When the backing
- * store isn't the panel's size, the renderer scales the damaged part to
- * the panel at the end of the frame.
+ * HiDPI and displays (display.c): positions are points of the whole
+ * desktop, the backing store is scale pixels per point. Images are drawn
+ * at their own pixels per point (shadow_image); one of another scale is
+ * scaled. Each display shows its part of the backing store; where that
+ * isn't its panel's size, the renderer scales the damaged part to the
+ * panel at the end of the frame.
  */
 
 #include <sys/mman.h>
@@ -100,17 +101,26 @@ compositor_resize(struct ws_server *srv)
 
 /* ---- drawing in points ---- */
 
-/* The panel's pixel for a point (hardware cursor, captures). */
+/* The main display's panel pixel for a point (captures). */
 double
 panel_x(struct ws_server *srv, double x)
 {
-	return x * srv->panel_width / (srv->width ? srv->width : 1);
+	struct ws_display *d = srv->main;
+
+	if (d == NULL || d->frame.width <= 0)
+		return x;
+	return d->dest.x + (x - d->frame.x) * d->dest.width / d->frame.width;
 }
 
 double
 panel_y(struct ws_server *srv, double y)
 {
-	return y * srv->panel_height / (srv->height ? srv->height : 1);
+	struct ws_display *d = srv->main;
+
+	if (d == NULL || d->frame.height <= 0)
+		return y;
+	return d->dest.y + (y - d->frame.y) * d->dest.height /
+	    d->frame.height;
 }
 
 /*
@@ -357,7 +367,7 @@ occlude(struct ws_server *srv, pixman_region32_t *region,
 }
 
 /* Composite `region` (points) and finish the frame; `out` gets what
-   changed in panel pixels. */
+   changed in backing pixels. */
 static void
 repaint_region(struct ws_server *srv, pixman_region32_t *region,
     pixman_region32_t *out)
@@ -477,7 +487,7 @@ compositor_repaint(struct ws_server *srv)
 	struct ws_window *w;
 	bool async;
 
-	if (!srv->display_active || srv->present_pending)
+	if (!srv->display_active || srv->present_pending || srv->main == NULL)
 		return;
 	pixman_region32_intersect_rect(&srv->damage, &srv->damage, 0, 0,
 	    srv->width, srv->height);
@@ -500,7 +510,14 @@ compositor_repaint(struct ws_server *srv)
 
 	tiles_render(srv);
 	repaint_region(srv, &region, &out);
-	capture_screen_damage(srv, &out);
+	if (srv->main != NULL) {
+		/* captures are of the main display, in its pixels */
+		pixman_region32_t cap;
+
+		display_back_to_panel(srv->main, &out, &cap);
+		capture_screen_damage(srv, &cap);
+		pixman_region32_fini(&cap);
+	}
 	for (w = srv->windows; w != NULL; w = w->next)
 		if (w->frame_requested) {
 			w->frame_requested = false;

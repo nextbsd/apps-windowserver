@@ -171,6 +171,7 @@ check: all
 	sh tests/drag-test.sh $(B)
 	sh tests/dock-clear-test.sh $(B)
 	sh tests/capture-test.sh $(B)
+	sh tests/displays-test.sh $(B)
 
 check-settings: all
 	sh tests/settings-test.sh $(B)

@@ -127,7 +127,12 @@ handle_kevent(struct ws_server *srv, struct kevent *kev)
 		else if (kev->ident == TIMER_HOUSEKEEPING) {
 			clients_housekeeping(srv);
 			settings_housekeeping(srv);
+			if (!srv->headless)
+				drm_housekeeping(srv);
+			display_housekeeping(srv);
 		}
+		else if (kev->ident == TIMER_DISPLAY_REVERT)
+			display_revert_fire(srv);
 		else if (kev->ident == TIMER_MOMENTUM)
 			scroll_momentum_fire(srv);
 		else if (kev->ident == TIMER_OVERVIEW)
@@ -165,6 +170,9 @@ handle_kevent(struct ws_server *srv, struct kevent *kev)
 		break;
 	case SRC_DRM:
 		drm_readable(srv);
+		break;
+	case SRC_HOTPLUG:
+		drm_hotplug_readable(srv);
 		break;
 	case SRC_TTY:
 		vt_drain(srv);
@@ -206,6 +214,8 @@ main(int argc, char **argv)
 	const char *config_path = DEFAULT_CONFIG;
 	const char *opt_socket = NULL, *opt_service = NULL;
 	struct kevent kev, events[64];
+	struct ws_display *d;
+	uint32_t headless_w = 0, headless_h = 0, mm_w = 0, mm_h = 0;
 	bool no_drop = false;
 	int ch, n, i, status = 1;
 	size_t s;
@@ -220,17 +230,14 @@ main(int argc, char **argv)
 	while ((ch = getopt_long(argc, argv, "vh", longopts, NULL)) != -1) {
 		switch (ch) {
 		case 'H':
-			if (parse_size(optarg, &srv->panel_width,
-			    &srv->panel_height) < 0)
+			if (parse_size(optarg, &headless_w, &headless_h) < 0)
 				usage();
 			srv->headless = true;
 			break;
 		case 'm':
 			/* headless: a physical size, as an EDID's (tests) */
-			if (sscanf(optarg, "%ux%u", &srv->mm_width,
-			    &srv->mm_height) != 2)
+			if (sscanf(optarg, "%ux%u", &mm_w, &mm_h) != 2)
 				usage();
-			srv->edid_trusted = true;
 			break;
 		case 'c':
 			config_path = optarg;
@@ -275,9 +282,20 @@ main(int argc, char **argv)
 		goto out;
 
 	if (srv->headless) {
+		/* one display, the headless server's own "built-in" one;
+		   tests plug in more (WS_INJECT_DISPLAY) */
 		srv->output = &headless_output_ops;
-		srv->refresh_mhz = 60000;
-		strlcpy(srv->screen_name, "headless", sizeof(srv->screen_name));
+		d = display_add(srv);
+		if (d == NULL)
+			goto out;
+		d->builtin = true;
+		d->panel_width = headless_w;
+		d->panel_height = headless_h;
+		d->refresh_mhz = 60000;
+		d->mm_width = mm_w;
+		d->mm_height = mm_h;
+		d->edid_trusted = mm_w != 0;
+		strlcpy(d->connector, "headless", sizeof(d->connector));
 	} else {
 		/* Devices first, while still root. */
 		vt_install_crash_handlers(srv);
@@ -301,9 +319,14 @@ main(int argc, char **argv)
 	tiling_init(srv);
 	if (tile_init(srv) < 0)
 		goto out;
+	srv->started = true;
 	srv->display_active = true;
-	srv->ptr_x = srv->width / 2;
-	srv->ptr_y = srv->height / 2;
+	{
+		ws_rect_t m = display_main_frame(srv);
+
+		srv->ptr_x = m.x + m.width / 2;
+		srv->ptr_y = m.y + m.height / 2;
+	}
 	if (cursor_init(srv) < 0)
 		goto out;
 	if (!srv->headless && drm_start(srv) < 0)

@@ -242,14 +242,8 @@ pointer_query(struct ws_server *srv, struct ws_client *c,
 void
 pointer_motion(struct ws_server *srv, double x, double y)
 {
-	if (x < 0)
-		x = 0;
-	if (y < 0)
-		y = 0;
-	if (x > srv->width - 1)
-		x = srv->width - 1;
-	if (y > srv->height - 1)
-		y = srv->height - 1;
+	/* on a display: the gaps between them aren't there */
+	display_clamp(srv, &x, &y);
 	/* A finger on the touchpad again: momentum scrolling stops. */
 	scroll_touch(srv);
 	srv->ptr_x = x;

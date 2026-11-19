@@ -1789,6 +1789,39 @@ ws_inject_screen_size(ws_connection_t *c, uint32_t width, uint32_t height)
 }
 
 WS_API int
+ws_inject_display(ws_connection_t *c, uint32_t width, uint32_t height,
+    uint32_t mm_width, uint32_t mm_height, const char *edid_id)
+{
+	ws_req_inject_t m;
+
+	req_init(c, &m.hdr, WS_MSG_INJECT, sizeof(m), 0);
+	memset(&m.kind, 0, sizeof(m) - offsetof(ws_req_inject_t, kind));
+	m.kind = WS_INJECT_DISPLAY;
+	m.pressed = 1;
+	m.x = width;
+	m.y = height;
+	m.dx = mm_width;
+	m.dy = mm_height;
+	if (edid_id != NULL)
+		strlcpy(m.key_name, edid_id, sizeof(m.key_name));
+	if (send_oneway(c, &m.hdr) < 0)
+		return -1;
+	return ws_sync(c);
+}
+
+WS_API int
+ws_inject_display_unplug(ws_connection_t *c, uint32_t display_id)
+{
+	return inject(c, WS_INJECT_DISPLAY, 0, 0, 0, display_id, NULL);
+}
+
+WS_API int
+ws_inject_lid(ws_connection_t *c, int closed)
+{
+	return inject(c, WS_INJECT_LID, closed ? 1 : 0, 0, 0, 0, NULL);
+}
+
+WS_API int
 ws_overview(ws_connection_t *c, uint32_t request, ws_event_overview_t *state,
     void (*fn)(const ws_event_overview_item_t *, void *), void *ctx)
 {
@@ -1957,6 +1990,9 @@ ws_event_name(uint16_t type)
 		[WS_EVENT_CAPTURE_ACTIVITY] = "capture-activity",
 		[WS_EVENT_CAPTURE_INFO] = "capture-info",
 		[WS_EVENT_CAPTURE_REVOKED] = "capture-revoked",
+		[WS_EVENT_DISPLAYS_CHANGED] = "displays-changed",
+		[WS_EVENT_DISPLAY] = "display",
+		[WS_EVENT_DISPLAY_MODE] = "display-mode",
 	};
 
 	if (type < WS_EVENT_MAX && names[type] != NULL)
@@ -1982,17 +2018,15 @@ need_settings(ws_connection_t *c)
  * that aren't part of the answer.
  */
 static int
-list_request(ws_connection_t *c, mach_msg_id_t id, uint16_t type,
-    int (*skip)(const ws_event_t *), void (*fn)(const ws_event_t *, void *),
-    void *ctx)
+list_request_about(ws_connection_t *c, mach_msg_id_t id, uint32_t window,
+    uint16_t type, int (*skip)(const ws_event_t *),
+    void (*fn)(const ws_event_t *, void *), void *ctx)
 {
 	ws_req_header_t h;
 	ws_event_t ev;
 	int r, err = 0;
 
-	if (need_settings(c) < 0)
-		return -1;
-	req_init(c, &h, id, sizeof(h), 0);
+	req_init(c, &h, id, sizeof(h), window);
 	if (send_oneway(c, &h) < 0)
 		return -1;
 	for (;;) {
@@ -2027,6 +2061,16 @@ list_request(ws_connection_t *c, mach_msg_id_t id, uint16_t type,
 		if (queue_push(c, &ev) < 0)
 			return -1;
 	}
+}
+
+static int
+list_request(ws_connection_t *c, mach_msg_id_t id, uint16_t type,
+    int (*skip)(const ws_event_t *), void (*fn)(const ws_event_t *, void *),
+    void *ctx)
+{
+	if (need_settings(c) < 0)
+		return -1;
+	return list_request_about(c, id, 0, type, skip, fn, ctx);
 }
 
 static int
@@ -2200,6 +2244,144 @@ ws_list_input_devices(ws_connection_t *c,
 
 	return list_request(c, WS_MSG_LIST_INPUT_DEVICES,
 	    WS_EVENT_INPUT_DEVICE, NULL, device_cb, &cb);
+}
+
+/* ---- displays ---- */
+
+static int
+need_displays(ws_connection_t *c)
+{
+	if ((c->server_flags & WS_SERVER_DISPLAYS) == 0) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	return 0;
+}
+
+struct display_cb {
+	void	(*fn)(const ws_display_info_t *, void *);
+	void	*ctx;
+};
+
+static void
+display_cb(const ws_event_t *ev, void *arg)
+{
+	struct display_cb *cb = arg;
+
+	cb->fn(&ev->u.display, cb->ctx);
+}
+
+WS_API int
+ws_list_displays(ws_connection_t *c,
+    void (*fn)(const ws_display_info_t *, void *), void *ctx)
+{
+	struct display_cb cb = { fn, ctx };
+
+	if (need_displays(c) < 0)
+		return -1;
+	return list_request_about(c, WS_MSG_LIST_DISPLAYS, 0, WS_EVENT_DISPLAY,
+	    NULL, display_cb, &cb);
+}
+
+struct display_mode_cb {
+	void	(*fn)(const ws_display_mode_t *, void *);
+	void	*ctx;
+};
+
+static void
+display_mode_cb(const ws_event_t *ev, void *arg)
+{
+	struct display_mode_cb *cb = arg;
+
+	cb->fn(&ev->u.display_mode, cb->ctx);
+}
+
+WS_API int
+ws_list_display_modes(ws_connection_t *c, uint32_t display_id,
+    void (*fn)(const ws_display_mode_t *, void *), void *ctx)
+{
+	struct display_mode_cb cb = { fn, ctx };
+
+	if (need_displays(c) < 0)
+		return -1;
+	return list_request_about(c, WS_MSG_LIST_DISPLAY_MODES, display_id,
+	    WS_EVENT_DISPLAY_MODE, NULL, display_mode_cb, &cb);
+}
+
+static int
+display_configure(ws_connection_t *c, ws_req_display_t *m)
+{
+	if (need_displays(c) < 0)
+		return -1;
+	req_init(c, &m->hdr, WS_MSG_DISPLAY_CONFIGURE, sizeof(*m), 0);
+	return send_rpc(c, &m->hdr, NULL);
+}
+
+WS_API int
+ws_display_set_looks_like(ws_connection_t *c, uint32_t display_id,
+    uint32_t width, uint32_t height, uint32_t flags)
+{
+	ws_req_display_t m = { .display_id = display_id,
+	    .op = WS_DISPLAY_SET_LOOKS_LIKE, .flags = flags, .width = width,
+	    .height = height };
+
+	return display_configure(c, &m);
+}
+
+WS_API int
+ws_display_set_mode(ws_connection_t *c, uint32_t display_id, uint32_t width,
+    uint32_t height, uint32_t refresh_mhz, uint32_t flags)
+{
+	ws_req_display_t m = { .display_id = display_id,
+	    .op = WS_DISPLAY_SET_MODE, .flags = flags, .width = width,
+	    .height = height, .refresh_mhz = refresh_mhz };
+
+	return display_configure(c, &m);
+}
+
+WS_API int
+ws_display_set_origin(ws_connection_t *c, uint32_t display_id, int32_t x,
+    int32_t y, uint32_t flags)
+{
+	ws_req_display_t m = { .display_id = display_id,
+	    .op = WS_DISPLAY_SET_ORIGIN, .flags = flags, .x = x, .y = y };
+
+	return display_configure(c, &m);
+}
+
+WS_API int
+ws_display_set_main(ws_connection_t *c, uint32_t display_id, uint32_t flags)
+{
+	ws_req_display_t m = { .display_id = display_id,
+	    .op = WS_DISPLAY_SET_MAIN, .flags = flags };
+
+	return display_configure(c, &m);
+}
+
+WS_API int
+ws_display_set_mirror(ws_connection_t *c, uint32_t display_id, uint32_t of,
+    uint32_t flags)
+{
+	ws_req_display_t m = { .display_id = display_id,
+	    .op = WS_DISPLAY_SET_MIRROR, .flags = flags, .arg = of };
+
+	return display_configure(c, &m);
+}
+
+WS_API int
+ws_display_keep(ws_connection_t *c)
+{
+	ws_req_display_t m = { .op = WS_DISPLAY_KEEP };
+
+	return display_configure(c, &m);
+}
+
+WS_API int
+ws_display_revert(ws_connection_t *c)
+{
+	ws_req_display_t m = { .op = WS_DISPLAY_REVERT };
+
+	return display_configure(c, &m);
 }
 
 /* ---- the user's settings file ---- */

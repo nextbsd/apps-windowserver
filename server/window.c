@@ -665,11 +665,8 @@ place_icon(struct ws_server *srv, struct ws_window *w)
 	if (!icon_overlaps(srv, w, &r) &&
 	    (w->tile_for == NULL || rect_inside(&u, &r)))
 		return;
-	if (u.width <= 0 || u.height <= 0) {
-		u.x = u.y = 0;
-		u.width = (int32_t)srv->width;
-		u.height = (int32_t)srv->height;
-	}
+	if (u.width <= 0 || u.height <= 0)
+		u = display_main_frame(srv);
 	cols = u.width / r.width;
 	rows = u.height / r.height;
 	for (i = 0; i < cols * rows; i++) {

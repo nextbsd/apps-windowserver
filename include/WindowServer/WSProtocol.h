@@ -144,6 +144,11 @@ enum {
 					   ws_req_capture_revoke_t */
 	/* servers with WS_SERVER_DMABUF, see "GPU buffers" */
 	WS_MSG_DMABUF_FORMATS,		/* sync; u.dmabuf */
+	/* servers with WS_SERVER_DISPLAYS, see "Displays" */
+	WS_MSG_LIST_DISPLAYS,		/* answers on the socket */
+	WS_MSG_LIST_DISPLAY_MODES,	/* hdr.window: display id; answers on
+					   the socket */
+	WS_MSG_DISPLAY_CONFIGURE,	/* sync, ws_req_display_t */
 	WS_MSG_LAST
 };
 
@@ -650,7 +655,72 @@ typedef struct ws_req_cursor {
  * entries about the display: DisplayID, DisplayName, DisplayPanel
  * ("3840x2160"), DisplayModes (the "looks like" choices, "WxH,WxH,...",
  * from Larger Text to More Space), DisplayDefault and DisplayCurrent
- * ("WxH@scale").
+ * ("WxH@scale"). With several displays these and DisplayLooksLike are
+ * the main display's; "Displays" below covers each of them.
+ */
+
+/*
+ * Displays (servers with WS_SERVER_DISPLAYS), the way macOS does them.
+ * Each connected display shows a rectangle of one desktop, in points
+ * (ws_display_info_t.frame). ws_screen_info_t (the welcome and
+ * WS_EVENT_SCREEN_CHANGED) is the smallest rectangle around them all,
+ * so clients that know only one screen still see every window; the
+ * usable area (WS_EVENT_USABLE_AREA) is the main display's. Parts of
+ * that rectangle no display shows exist but can't be seen: the pointer
+ * never goes there, and windows left there are moved onto a display.
+ *
+ * The whole desktop is drawn at one backing scale, ws_screen_info_t.scale:
+ * the largest any display needs (2 if any is HiDPI). A display whose own
+ * scale is smaller is shown scaled down to its pixels, as macOS's
+ * scaled modes are, so windows draw at one scale wherever they are.
+ *
+ * As on a Mac, with nothing set up:
+ *   - the built-in panel is the main display (the menu bar and the
+ *     Dock); a display plugged in goes to its right, tops aligned, and
+ *     extends the desktop;
+ *   - each display gets its own default "looks like" size (2x HiDPI,
+ *     1x otherwise) and its preferred mode;
+ *   - the arrangement (places, main display, mirroring) is kept per set
+ *     of displays, by EDID, and the same set comes back arranged as it
+ *     was; each display's "looks like" size and mode are kept per
+ *     display, in the display store (DisplayStore,
+ *     /Library/Preferences/org.nextbsd.windowserver.displays.plist);
+ *   - unplugging a display moves its windows onto the main display,
+ *     and plugging it back in moves them back;
+ *   - closing the lid while another display is connected turns the
+ *     built-in panel off (WS_DISPLAY_BUILTIN), and the desktop goes on
+ *     on the others; opening it brings the panel back.
+ *
+ * WS_MSG_LIST_DISPLAYS answers with a WS_EVENT_DISPLAY per display, the
+ * main one first, then WS_EVENT_LIST_END. WS_MSG_LIST_DISPLAY_MODES
+ * (hdr.window: the display) answers with a WS_EVENT_DISPLAY_MODE per
+ * "looks like" size, from Larger Text to More Space, then per mode the
+ * display has, largest first, then WS_EVENT_LIST_END.
+ *
+ * When displays come or go, or one's mode, place or role changes,
+ * every connection gets WS_EVENT_DISPLAYS_CHANGED, then
+ * WS_EVENT_SCREEN_CHANGED and WS_EVENT_USABLE_AREA if they changed,
+ * then WS_EVENT_WINDOW_FRAME for windows that moved.
+ *
+ * WS_MSG_DISPLAY_CONFIGURE (sync, ws_req_display_t) makes one change:
+ * a "looks like" size, a mode, a place, the main display or mirroring.
+ * Any console user may (or root), as with WS_MSG_SET_SETTINGS; others
+ * get EPERM. An unknown display is ENOENT, a size or mode it doesn't
+ * have EINVAL. With WS_DISPLAY_CONFIRM the change is pending: the
+ * display says WS_DISPLAY_PENDING and revert_ms, and unless
+ * WS_DISPLAY_KEEP comes within WS_DISPLAY_REVERT_MS the server undoes
+ * it by itself (a mode the display can't show leaves the user nothing
+ * to click), as macOS's "Keep these settings?" does. WS_DISPLAY_REVERT
+ * undoes it at once. Changes made with WS_DISPLAY_CONFIRM while one
+ * is pending join it: the countdown starts again, and reverting undoes
+ * them all (Displays.app's Mirror Displays is a change per display). A
+ * change without it while one is pending stays whatever happens.
+ *
+ * Night Shift: the settings NightShift (Off, On or Schedule),
+ * NightShiftSchedule ("22:00-07:00", local time) and
+ * NightShiftTemperature (1900 to 6500 kelvin, 3400 by default) warm
+ * every display's colours through its gamma ramp, fading over a minute
+ * at the schedule's ends.
  */
 
 /*
@@ -1183,6 +1253,41 @@ typedef struct ws_req_settings {	/* SET_SETTINGS */
 	uint32_t	length;		/* bytes used in data */
 	char		data[WS_MAX_SETTINGS_DATA];
 } ws_req_settings_t;
+
+/*
+ * WS_MSG_DISPLAY_CONFIGURE ("Displays"): one change to one display.
+ */
+enum {
+	WS_DISPLAY_SET_LOOKS_LIKE = 1,	/* width x height points; 0 x 0: the
+					   display's default */
+	WS_DISPLAY_SET_MODE,		/* width x height pixels at
+					   refresh_mhz (0: the highest); 0 x 0:
+					   the display's preferred mode */
+	WS_DISPLAY_SET_ORIGIN,		/* x, y points: where the display's
+					   top-left corner goes; the others
+					   stay, and it is moved to touch them
+					   without overlapping */
+	WS_DISPLAY_SET_MAIN,		/* it becomes the main display */
+	WS_DISPLAY_SET_MIRROR,		/* arg: the display it shows, 0: back
+					   to its own part of the desktop */
+	WS_DISPLAY_KEEP,		/* keep the pending change (any
+					   display_id) */
+	WS_DISPLAY_REVERT,		/* undo the pending change now */
+};
+
+typedef struct ws_req_display {
+	ws_req_header_t	hdr;
+	uint32_t	display_id;
+	uint32_t	op;		/* WS_DISPLAY_SET_*, _KEEP, _REVERT */
+	uint32_t	flags;		/* WS_DISPLAY_CONFIRM (WSTypes.h) */
+	int32_t		x;		/* SET_ORIGIN */
+	int32_t		y;
+	uint32_t	width;		/* SET_LOOKS_LIKE, SET_MODE */
+	uint32_t	height;
+	uint32_t	refresh_mhz;	/* SET_MODE */
+	uint32_t	arg;		/* SET_MIRROR */
+	uint32_t	reserved;
+} ws_req_display_t;
 
 /*
  * Synthetic input. Accepted when the server runs headless, or from a
