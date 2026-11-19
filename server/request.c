@@ -598,6 +598,15 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		window_set_frame(srv, w, &((ws_req_frame_t *)(void *)h)->frame);
 		tiling_client_frame(srv, w);
 		window_clear_owner_frame(srv, w);
+		/*
+		 * The menu bar and the status items are placed here, on the
+		 * display with focus: an owner's frame keeps its size, and
+		 * the place goes back. An owner working out the display from
+		 * the frame it had puts its bar on the wrong one once the
+		 * displays have moved.
+		 */
+		if (menubar_managed(w))
+			menubar_update(srv);
 		break;
 	case WS_MSG_WINDOW_SET_LEVEL:
 		if (menubar_managed(w))
