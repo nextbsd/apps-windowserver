@@ -24,6 +24,13 @@
  *	A status item: a window in COLOR, WIDTH points wide, at PRIORITY.
  *	SIGUSR1 doubles its width; SIGUSR2 orders it out.
  *
+ * SIGHUP switches a bar app's menu style, as Workspace Preferences'
+ * NBMenuStyle does: from the Mac style to one without a bar (NeXT or
+ * in-window: WS_MSG_SET_MENU_BAR 0, the bar window ordered out, printing
+ * "style next") and back (the bar named again, "style mac").
+ * WSMENUBAR_DOC=X,Y puts the document window there instead of at
+ * 300,300 (on another display).
+ *
  * It prints the events the test reads, one per line, and "ready" once
  * set up; tests/menubar-test.sh drives it with wsctl.
  */
@@ -52,8 +59,9 @@ struct win {
 
 static ws_connection_t *conn;
 static struct win bar, doc, item;
-static volatile sig_atomic_t quit, widen, hide;
+static volatile sig_atomic_t quit, widen, hide, restyle;
 static bool old_style;
+static bool mac = true;		/* the Mac menu style (SIGHUP) */
 static uint32_t item_width;
 static int32_t item_priority;
 
@@ -139,7 +147,7 @@ on_event(ws_connection_t *c, const ws_event_t *ev, void *ctx)
 		break;
 	case WS_EVENT_APP_ACTIVATED:
 		printf("activated\n");
-		if (bar.id != 0)	/* GNUstep orders its menu in */
+		if (bar.id != 0 && mac)	/* GNUstep orders its menu in */
 			ws_window_order(conn, bar.id, WS_ORDER_ABOVE, 0);
 		break;
 	case WS_EVENT_APP_DEACTIVATED:
@@ -174,6 +182,8 @@ on_signal(int sig)
 		widen = 1;
 	else if (sig == SIGUSR2)
 		hide = 1;
+	else if (sig == SIGHUP)
+		restyle = 1;
 	else
 		quit = 1;
 }
@@ -198,6 +208,8 @@ main(int argc, char **argv)
 	uint64_t start;
 	struct timespec ts;
 	char bar_title[80], doc_title[80];
+	const char *env;
+	int dx, dy;
 
 	if (argc < 4)
 		usage();
@@ -206,6 +218,7 @@ main(int argc, char **argv)
 	signal(SIGTERM, on_signal);
 	signal(SIGUSR1, on_signal);
 	signal(SIGUSR2, on_signal);
+	signal(SIGHUP, on_signal);
 
 	conn = ws_connect(argv[2], 0);
 	if (conn == NULL) {
@@ -226,7 +239,13 @@ main(int argc, char **argv)
 		bar.title = (uint32_t)strtoul(argv[4], NULL, 16);
 		doc.body = bar.title;
 		delay = argc == 6 ? atoi(argv[5]) : 0;
-		make(&doc, 300, 300, 200, 150, WS_LEVEL_NORMAL, 0, doc_title);
+		if ((env = getenv("WSMENUBAR_DOC")) != NULL &&
+		    sscanf(env, "%d,%d", &dx, &dy) == 2)
+			make(&doc, dx, dy, 200, 150, WS_LEVEL_NORMAL, 0,
+			    doc_title);
+		else
+			make(&doc, 300, 300, 200, 150, WS_LEVEL_NORMAL, 0,
+			    doc_title);
 		ws_window_order(conn, doc.id, WS_ORDER_ABOVE, 0);
 		/* (reported first, or keeping clear of the strip would push
 		   the bar below it) */
@@ -240,7 +259,13 @@ main(int argc, char **argv)
 		printf("bar window %u\n", bar.id);
 	} else if (strcmp(argv[1], "plain") == 0 && argc == 4) {
 		doc.body = (uint32_t)strtoul(argv[3], NULL, 16);
-		make(&doc, 300, 300, 200, 150, WS_LEVEL_NORMAL, 0, doc_title);
+		if ((env = getenv("WSMENUBAR_DOC")) != NULL &&
+		    sscanf(env, "%d,%d", &dx, &dy) == 2)
+			make(&doc, dx, dy, 200, 150, WS_LEVEL_NORMAL, 0,
+			    doc_title);
+		else
+			make(&doc, 300, 300, 200, 150, WS_LEVEL_NORMAL, 0,
+			    doc_title);
 		ws_window_order(conn, doc.id, WS_ORDER_ABOVE, 0);
 		ws_activate(conn);
 		ws_window_make_key(conn, doc.id);
@@ -292,6 +317,21 @@ main(int argc, char **argv)
 			    item_priority);
 			ws_sync(conn);
 			printf("widened %u\n", item_width);
+		}
+		if (restyle && named && bar.id != 0 && !old_style) {
+			restyle = 0;
+			mac = !mac;
+			if (mac) {
+				ws_window_order(conn, bar.id, WS_ORDER_ABOVE,
+				    0);
+				ws_set_menu_bar_window(conn, bar.id,
+				    BAR_HEIGHT);
+			} else {
+				ws_set_menu_bar_window(conn, bar.id, 0);
+				ws_window_order(conn, bar.id, WS_ORDER_OUT, 0);
+			}
+			ws_sync(conn);
+			printf("style %s\n", mac ? "mac" : "next");
 		}
 		if (hide) {
 			hide = 0;

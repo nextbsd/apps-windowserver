@@ -1606,11 +1606,17 @@ map_image(const ws_event_snapshot_t *s, ws_snapshot_t *out)
 WS_API int
 ws_snapshot(ws_connection_t *c, ws_snapshot_t *out)
 {
+	return ws_snapshot_display(c, 0, out);
+}
+
+WS_API int
+ws_snapshot_display(ws_connection_t *c, uint32_t display, ws_snapshot_t *out)
+{
 	ws_req_int_t m;
 	ws_event_t ev;
 
 	req_init(c, &m.hdr, WS_MSG_SNAPSHOT, sizeof(m), 0);
-	m.value = 0;
+	m.value = (int32_t)display;
 	m.reserved = 0;
 	if (send_rpc(c, &m.hdr, NULL) < 0)
 		return -1;

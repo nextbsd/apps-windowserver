@@ -8,7 +8,12 @@
 #   gmake check           run the headless tests (tests/headless-test.sh,
 #                         tests/pointer-test.sh, tests/tiling-test.sh,
 #                         tests/drag-test.sh, tests/dock-clear-test.sh,
-#                         tests/capture-test.sh)
+#                         tests/capture-test.sh, tests/displays-test.sh,
+#                         tests/menubar-test.sh,
+#                         tests/menubar-displays-test.sh)
+#   gmake check-menubar-matrix  the menu bar on every display, every
+#                         style, mode, display and Dock combination
+#                         (tests/menubar-matrix-test.sh, ~15 minutes)
 #   gmake check-settings  the settings test against a running headless
 #                         server (WS_SERVICE_NAME=..., tests/settings-test.sh)
 #   gmake agent           ScreenCaptureAgent, the Screen Recording consent
@@ -177,6 +182,12 @@ check: all
 	sh tests/capture-test.sh $(B)
 	sh tests/displays-test.sh $(B)
 	sh tests/menubar-test.sh $(B)
+	sh tests/menubar-displays-test.sh $(B)
+
+# the menu bar on every display across styles, modes, displays and Dock
+# edges (about a quarter of an hour)
+check-menubar-matrix: all
+	sh tests/menubar-matrix-test.sh $(B)
 
 check-settings: all
 	sh tests/settings-test.sh $(B)
@@ -193,4 +204,4 @@ clean:
 	rm -rf $(B)
 	-[ -z "$(GNUSTEP_MAKEFILES)" ] || $(MAKE) -C agent clean
 
-.PHONY: all install check check-settings agent install-agent clean
+.PHONY: all install check check-menubar-matrix check-settings agent install-agent clean

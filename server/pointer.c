@@ -382,6 +382,10 @@ pointer_button(struct ws_server *srv, uint32_t button, bool pressed)
 		if (srv->buttons & mask)
 			return;
 		if (srv->buttons == 0) {
+			/* a press on a dimmed copy of the menu bar: the
+			   live bar moves under the pointer first, and the
+			   press is its (menubar.c) */
+			menubar_copy_press(srv);
 			pointer_recheck(srv);
 			w = window_at(srv, srv->ptr_x, srv->ptr_y);
 			srv->grab = w;

@@ -308,6 +308,36 @@ composite_window(struct ws_server *srv, struct ws_window *w,
 }
 
 /*
+ * Draw w's buffer again with its top-left corner at x, y (points), at
+ * most maxw x maxh points of it, with an opacity: the menu bar's dimmed
+ * copies on the displays without focus (menubar.c). The renderer
+ * clips to the frame's region as for any draw.
+ */
+void
+composite_window_copy(struct ws_server *srv, struct ws_window *w, int32_t x,
+    int32_t y, int32_t maxw, int32_t maxh, double opacity)
+{
+	struct ws_buffer *b = w->buffer;
+	int32_t bw, bh;
+
+	if (b == NULL || opacity <= 0.0 || w->frame.width <= 0 ||
+	    w->frame.height <= 0 ||
+	    (b->image == NULL && srv->renderer->buffer_import == NULL))
+		return;
+	bw = (int32_t)(b->width / b->scale);
+	bh = (int32_t)(b->height / b->scale);
+	if (bw > w->frame.width)
+		bw = w->frame.width;
+	if (bh > w->frame.height)
+		bh = w->frame.height;
+	if (bw > maxw)
+		bw = maxw;
+	if (bh > maxh)
+		bh = maxh;
+	draw_image(srv, w, true, b->image, b->scale, opacity, x, y, bw, bh);
+}
+
+/*
  * Does w hide what is below its frame? Only when it is drawn without
  * blending (as composite_window does at opacity 1) over all of its
  * frame: a smaller buffer leaves the rest showing what is below.
@@ -401,15 +431,22 @@ repaint_region(struct ws_server *srv, pixman_region32_t *region,
 			srv->renderer->fill(srv, &bg, b, n);
 		pixman_region32_fini(&uncov_back);
 		pixman_region32_fini(&uncov);
-		bool bar_drawn = !srv->bar_fallback;
+		bool bar_drawn = srv->bar_strips_height <= 0;
+		bool copies_drawn = bar_drawn;
 
 		for (w = srv->stack_bottom; w != NULL; w = w->above) {
-			/* the empty menu bar, under the main-menu level:
+			/* the menu bar strips, under the main-menu level:
 			   below bars that older clients put at
 			   WS_LEVEL_MAIN_MENU themselves too */
 			if (!bar_drawn && w->level >= WS_LEVEL_MAIN_MENU) {
 				menubar_composite(srv, region);
 				bar_drawn = true;
+			}
+			/* the bar's dimmed copies on the other displays,
+			   where the bar and its items would be */
+			if (!copies_drawn && w->level > WS_LEVEL_STATUS_ITEM) {
+				menubar_composite_copies(srv, region);
+				copies_drawn = true;
 			}
 			/* the border is outside the frame: drawn anyway */
 			if (w == srv->tiling.border)
@@ -419,6 +456,8 @@ repaint_region(struct ws_server *srv, pixman_region32_t *region,
 		}
 		if (!bar_drawn)
 			menubar_composite(srv, region);
+		if (!copies_drawn)
+			menubar_composite_copies(srv, region);
 	}
 
 	/* a drag's image, above everything but the cursor (drag.c) */
@@ -628,6 +667,53 @@ snapshot_memfd(struct ws_server *srv, uint32_t *stride_out)
 	}
 	munmap(p, size);
 	*stride_out = stride;
+	return fd;
+}
+
+/* A memfd holding display d's panel as XRGB8888 (the pixman
+   renderer's views; WS_MSG_SNAPSHOT with a display). */
+int
+snapshot_display_memfd(struct ws_server *srv, struct ws_display *d,
+    uint32_t *stride_out, uint32_t *width, uint32_t *height)
+{
+	uint32_t stride, w, h;
+	size_t size;
+	pixman_image_t *dst;
+	void *p;
+	int fd;
+
+	compositor_repaint(srv);
+	if (srv->out == NULL || d->view == NULL) {
+		errno = ENOTSUP;
+		return -1;
+	}
+	w = (uint32_t)pixman_image_get_width(d->view);
+	h = (uint32_t)pixman_image_get_height(d->view);
+	stride = w * 4;
+	size = (size_t)stride * h;
+	fd = memfd_create("WindowServer-snapshot", MFD_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	if (ftruncate(fd, (off_t)size) < 0) {
+		close(fd);
+		return -1;
+	}
+	p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (p == MAP_FAILED) {
+		close(fd);
+		return -1;
+	}
+	dst = pixman_image_create_bits(PIXMAN_x8r8g8b8, (int)w, (int)h, p,
+	    (int)stride);
+	if (dst != NULL) {
+		pixman_image_composite32(PIXMAN_OP_SRC, d->view, NULL, dst,
+		    0, 0, 0, 0, 0, 0, w, h);
+		pixman_image_unref(dst);
+	}
+	munmap(p, size);
+	*stride_out = stride;
+	*width = w;
+	*height = h;
 	return fd;
 }
 
