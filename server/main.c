@@ -314,7 +314,7 @@ main(int argc, char **argv)
 		goto out;
 
 	if (srv->headless && strcmp(srv->cfg.display_store,
-	    "/Library/Preferences/org.nextbsd.windowserver.displays.plist") == 0)
+	    "/Local/Library/Preferences/org.nextbsd.windowserver.displays.plist") == 0)
 		srv->cfg.display_store[0] = '\0';	/* tests keep nothing */
 	display_init(srv);
 	if (compositor_init(srv) < 0)
