@@ -179,7 +179,7 @@ config_defaults(struct ws_config *cfg)
 	strlcpy(cfg->display_panel_mode, "Preferred",
 	    sizeof(cfg->display_panel_mode));
 	strlcpy(cfg->display_store,
-	    "/Library/Preferences/org.nextbsd.windowserver.displays.plist",
+	    "/Local/Library/Preferences/org.nextbsd.windowserver.displays.plist",
 	    sizeof(cfg->display_store));
 	strlcpy(cfg->night_shift, "Off", sizeof(cfg->night_shift));
 	strlcpy(cfg->night_shift_schedule, "22:00-07:00",
