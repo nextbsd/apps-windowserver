@@ -465,8 +465,8 @@ store_get(const struct store *st, const char *key)
 	return NULL;
 }
 
-/* /Library/Preferences, or even /Library, may not exist yet: make the
-   store's directories, as mkdir -p. */
+/* /Local/Library/Preferences may not exist yet: make the store's
+   directories, as mkdir -p. */
 static void
 store_mkdir(struct ws_server *srv)
 {
@@ -542,6 +542,58 @@ store_put(struct ws_server *srv, const char *key, const char *val)
 	return 0;
 }
 
+/* Until the shipped org.nextbsd.WindowServer.plist was fixed, the store
+   was /Library/Preferences/org.nextbsd.windowserver.displays.plist, the
+   macOS path. It belongs in /Local/Library/Preferences: it is this
+   machine's arrangement, not something NextBSD ships. When the store
+   doesn't exist yet and the old file does, start the store as a copy of
+   it, so an arrangement made before the move is kept. The old file is
+   left as it is. */
+#define DISPLAY_STORE_OLD \
+	"/Library/Preferences/org.nextbsd.windowserver.displays.plist"
+
+static void
+store_migrate(struct ws_server *srv)
+{
+	char buf[8192];
+	FILE *in, *out;
+	size_t n;
+	int ok = 1;
+
+	if (srv->cfg.display_store[0] == '\0' ||
+	    strcmp(srv->cfg.display_store, DISPLAY_STORE_OLD) == 0 ||
+	    access(srv->cfg.display_store, F_OK) == 0)
+		return;
+	in = fopen(DISPLAY_STORE_OLD, "r");
+	if (in == NULL)
+		return;
+	store_mkdir(srv);
+	out = fopen(srv->cfg.display_store, "w");
+	if (out == NULL) {
+		ws_warn("can't write %s: %s", srv->cfg.display_store,
+		    strerror(errno));
+		fclose(in);
+		return;
+	}
+	while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+		if (fwrite(buf, 1, n, out) != n) {
+			ok = 0;
+			break;
+		}
+	if (ferror(in))
+		ok = 0;
+	fclose(in);
+	if (fclose(out) != 0)
+		ok = 0;
+	chmod(srv->cfg.display_store, 0644);
+	if (ok)
+		ws_info("display arrangement copied from %s to %s",
+		    DISPLAY_STORE_OLD, srv->cfg.display_store);
+	else
+		ws_warn("copying %s to %s failed", DISPLAY_STORE_OLD,
+		    srv->cfg.display_store);
+}
+
 /* Root, before dropping privileges: the store belongs to the server's
    account, so it can write it later. */
 void
@@ -552,6 +604,7 @@ display_store_chown(struct ws_server *srv, uid_t uid, gid_t gid)
 	if (srv->cfg.display_store[0] == '\0')
 		return;
 	store_mkdir(srv);
+	store_migrate(srv);
 	if (access(srv->cfg.display_store, F_OK) != 0) {
 		f = fopen(srv->cfg.display_store, "w");
 		if (f == NULL)
@@ -1703,6 +1756,9 @@ display_init(struct ws_server *srv)
 	struct ws_display *d;
 	unsigned i;
 
+	/* Also here: a server that stays root never calls
+	   display_store_chown(). */
+	store_migrate(srv);
 	for (i = 0; i < srv->ndisplays; i++) {
 		d = srv->displays[i];
 		if (d->edid_id[0] == '\0')

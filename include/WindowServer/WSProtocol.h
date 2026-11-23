@@ -659,8 +659,9 @@ typedef struct ws_req_cursor {
  *   - the user's "looks like" choice for this display, the setting
  *     DisplayLooksLike ("WxH", or "Default" to go back), which
  *     WindowServer keeps per display (EDID vendor, product and serial)
- *     in /Library/Preferences/org.nextbsd.windowserver.displays.plist,
- *     for every user, as macOS's windowserver displays plist does;
+ *     in /Local/Library/Preferences/org.nextbsd.windowserver.displays.plist,
+ *     for every user, as macOS's windowserver displays plist does in
+ *     its local domain;
  *   - DisplayDefaultLooksLike, "Default" or "WxH": the system's choice
  *     (org.nextbsd.WindowServer.plist) for a display the user hasn't
  *     picked a size for.
@@ -703,7 +704,7 @@ typedef struct ws_req_cursor {
  *     of displays, by EDID, and the same set comes back arranged as it
  *     was; each display's "looks like" size and mode are kept per
  *     display, in the display store (DisplayStore,
- *     /Library/Preferences/org.nextbsd.windowserver.displays.plist);
+ *     /Local/Library/Preferences/org.nextbsd.windowserver.displays.plist);
  *   - unplugging a display moves its windows onto the main display,
  *     and plugging it back in moves them back;
  *   - closing the lid while another display is connected turns the

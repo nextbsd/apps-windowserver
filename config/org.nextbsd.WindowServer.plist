@@ -162,7 +162,7 @@
 	<key>DisplayPanelMode</key>
 	<string>Preferred</string>
 	<key>DisplayStore</key>
-	<string>/Library/Preferences/org.nextbsd.windowserver.displays.plist</string>
+	<string>/Local/Library/Preferences/org.nextbsd.windowserver.displays.plist</string>
 	<!-- "auto": composite on the GPU with GLES2 (GBM and EGL), or with
 	     pixman on the CPU when there's no GPU, only a software renderer
 	     (llvmpipe, as in VMs) or EGL fails to start. "gles2" uses GLES2
