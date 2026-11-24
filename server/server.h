@@ -1475,6 +1475,7 @@ extern const struct ws_renderer_ops gles_renderer_ops;
 #endif
 
 /* ---- drm.c ---- */
+int	drm_wait(struct ws_server *srv, int timeout_ms);
 int	drm_open(struct ws_server *srv);
 int	drm_start(struct ws_server *srv);
 void	drm_readable(struct ws_server *srv);
