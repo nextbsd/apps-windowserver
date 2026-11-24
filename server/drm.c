@@ -1226,14 +1226,53 @@ open_card(const char *path)
 }
 
 /*
+ * Wait up to timeout_ms for a card with a connected display (or
+ * cfg.drm_device), looking every 200 ms and keeping nothing open. Called
+ * before vt_open: at boot launchd starts WindowServer before kextd has
+ * loaded the GPU kext (VideoCore6KMS on a Pi 500+ comes about 10 s later).
+ * Taking the VT and then exiting would end the boot splash and leave the
+ * text console on screen until launchd's respawn (nextbsd/nextbsd#542).
+ * Waiting here keeps the splash and its spinner on screen instead.
+ */
+int
+drm_wait(struct ws_server *srv, int timeout_ms)
+{
+	char path[64];
+	int fd, i, waited;
+
+	for (waited = 0;; waited += 200) {
+		fd = -1;
+		if (srv->cfg.drm_device[0] != '\0') {
+			fd = open_card(srv->cfg.drm_device);
+		} else {
+			for (i = 0; i < 16 && fd < 0; i++) {
+				snprintf(path, sizeof(path), "/dev/dri/card%d", i);
+				fd = open_card(path);
+			}
+		}
+		if (fd >= 0) {
+			close(fd);
+			if (waited > 0)
+				ws_info("%s: display ready after %d ms", drm.path,
+				    waited);
+			return 0;
+		}
+		if (waited >= timeout_ms)
+			return -1;
+		if (waited == 0)
+			ws_info("waiting for a DRM device with a connected display");
+		usleep(200 * 1000);
+	}
+}
+
+/*
  * Open the card that has a connected display (or cfg.drm_device),
  * become DRM master, and make a display for each connected connector.
  * Called as root, before privileges are dropped; the same process keeps
  * master. The displays are turned on by drm_start, once the desktop is
  * laid out (display.c).
  *
- * TODO: wait for the GPU kext's IOKit match before probing
- * (nextbsd/nextbsd#390).
+ * main() calls drm_wait first, so the GPU kext has had time to attach.
  */
 int
 drm_open(struct ws_server *srv)

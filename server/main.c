@@ -303,6 +303,11 @@ main(int argc, char **argv)
 	} else {
 		/* Devices first, while still root. */
 		vt_install_crash_handlers(srv);
+		/* A display before the VT: never take the screen for nothing. */
+		if (drm_wait(srv, 30 * 1000) < 0) {
+			ws_err("no DRM device with a connected display");
+			goto out;
+		}
 		if (vt_open(srv) < 0 || drm_open(srv) < 0)
 			goto out;
 		if (input_open(srv) < 0)
