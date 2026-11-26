@@ -176,6 +176,89 @@ shadow_scaled(struct ws_server *srv, pixman_image_t *src, int sw, int sh,
 	srv->renderer->draw(srv, &d);
 }
 
+/*
+ * Menus are frosted glass (nextbsd/nextbsd#708): a see-through window at
+ * a menu level, a NeXT main menu, a submenu or torn-off menu, a pop-up
+ * list, has what is under it blurred before it is drawn over it, as on a
+ * Mac, so a translucent menu stays readable over anything. The blur
+ * reads WS_BLUR_RADIUS points around each spot.
+ */
+#define WS_BLUR_RADIUS	24
+
+static bool
+window_blurs(struct ws_server *srv, struct ws_window *w)
+{
+	if (srv->renderer->blur == NULL || !w->visible || w->minimized ||
+	    w->tile_for != NULL || w->buffer == NULL || menubar_managed(w))
+		return false;
+	if (w->level != WS_LEVEL_MAIN_MENU && w->level != WS_LEVEL_SUBMENU &&
+	    w->level != WS_LEVEL_POPUP_MENU)
+		return false;
+	return (w->flags & WS_WINDOW_OPAQUE) == 0 &&
+	    w->buffer->format != WS_FORMAT_XRGB8888;
+}
+
+/* Blur what is under w, where w is drawn, before w is drawn. */
+static void
+blur_under(struct ws_server *srv, struct ws_window *w)
+{
+	struct ws_buffer *b = w->buffer;
+	int32_t s = (int32_t)srv->scale;
+	int32_t bw = (int32_t)(b->width / b->scale);
+	int32_t bh = (int32_t)(b->height / b->scale);
+	struct ws_draw d = { .src = b->image, .window = w,
+	    .x = w->frame.x * s, .y = w->frame.y * s, .fx = 1.0, .fy = 1.0,
+	    .blend = true, .opacity = 1.0 };
+
+	if (bw > w->frame.width)
+		bw = w->frame.width;
+	if (bh > w->frame.height)
+		bh = w->frame.height;
+	d.w = bw * s;
+	d.h = bh * s;
+	if (d.w <= 0 || d.h <= 0 || b->image == NULL)
+		return;
+	if ((int32_t)b->scale != s) {
+		d.fx = d.fy = (double)b->scale / s;
+		d.smooth = s % (int32_t)b->scale != 0;
+	}
+	srv->renderer->blur(srv, &d, WS_BLUR_RADIUS * s);
+}
+
+/*
+ * A blur reads what is under all of its window and a radius around it,
+ * so where a frame's damage meets one, the frame redraws all of that:
+ * blurring a part that wasn't drawn again would blur the last blur.
+ */
+static void
+blur_damage(struct ws_server *srv, pixman_region32_t *region)
+{
+	struct ws_window *w;
+	int32_t r = WS_BLUR_RADIUS;
+	bool grew;
+
+	do {
+		grew = false;
+		for (w = srv->stack_bottom; w != NULL; w = w->above) {
+			pixman_box32_t f = { w->frame.x - r, w->frame.y - r,
+			    w->frame.x + w->frame.width + r,
+			    w->frame.y + w->frame.height + r };
+
+			if (!window_blurs(srv, w) ||
+			    pixman_region32_contains_rectangle(region, &f) ==
+			    PIXMAN_REGION_OUT ||
+			    pixman_region32_contains_rectangle(region, &f) ==
+			    PIXMAN_REGION_IN)
+				continue;
+			pixman_region32_union_rect(region, region, f.x1, f.y1,
+			    (unsigned)(f.x2 - f.x1), (unsigned)(f.y2 - f.y1));
+			grew = true;
+		}
+	} while (grew);
+	pixman_region32_intersect_rect(region, region, 0, 0, srv->width,
+	    srv->height);
+}
+
 /* Fill w x h points at x, y with a colour (OVER). */
 void
 shadow_fill(struct ws_server *srv, const pixman_color_t *color, int32_t x,
@@ -451,8 +534,11 @@ repaint_region(struct ws_server *srv, pixman_region32_t *region,
 			/* the border is outside the frame: drawn anyway */
 			if (w == srv->tiling.border)
 				tiling_draw_border(srv, w);
-			if (!w->culled)
+			if (!w->culled) {
+				if (window_blurs(srv, w))
+					blur_under(srv, w);
 				composite_window(srv, w, ext, 1.0);
+			}
 		}
 		if (!bar_drawn)
 			menubar_composite(srv, region);
@@ -558,6 +644,7 @@ compositor_repaint(struct ws_server *srv)
 	pixman_region32_clear(&srv->damage);
 	if (srv->renderer->repaint != NULL)
 		srv->renderer->repaint(srv, &region);
+	blur_damage(srv, &region);
 
 	tiles_render(srv);
 	repaint_region(srv, &region, &out);

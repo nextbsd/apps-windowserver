@@ -175,6 +175,12 @@ struct gles {
 	PFNEGLDESTROYIMAGEKHRPROC destroy_image;
 	PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_texture;
 	GLuint		prog_tex, prog_fill;
+	/* frosted menus: a separable gaussian over a copy of the desktop
+	   under the window, laid back through the window's alpha */
+	GLuint		prog_blur, prog_mask;
+	GLint		blur_step, blur_limit, mask_screen, mask_opaque;
+	GLuint		blur_tex[2], blur_fbo[2];
+	int		blur_w, blur_h;	/* their size, grown as needed */
 	GLint		tex_screen, tex_opacity, tex_opaque, tex_swizzle;
 	GLint		fill_screen, fill_color;
 	GLuint		tex;		/* reused for every image (T3) */
@@ -345,6 +351,7 @@ program(const char *vs, const char *fs)
 	glAttachShader(p, f);
 	glBindAttribLocation(p, 0, "pos");
 	glBindAttribLocation(p, 1, "uv");
+	glBindAttribLocation(p, 2, "uv2");
 	glLinkProgram(p);
 	glDeleteShader(v);
 	glDeleteShader(f);
@@ -390,6 +397,69 @@ static const char fs_tex[] =
     "	if (opaque)\n"
     "		c.a = 1.0;\n"
     "	gl_FragColor = c * opacity;\n"
+    "}\n";
+
+/* The blur passes: positions already in clip space. */
+static const char vs_quad[] =
+    "attribute vec2 pos;\n"
+    "attribute vec2 uv;\n"
+    "varying vec2 v_uv;\n"
+    "void main() {\n"
+    "	v_uv = uv;\n"
+    "	gl_Position = vec4(pos, 0.0, 1.0);\n"
+    "}\n";
+
+/* One gaussian pass along `dir`: nine taps read as five, with linear
+   filtering between pairs; `limit` keeps to the copied part. */
+static const char fs_blur[] =
+    "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+    "precision highp float;\n"
+    "#else\n"
+    "precision mediump float;\n"
+    "#endif\n"
+    "uniform sampler2D tex;\n"
+    "uniform vec2 dir;\n"
+    "uniform vec2 limit;\n"
+    "varying vec2 v_uv;\n"
+    "vec4 at(vec2 p) { return texture2D(tex, min(p, limit)); }\n"
+    "void main() {\n"
+    "	gl_FragColor = at(v_uv) * 0.2270270\n"
+    "	    + (at(v_uv + dir * 1.3846154) + at(v_uv - dir * 1.3846154)) * 0.3162162\n"
+    "	    + (at(v_uv + dir * 3.2307692) + at(v_uv - dir * 3.2307692)) * 0.0702703;\n"
+    "}\n";
+
+/* The blur back on the desktop where the window is, through its alpha
+   (premultiplied, OVER): uv the blur, uv2 the window. */
+static const char vs_mask[] =
+    "uniform vec2 screen;\n"
+    "attribute vec2 pos;\n"
+    "attribute vec2 uv;\n"
+    "attribute vec2 uv2;\n"
+    "varying vec2 v_uv;\n"
+    "varying vec2 v_uv2;\n"
+    "void main() {\n"
+    "	v_uv = uv;\n"
+    "	v_uv2 = uv2;\n"
+    "	gl_Position = vec4(pos.x * 2.0 / screen.x - 1.0,\n"
+    "	    1.0 - pos.y * 2.0 / screen.y, 0.0, 1.0);\n"
+    "}\n";
+
+static const char fs_mask[] =
+    "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+    "precision highp float;\n"
+    "#else\n"
+    "precision mediump float;\n"
+    "#endif\n"
+    "uniform sampler2D tex;\n"
+    "uniform sampler2D mask;\n"
+    "uniform bool opaque;\n"
+    "varying vec2 v_uv;\n"
+    "varying vec2 v_uv2;\n"
+    "void main() {\n"
+    /* wherever the window shows at all the blur replaces what is
+       under it, as on a Mac; only its antialiased edge blends */
+    "	float a = opaque ? 1.0 : clamp(texture2D(mask, v_uv2).a * 4.0, 0.0, 1.0);\n"
+    "	gl_FragColor = vec4(texture2D(tex, v_uv).rgb * a, a);\n"
     "}\n";
 
 static const char vs_fill[] =
@@ -731,6 +801,21 @@ context_init(struct ws_server *srv, struct ws_display *first)
 	gl.tex_opacity = glGetUniformLocation(gl.prog_tex, "opacity");
 	gl.tex_opaque = glGetUniformLocation(gl.prog_tex, "opaque");
 	gl.tex_swizzle = glGetUniformLocation(gl.prog_tex, "swizzle");
+	/* without them, no blur: menus are drawn as before */
+	gl.prog_blur = program(vs_quad, fs_blur);
+	gl.prog_mask = program(vs_mask, fs_mask);
+	if (gl.prog_blur != 0 && gl.prog_mask != 0) {
+		glUseProgram(gl.prog_blur);
+		glUniform1i(glGetUniformLocation(gl.prog_blur, "tex"), 0);
+		gl.blur_step = glGetUniformLocation(gl.prog_blur, "dir");
+		gl.blur_limit = glGetUniformLocation(gl.prog_blur, "limit");
+		glUseProgram(gl.prog_mask);
+		glUniform1i(glGetUniformLocation(gl.prog_mask, "tex"), 0);
+		glUniform1i(glGetUniformLocation(gl.prog_mask, "mask"), 1);
+		gl.mask_screen = glGetUniformLocation(gl.prog_mask, "screen");
+		gl.mask_opaque = glGetUniformLocation(gl.prog_mask, "opaque");
+	} else
+		ws_warn("renderer: no blur shaders; menus aren't frosted");
 	gl.fill_screen = glGetUniformLocation(gl.prog_fill, "screen");
 	gl.fill_color = glGetUniformLocation(gl.prog_fill, "color");
 	glGenTextures(1, &gl.tex);
@@ -1466,6 +1551,157 @@ gles_draw(struct ws_server *srv, const struct ws_draw *d)
 	}
 }
 
+/* The two textures the blur passes go between, at least w x h. */
+static bool
+blur_targets(int w, int h)
+{
+	int i;
+
+	if (gl.blur_fbo[0] != 0 && w <= gl.blur_w && h <= gl.blur_h)
+		return true;
+	if (w < gl.blur_w)
+		w = gl.blur_w;
+	if (h < gl.blur_h)
+		h = gl.blur_h;
+	if (w > gl.max_tex || h > gl.max_tex)
+		return false;
+	for (i = 0; i < 2; i++) {
+		if (gl.blur_tex[i] == 0) {
+			glGenTextures(1, &gl.blur_tex[i]);
+			glGenFramebuffers(1, &gl.blur_fbo[i]);
+		}
+		glBindTexture(GL_TEXTURE_2D, gl.blur_tex[i]);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+		    GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+		    GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA,
+		    GL_UNSIGNED_BYTE, NULL);
+		glBindFramebuffer(GL_FRAMEBUFFER, gl.blur_fbo[i]);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		    GL_TEXTURE_2D, gl.blur_tex[i], 0);
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
+		    GL_FRAMEBUFFER_COMPLETE) {
+			glBindFramebuffer(GL_FRAMEBUFFER, gl.desk_fbo);
+			ws_warn("renderer: no framebuffer for the blur");
+			return false;
+		}
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, gl.desk_fbo);
+	gl.blur_w = w;
+	gl.blur_h = h;
+	return true;
+}
+
+/*
+ * Blur the desktop under d's window (render_pixman.c's pr_blur, on the
+ * GPU): copy it with `radius` around it, blur the copy twice each way
+ * and lay it back over the desktop through the window's alpha, inside
+ * this frame's clip.
+ */
+static void
+gles_blur(struct ws_server *srv, const struct ws_draw *d, int radius)
+{
+	int32_t x1 = d->x - radius, y1 = d->y - radius;
+	int32_t x2 = d->x + d->w + radius, y2 = d->y + d->h + radius;
+	GLfloat quad[8] = { -1, -1, 1, -1, -1, 1, 1, 1 };
+	GLfloat uv[8], pos[8], uv2[8];
+	GLfloat sw, sh, spread = (GLfloat)radius / 5.6f;
+	int w, h, i, tw, th;
+	bool opaque;
+	struct ws_buffer *b = d->window != NULL ? d->window->buffer : NULL;
+
+	(void)srv;
+	if (gl.prog_blur == 0 || gl.verify || d->window == NULL || b == NULL ||
+	    b->dmabuf)
+		return;
+	if (x1 < 0)
+		x1 = 0;
+	if (y1 < 0)
+		y1 = 0;
+	if (x2 > (int32_t)gl.width)
+		x2 = (int32_t)gl.width;
+	if (y2 > (int32_t)gl.height)
+		y2 = (int32_t)gl.height;
+	w = x2 - x1;
+	h = y2 - y1;
+	if (w <= 0 || h <= 0 || !blur_targets(w, h))
+		return;
+	sw = (GLfloat)w / gl.blur_w;
+	sh = (GLfloat)h / gl.blur_h;
+
+	/* the desktop under it, from the desk framebuffer (bottom-up) */
+	glBindTexture(GL_TEXTURE_2D, gl.blur_tex[0]);
+	glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, x1,
+	    (GLint)gl.height - y2, w, h);
+
+	/* the passes, between the two textures */
+	glDisable(GL_SCISSOR_TEST);
+	glDisable(GL_BLEND);
+	glViewport(0, 0, w, h);
+	glUseProgram(gl.prog_blur);
+	glUniform2f(gl.blur_limit, sw - 0.5f / gl.blur_w,
+	    sh - 0.5f / gl.blur_h);
+	uv[0] = 0; uv[1] = 0; uv[2] = sw; uv[3] = 0;
+	uv[4] = 0; uv[5] = sh; uv[6] = sw; uv[7] = sh;
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, quad);
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, uv);
+	glEnableVertexAttribArray(0);
+	glEnableVertexAttribArray(1);
+	for (i = 0; i < 4; i++) {
+		int from = i % 2, to = 1 - from;
+
+		glBindFramebuffer(GL_FRAMEBUFFER, gl.blur_fbo[to]);
+		glBindTexture(GL_TEXTURE_2D, gl.blur_tex[from]);
+		if (i % 2 == 0)
+			glUniform2f(gl.blur_step, spread / gl.blur_w, 0);
+		else
+			glUniform2f(gl.blur_step, 0, spread / gl.blur_h);
+		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, gl.desk_fbo);
+	glViewport(0, 0, (GLsizei)gl.width, (GLsizei)gl.height);
+	glEnable(GL_SCISSOR_TEST);
+
+	/* back over the desktop where the window is, through its alpha */
+	glActiveTexture(GL_TEXTURE1);
+	if (!window_texture(d->window, d->src, &tw, &th)) {
+		glActiveTexture(GL_TEXTURE0);
+		return;
+	}
+	opaque = pixman_image_get_format(d->src) == PIXMAN_x8r8g8b8;
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, gl.blur_tex[0]);
+	pos[0] = d->x; pos[1] = d->y; pos[2] = d->x + d->w; pos[3] = d->y;
+	pos[4] = d->x; pos[5] = d->y + d->h;
+	pos[6] = d->x + d->w; pos[7] = d->y + d->h;
+	/* the blur texture is bottom-up: screen row y is (y2 - y) */
+	uv[0] = (GLfloat)(d->x - x1) / gl.blur_w;
+	uv[1] = (GLfloat)(y2 - d->y) / gl.blur_h;
+	uv[2] = (GLfloat)(d->x + d->w - x1) / gl.blur_w;
+	uv[3] = uv[1];
+	uv[4] = uv[0];
+	uv[5] = (GLfloat)(y2 - d->y - d->h) / gl.blur_h;
+	uv[6] = uv[2];
+	uv[7] = uv[5];
+	uv2[0] = 0; uv2[1] = 0;
+	uv2[2] = (GLfloat)(d->w * d->fx / tw); uv2[3] = 0;
+	uv2[4] = 0; uv2[5] = (GLfloat)(d->h * d->fy / th);
+	uv2[6] = uv2[2]; uv2[7] = uv2[5];
+	glUseProgram(gl.prog_mask);
+	glUniform2f(gl.mask_screen, (GLfloat)gl.width, (GLfloat)gl.height);
+	glUniform1i(gl.mask_opaque, opaque);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, pos);
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, uv);
+	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, uv2);
+	glEnableVertexAttribArray(2);
+	glEnable(GL_BLEND);
+	clipped(d->x, d->y, d->w, d->h);
+	glDisableVertexAttribArray(2);
+}
+
 static void
 gles_fill(struct ws_server *srv, const pixman_color_t *color,
     const pixman_box32_t *boxes, int n)
@@ -2005,6 +2241,7 @@ const struct ws_renderer_ops gles_renderer_ops = {
 	.begin = gles_begin,
 	.draw = gles_draw,
 	.fill = gles_fill,
+	.blur = gles_blur,
 	.end = gles_end,
 	.scanout = gles_scanout,
 	.presented = gles_presented,

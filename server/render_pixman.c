@@ -12,6 +12,7 @@
  */
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "server.h"
 
@@ -185,6 +186,117 @@ pr_fill(struct ws_server *srv, const pixman_color_t *color,
 	pixman_image_unref(solid);
 }
 
+/* One box blur pass along a line of n pixels, `step` words apart in
+   `in`, into `out` (contiguous): each the average of the 2r+1 around it,
+   the ends repeated. */
+static void
+box_line(const uint32_t *in, uint32_t *out, int n, int step, int r)
+{
+	uint32_t sr = 0, sg = 0, sb = 0, p;
+	int i, j, div = 2 * r + 1;
+
+	for (j = -r; j <= r; j++) {
+		p = in[(j < 0 ? 0 : j >= n ? n - 1 : j) * step];
+		sr += (p >> 16) & 0xff;
+		sg += (p >> 8) & 0xff;
+		sb += p & 0xff;
+	}
+	for (i = 0; i < n; i++) {
+		out[i] = 0xff000000u | (sr / div) << 16 | (sg / div) << 8 |
+		    (sb / div);
+		p = in[(i + r + 1 >= n ? n - 1 : i + r + 1) * step];
+		sr += (p >> 16) & 0xff;
+		sg += (p >> 8) & 0xff;
+		sb += p & 0xff;
+		p = in[(i - r < 0 ? 0 : i - r) * step];
+		sr -= (p >> 16) & 0xff;
+		sg -= (p >> 8) & 0xff;
+		sb -= p & 0xff;
+	}
+}
+
+/*
+ * Blur the shadow under d's window: copy what is there, with `radius`
+ * around it, blur the copy (three box passes each way, close to a
+ * gaussian) and lay it back over the shadow through the window's alpha,
+ * so it shows only where the window does (not in its rounded corners).
+ */
+static void
+pr_blur(struct ws_server *srv, const struct ws_draw *d, int radius)
+{
+	int32_t x1 = d->x - radius, y1 = d->y - radius;
+	int32_t x2 = d->x + d->w + radius, y2 = d->y + d->h + radius;
+	int32_t w, h, i, pass, r = radius / 3 > 0 ? radius / 3 : 1;
+	pixman_image_t *copy, *mask;
+	uint32_t *bits, *tmp;
+	pixman_transform_t t;
+	bool scaled = d->fx != 1.0 || d->fy != 1.0;
+
+	if (x1 < 0)
+		x1 = 0;
+	if (y1 < 0)
+		y1 = 0;
+	if (x2 > (int32_t)srv->back_width)
+		x2 = (int32_t)srv->back_width;
+	if (y2 > (int32_t)srv->back_height)
+		y2 = (int32_t)srv->back_height;
+	w = x2 - x1;
+	h = y2 - y1;
+	if (w <= 0 || h <= 0)
+		return;
+	copy = pixman_image_create_bits(PIXMAN_x8r8g8b8, w, h, NULL, 0);
+	tmp = malloc((size_t)(w > h ? w : h) * 4);
+	if (copy == NULL || tmp == NULL) {
+		if (copy != NULL)
+			pixman_image_unref(copy);
+		free(tmp);
+		return;
+	}
+	pixman_image_composite32(PIXMAN_OP_SRC, srv->shadow, NULL, copy,
+	    x1, y1, 0, 0, 0, 0, w, h);
+	bits = pixman_image_get_data(copy);
+	for (pass = 0; pass < 3; pass++) {
+		for (i = 0; i < h; i++) {
+			box_line(bits + (size_t)i * w, tmp, w, 1, r);
+			memcpy(bits + (size_t)i * w, tmp, (size_t)w * 4);
+		}
+		for (i = 0; i < w; i++) {
+			int32_t j;
+
+			box_line(bits + i, tmp, h, w, r);
+			for (j = 0; j < h; j++)
+				bits[(size_t)j * w + i] = tmp[j];
+		}
+	}
+	free(tmp);
+	/* back over the shadow wherever the window shows at all, as on a
+	   Mac: its alpha added to itself four times (saturating), so only
+	   its antialiased edge blends */
+	mask = pixman_image_create_bits(PIXMAN_a8, d->w, d->h, NULL, 0);
+	if (mask == NULL) {
+		pixman_image_unref(copy);
+		return;
+	}
+	if (scaled) {
+		pixman_transform_init_scale(&t, pixman_double_to_fixed(d->fx),
+		    pixman_double_to_fixed(d->fy));
+		pixman_image_set_transform(d->src, &t);
+		pixman_image_set_filter(d->src, d->smooth ?
+		    PIXMAN_FILTER_BILINEAR : PIXMAN_FILTER_NEAREST, NULL, 0);
+	}
+	for (pass = 0; pass < 4; pass++)
+		pixman_image_composite32(PIXMAN_OP_ADD, d->src, NULL, mask,
+		    0, 0, 0, 0, 0, 0, d->w, d->h);
+	if (scaled) {
+		pixman_image_set_transform(d->src, NULL);
+		pixman_image_set_filter(d->src, PIXMAN_FILTER_NEAREST, NULL, 0);
+	}
+	pixman_image_composite32(PIXMAN_OP_OVER, copy, mask, srv->shadow,
+	    d->x - x1, d->y - y1, 0, 0, d->x, d->y, d->w, d->h);
+	pixman_image_unref(mask);
+	pixman_image_unref(copy);
+}
+
 /* Scale `region` (d's panel pixels) of d's part of the shadow into its
    panel image. */
 static void
@@ -269,5 +381,6 @@ const struct ws_renderer_ops pixman_renderer_ops = {
 	.begin = pr_begin,
 	.draw = pr_draw,
 	.fill = pr_fill,
+	.blur = pr_blur,
 	.end = pr_end,
 };
