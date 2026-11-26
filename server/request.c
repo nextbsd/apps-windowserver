@@ -600,6 +600,8 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		window_clear_owner_frame(srv, w);
 		if (menubar_managed(w))
 			menubar_client_frame(srv, w);
+		else
+			window_menu_shown(srv, w);	/* a bar turned NeXT menu */
 		break;
 	case WS_MSG_WINDOW_SET_LEVEL:
 		if (menubar_managed(w))
@@ -675,6 +677,7 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		if (value & WS_COMMIT_SET_FRAME) {
 			tiling_client_frame(srv, w);
 			window_clear_owner_frame(srv, w);
+			window_menu_shown(srv, w);
 		}
 		break;
 	}
