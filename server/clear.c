@@ -294,6 +294,49 @@ window_place_clear(struct ws_server *srv, struct ws_window *w)
 }
 
 /*
+ * m was an app's menu bar until the menu style changed and is a NeXT
+ * main menu now (bar_release() marks it): the windows already open
+ * under where the floating menu appears move just clear of it, as a
+ * window shown under a menu is. Called when it's released and again
+ * when its owner gives it its new frame; once it has moved anything, or
+ * it's on screen as a menu and nothing was under it, it's done. A NeXT
+ * menu shown otherwise (its app starting or coming forward) moves
+ * nothing, so a window the person put under a menu stays.
+ */
+void
+window_menu_shown(struct ws_server *srv, struct ws_window *m)
+{
+	ws_rect_t scr = display_main_frame(srv), u = srv->usable;
+	struct ws_window *w;
+	ws_rect_t r;
+	bool moved = false;
+
+	if (!m->clear_from_bar || menubar_managed(m))
+		return;
+	if (!m->visible || m->level != WS_LEVEL_MAIN_MENU)
+		return;		/* not a floating menu (yet) */
+	for (w = srv->windows; w != NULL; w = w->next) {
+		if (w == m || w->level == WS_LEVEL_MAIN_MENU ||
+		    w->level == WS_LEVEL_SUBMENU ||
+		    !clear_candidate(srv, w, false, &scr) ||
+		    !rect_overlaps(&w->frame, &m->frame))
+			continue;
+		r = w->frame;
+		clear_of_menus(srv, w, &r, &u);
+		if (rect_eq(&r, &w->frame))
+			continue;
+		ws_debug("window %u (%s) under a menu bar turned NeXT menu: "
+		    "%d,%d -> %d,%d", w->id, w->owner->app_name, w->frame.x,
+		    w->frame.y, r.x, r.y);
+		window_server_frame(srv, w, &r);
+		moved = true;
+	}
+	/* a bar's frame is the strip's until the owner sizes the menu */
+	if (moved || m->frame.width < 400)
+		m->clear_from_bar = false;
+}
+
+/*
  * w's owner gave it a frame. Just after a push that's it settling the
  * frame it was given, which still counts as the pushed one.
  */

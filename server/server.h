@@ -250,6 +250,8 @@ struct ws_window {
 	ws_rect_t	tiling_given;	/* the tile frame it was last given */
 	/* kept clear of the Dock (clear.c) */
 	bool		clear_shown;	/* shown once: placed when it was */
+	bool		clear_from_bar;	/* was its app's menu bar until now: as
+				   a NeXT menu, move windows clear of it */
 	bool		clear_pushed;	/* pushed: clear_saved is valid */
 	ws_rect_t	clear_saved;	/* its frame before it was pushed */
 	ws_rect_t	clear_usable;	/* the usable area then */
@@ -1234,6 +1236,7 @@ void	window_server_frame(struct ws_server *srv, struct ws_window *w,
 void	windows_keep_clear(struct ws_server *srv, const ws_rect_t *area,
 	    const ws_rect_t *old, const ws_rect_t *usable);
 void	window_place_clear(struct ws_server *srv, struct ws_window *w);
+void	window_menu_shown(struct ws_server *srv, struct ws_window *m);
 void	window_clear_owner_frame(struct ws_server *srv, struct ws_window *w);
 
 /* ---- tiling.c ---- */

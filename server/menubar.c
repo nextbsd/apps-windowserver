@@ -224,8 +224,10 @@ bar_release(struct ws_server *srv, struct ws_window *w)
 	if (w->owner->app->bar_window == w)
 		w->owner->app->bar_window = NULL;
 	w->level = w->client_level;
+	w->clear_from_bar = true;
 	if (w->client_visible)
 		window_order(srv, w, WS_ORDER_ABOVE, NULL);
+	window_menu_shown(srv, w);
 	ws_debug("window %u is no longer a menu bar", w->id);
 }
 
