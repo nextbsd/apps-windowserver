@@ -186,9 +186,9 @@ pr_fill(struct ws_server *srv, const pixman_color_t *color,
 	pixman_image_unref(solid);
 }
 
-/* One box blur pass along a line of n pixels, `step` words apart, from
-   `in` to `out`: each the average of the 2r+1 around it, the ends
-   repeated. */
+/* One box blur pass along a line of n pixels, `step` words apart in
+   `in`, into `out` (contiguous): each the average of the 2r+1 around it,
+   the ends repeated. */
 static void
 box_line(const uint32_t *in, uint32_t *out, int n, int step, int r)
 {
@@ -202,7 +202,7 @@ box_line(const uint32_t *in, uint32_t *out, int n, int step, int r)
 		sb += p & 0xff;
 	}
 	for (i = 0; i < n; i++) {
-		out[i * step] = 0xff000000u | (sr / div) << 16 | (sg / div) << 8 |
+		out[i] = 0xff000000u | (sr / div) << 16 | (sg / div) << 8 |
 		    (sb / div);
 		p = in[(i + r + 1 >= n ? n - 1 : i + r + 1) * step];
 		sr += (p >> 16) & 0xff;
@@ -265,7 +265,7 @@ pr_blur(struct ws_server *srv, const struct ws_draw *d, int radius)
 
 			box_line(bits + i, tmp, h, w, r);
 			for (j = 0; j < h; j++)
-				bits[(size_t)j * w + i] = tmp[(size_t)j * w];
+				bits[(size_t)j * w + i] = tmp[j];
 		}
 	}
 	free(tmp);
