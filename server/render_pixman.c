@@ -227,7 +227,7 @@ pr_blur(struct ws_server *srv, const struct ws_draw *d, int radius)
 	int32_t x1 = d->x - radius, y1 = d->y - radius;
 	int32_t x2 = d->x + d->w + radius, y2 = d->y + d->h + radius;
 	int32_t w, h, i, pass, r = radius / 3 > 0 ? radius / 3 : 1;
-	pixman_image_t *copy;
+	pixman_image_t *copy, *mask;
 	uint32_t *bits, *tmp;
 	pixman_transform_t t;
 	bool scaled = d->fx != 1.0 || d->fy != 1.0;
@@ -269,7 +269,14 @@ pr_blur(struct ws_server *srv, const struct ws_draw *d, int radius)
 		}
 	}
 	free(tmp);
-	/* back over the shadow where the window is, through its alpha */
+	/* back over the shadow wherever the window shows at all, as on a
+	   Mac: its alpha added to itself four times (saturating), so only
+	   its antialiased edge blends */
+	mask = pixman_image_create_bits(PIXMAN_a8, d->w, d->h, NULL, 0);
+	if (mask == NULL) {
+		pixman_image_unref(copy);
+		return;
+	}
 	if (scaled) {
 		pixman_transform_init_scale(&t, pixman_double_to_fixed(d->fx),
 		    pixman_double_to_fixed(d->fy));
@@ -277,12 +284,16 @@ pr_blur(struct ws_server *srv, const struct ws_draw *d, int radius)
 		pixman_image_set_filter(d->src, d->smooth ?
 		    PIXMAN_FILTER_BILINEAR : PIXMAN_FILTER_NEAREST, NULL, 0);
 	}
-	pixman_image_composite32(PIXMAN_OP_OVER, copy, d->src, srv->shadow,
-	    d->x - x1, d->y - y1, 0, 0, d->x, d->y, d->w, d->h);
+	for (pass = 0; pass < 4; pass++)
+		pixman_image_composite32(PIXMAN_OP_ADD, d->src, NULL, mask,
+		    0, 0, 0, 0, 0, 0, d->w, d->h);
 	if (scaled) {
 		pixman_image_set_transform(d->src, NULL);
 		pixman_image_set_filter(d->src, PIXMAN_FILTER_NEAREST, NULL, 0);
 	}
+	pixman_image_composite32(PIXMAN_OP_OVER, copy, mask, srv->shadow,
+	    d->x - x1, d->y - y1, 0, 0, d->x, d->y, d->w, d->h);
+	pixman_image_unref(mask);
 	pixman_image_unref(copy);
 }
 

@@ -456,7 +456,9 @@ static const char fs_mask[] =
     "varying vec2 v_uv;\n"
     "varying vec2 v_uv2;\n"
     "void main() {\n"
-    "	float a = opaque ? 1.0 : texture2D(mask, v_uv2).a;\n"
+    /* wherever the window shows at all the blur replaces what is
+       under it, as on a Mac; only its antialiased edge blends */
+    "	float a = opaque ? 1.0 : clamp(texture2D(mask, v_uv2).a * 4.0, 0.0, 1.0);\n"
     "	gl_FragColor = vec4(texture2D(tex, v_uv).rgb * a, a);\n"
     "}\n";
 
