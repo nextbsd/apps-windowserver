@@ -409,7 +409,7 @@ static const char vs_quad[] =
     "	gl_Position = vec4(pos, 0.0, 1.0);\n"
     "}\n";
 
-/* One gaussian pass along `step`: nine taps read as five, with linear
+/* One gaussian pass along `dir`: nine taps read as five, with linear
    filtering between pairs; `limit` keeps to the copied part. */
 static const char fs_blur[] =
     "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
@@ -418,14 +418,14 @@ static const char fs_blur[] =
     "precision mediump float;\n"
     "#endif\n"
     "uniform sampler2D tex;\n"
-    "uniform vec2 step;\n"
+    "uniform vec2 dir;\n"
     "uniform vec2 limit;\n"
     "varying vec2 v_uv;\n"
     "vec4 at(vec2 p) { return texture2D(tex, min(p, limit)); }\n"
     "void main() {\n"
     "	gl_FragColor = at(v_uv) * 0.2270270\n"
-    "	    + (at(v_uv + step * 1.3846154) + at(v_uv - step * 1.3846154)) * 0.3162162\n"
-    "	    + (at(v_uv + step * 3.2307692) + at(v_uv - step * 3.2307692)) * 0.0702703;\n"
+    "	    + (at(v_uv + dir * 1.3846154) + at(v_uv - dir * 1.3846154)) * 0.3162162\n"
+    "	    + (at(v_uv + dir * 3.2307692) + at(v_uv - dir * 3.2307692)) * 0.0702703;\n"
     "}\n";
 
 /* The blur back on the desktop where the window is, through its alpha
@@ -805,7 +805,7 @@ context_init(struct ws_server *srv, struct ws_display *first)
 	if (gl.prog_blur != 0 && gl.prog_mask != 0) {
 		glUseProgram(gl.prog_blur);
 		glUniform1i(glGetUniformLocation(gl.prog_blur, "tex"), 0);
-		gl.blur_step = glGetUniformLocation(gl.prog_blur, "step");
+		gl.blur_step = glGetUniformLocation(gl.prog_blur, "dir");
 		gl.blur_limit = glGetUniformLocation(gl.prog_blur, "limit");
 		glUseProgram(gl.prog_mask);
 		glUniform1i(glGetUniformLocation(gl.prog_mask, "tex"), 0);

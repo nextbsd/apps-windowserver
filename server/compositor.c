@@ -183,7 +183,7 @@ shadow_scaled(struct ws_server *srv, pixman_image_t *src, int sw, int sh,
  * Mac, so a translucent menu stays readable over anything. The blur
  * reads WS_BLUR_RADIUS points around each spot.
  */
-#define WS_BLUR_RADIUS	14
+#define WS_BLUR_RADIUS	24
 
 static bool
 window_blurs(struct ws_server *srv, struct ws_window *w)
