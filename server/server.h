@@ -669,6 +669,11 @@ struct ws_renderer_ops {
 	/* Opaque colours replace, translucent ones blend (OVER). */
 	void	(*fill)(struct ws_server *srv, const pixman_color_t *color,
 		    const pixman_box32_t *boxes, int n);
+	/* Blur what is drawn so far under d's window, through the
+	 * window's own alpha (d as for draw), `radius` backing pixels;
+	 * NULL: the renderer has no blur. */
+	void	(*blur)(struct ws_server *srv, const struct ws_draw *d,
+		    int radius);
 	/* Done drawing `back`; `out` gets what changed, in backing
 	 * pixels of the desktop. */
 	void	(*end)(struct ws_server *srv, pixman_region32_t *back,
