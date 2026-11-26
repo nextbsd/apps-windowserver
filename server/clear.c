@@ -206,9 +206,56 @@ windows_keep_clear(struct ws_server *srv, const ws_rect_t *area,
 }
 
 /*
+ * The NeXT main menu (WS_LEVEL_MAIN_MENU, an app's floating menu rather
+ * than a Mac menu bar) sits in a corner of the screen above every
+ * ordinary window. A window shown for the first time under it would open
+ * half hidden behind it, as Workspace's Preferences did: move it just
+ * clear, to the menu's right when it fits on the screen there, else below
+ * it. Only when first shown; a window the person moves under a menu stays.
+ */
+#define MENU_GAP	8
+
+static void
+clear_of_menus(struct ws_server *srv, const struct ws_window *w, ws_rect_t *r,
+    const ws_rect_t *u)
+{
+	struct ws_window *m;
+	int32_t right, below;
+	int pass;
+	bool moved;
+
+	if (w->level == WS_LEVEL_MAIN_MENU)
+		return;
+	/* a move can land under another menu: look again, a few times */
+	for (pass = 0; pass < 4; pass++) {
+		moved = false;
+		for (m = srv->windows; m != NULL; m = m->next) {
+			if (m == w || !m->visible || m->minimized ||
+			    m->level != WS_LEVEL_MAIN_MENU || menubar_managed(m) ||
+			    m->owner->dead || m->owner->app->menu_bar > 0)
+				continue;
+			if (!rect_overlaps(r, &m->frame))
+				continue;
+			right = m->frame.x + m->frame.width + MENU_GAP;
+			below = m->frame.y + m->frame.height + MENU_GAP;
+			if (right + r->width <= u->x + u->width)
+				r->x = right;
+			else if (below + r->height <= u->y + u->height)
+				r->y = below;
+			else
+				continue;
+			moved = true;
+		}
+		if (!moved)
+			break;
+	}
+}
+
+/*
  * w is being shown for the first time: if it's on the screen but under
- * the Dock or the menu bar strip, place it inside the usable area. It
- * remembers no frame: there's none to give back.
+ * the Dock, the menu bar strip or a NeXT main menu, place it inside the
+ * usable area and clear of the menu. It remembers no frame: there's none
+ * to give back.
  */
 void
 window_place_clear(struct ws_server *srv, struct ws_window *w)
@@ -236,9 +283,10 @@ window_place_clear(struct ws_server *srv, struct ws_window *w)
 	if (!clear_candidate(srv, w, true, &scr))
 		return;
 	r = fit(w, &w->frame, &scr, &u);
+	clear_of_menus(srv, w, &r, &u);
 	if (rect_eq(&r, &w->frame))
 		return;
-	ws_debug("window %u (%s) opened under the Dock or a menu bar strip: "
+	ws_debug("window %u (%s) opened under the Dock, a menu bar strip or a menu: "
 	    "%d,%d %dx%d -> %d,%d %dx%d", w->id, w->owner->app_name,
 	    w->frame.x, w->frame.y, w->frame.width, w->frame.height, r.x, r.y,
 	    r.width, r.height);
