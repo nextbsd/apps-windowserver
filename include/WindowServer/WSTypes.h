@@ -530,6 +530,10 @@ enum {
 					   WS_MSG_LIST_DISPLAYS */
 	WS_EVENT_DISPLAY_MODE,		/* ws_display_mode_t, answers
 					   WS_MSG_LIST_DISPLAY_MODES */
+	/* WS_CONNECT_DOCK, after WS_MSG_DOCK_START_MENU */
+	WS_EVENT_START_KEY,		/* no payload: the Start key was tapped
+					   on its own; open or close the Start
+					   menu */
 	WS_EVENT_MAX
 };
 
@@ -909,6 +913,10 @@ typedef struct ws_event_window_info {
  * WS_MSG_DOCK_SHOW_MINIMIZED, has it at a time.
  */
 #define WS_DOCK_MINIMIZED_WINDOWS 0x0001
+
+/* Defined by headers that have WS_MSG_DOCK_START_MENU, WS_EVENT_START_KEY
+   and ws_dock_set_start_menu, so a Dock can build against older ones. */
+#define WS_DOCK_START_MENU	1
 
 /*
  * The screen edge the Dock keeps (servers with WS_SERVER_DOCK_EDGE):

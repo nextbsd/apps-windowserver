@@ -155,6 +155,9 @@ enum {
 	WS_MSG_DISPLAY_CONFIGURE,	/* sync, ws_req_display_t */
 	/* servers with WS_SERVER_STATUS_ITEMS, see "The menu bar" */
 	WS_MSG_STATUS_ITEM,		/* ws_req_status_item_t, hdr.window */
+	/* WS_CONNECT_DOCK only, see "The Dock" */
+	WS_MSG_DOCK_START_MENU,		/* ws_req_int_t: 1 = this Dock shows a
+					   Start menu, 0 = no longer */
 	WS_MSG_LAST
 };
 
@@ -550,13 +553,21 @@ typedef struct ws_req_cursor {
  *     a thickness over half the screen fails with EINVAL.
  *   - WS_EVENT_DOCK_STATE (WSTypes.h) after the welcome and whenever
  *     its flags or the Dock's edge change.
+ *   - WS_MSG_DOCK_START_MENU (ws_req_int_t, value 1): this Dock shows a
+ *     Start menu, as the Windows style's taskbar does. A tap of the Start
+ *     (Command) key on its own then sends WS_EVENT_START_KEY to the
+ *     newest Dock connection that said so, to open or close it, and the
+ *     tap no longer opens the overview. Value 0, or the Dock going away,
+ *     gives the tap back (StartKeyShowsOverview decides). Servers older
+ *     than this message answer it with an error and never send the event.
  */
 #define WS_MAX_PREVIEW		512
 
 /*
  * The overview (servers with WS_SERVER_OVERVIEW). WindowServer opens it
- * itself: a tap of the Start (Command) key on its own, Control+Up, the
- * Mission Control key (KEY_SCALE) or a three-finger swipe up show every
+ * itself: Control+Up, the Mission Control key (KEY_SCALE), a
+ * three-finger swipe up, or a tap of the Start (Command) key on its own
+ * when StartKeyShowsOverview is on and no Dock has a Start menu, show every
  * window; Control+Down or a three-finger swipe down show the active
  * app's (App Exposé). (With ThreeFingerDrag on, the swipes take four
  * fingers.) While it's open no app gets pointer or key events:

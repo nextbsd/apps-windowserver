@@ -96,11 +96,14 @@
 	     GNUstep apps say, from the user's NBMinimizeStyle. Off. -->
 	<key>MinimizeIntoDock</key>
 	<false/>
-	<!-- The window overview (Exposé): a tap of the Start key on its
-	     own opens and closes it. Control+Up, Control+Down, the Mission
-	     Control key and three-finger swipes always work. -->
+	<!-- The window overview (Exposé): Control+Up, Control+Down, the
+	     Mission Control key and three-finger swipes open it. A tap of
+	     the Start (Command) key on its own opens the Start menu of a
+	     Dock that has one (the Windows style); with this on, it opens
+	     the overview when no Dock has a Start menu. Off: as on a Mac,
+	     Command alone does nothing. -->
 	<key>StartKeyShowsOverview</key>
-	<true/>
+	<false/>
 	<!-- No animations (the overview's). -->
 	<key>ReduceMotion</key>
 	<false/>

@@ -229,7 +229,7 @@ Exposé and Mission Control, without workspaces yet: WindowServer shows every wi
 
 ![The overview: two Terminal windows with Terminal's icon under them on the left, Workspace's File Viewer with the NextBSD cube on the right, the frontmost Terminal window selected with a blue border, over the dimmed desktop](docs/overview.png)
 
-- **Opening it.** Tap the Start key on its own (pressed and released with no other key or click in between, so Command shortcuts work as before; `StartKeyShowsOverview`), press Control+Up or the Mission Control key (`KEY_SCALE`, F3 on Apple keyboards), or swipe up with three fingers.
+- **Opening it.** Press Control+Up or the Mission Control key (`KEY_SCALE`, F3 on Apple keyboards), or swipe up with three fingers. A tap of the Start key on its own (pressed and released with no other key or click in between, so Command shortcuts work as before) opens the Start menu of a Dock that has one (the Windows style's taskbar, `WS_MSG_DOCK_START_MENU`); with `StartKeyShowsOverview` on, it opens the overview when no Dock has a Start menu.
 - **App Exposé.** Control+Down or a three-finger swipe down show only the active app's windows. A swipe up from there shows every window.
 - **What it shows.** Every normal and floating window, visible or minimized, as a live scaled-down preview that follows what the app draws. Windows are grouped by app, the active app first, with the app's icon (`WS_MSG_SET_APP_ICON`) under each group. They're laid out without overlap and never enlarged, in as many group columns as give the largest previews. Desktop-level windows stay, dimmed; menus, the Dock, app icons and tiles fade out. WindowServer draws no text, so there are no titles. A workspace strip comes with workspaces (#13).
 - **Choosing.** Hovering or the arrow keys (and Tab) select a window. A click or Return activates its app with that window in front and key, or restores a minimized one as its tile does. Escape, a click on empty space, Control+Up again or another Start tap close the overview. While it's open, no app gets pointer or key events, except modifier keys.
@@ -238,7 +238,7 @@ Exposé and Mission Control, without workspaces yet: WindowServer shows every wi
 
 | Key | Default | |
 |---|---|---|
-| `StartKeyShowsOverview` | `true` | A tap of the Start key on its own opens and closes the overview. |
+| `StartKeyShowsOverview` | `false` | A tap of the Start key on its own opens and closes the overview, when no Dock shows a Start menu. Off, as on a Mac, Command alone does nothing. |
 | `ReduceMotion` | `false` | No animations. |
 
 `WS_MSG_OVERVIEW` (`ws_overview()`, from `WS_CONNECT_CONTROL` and `WS_CONNECT_DOCK` connections, with the window list's user check) opens it (`WS_OVERVIEW_ALL`, `WS_OVERVIEW_APP`), closes it (`WS_OVERVIEW_CLOSE`) or only asks (`WS_OVERVIEW_QUERY`). It's answered with `WS_EVENT_OVERVIEW_STATE`, then a `WS_EVENT_OVERVIEW_ITEM` for each window with where its preview and its group's icon are, then `WS_EVENT_LIST_END`. Dock connections get `WS_EVENT_OVERVIEW_STATE` when it starts opening and when it has closed.

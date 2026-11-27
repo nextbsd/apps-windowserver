@@ -309,6 +309,8 @@ struct ws_client {
 	bool		dead;
 	bool		doomed;		/* destroy at the end of this loop pass */
 	bool		dock_wants_minimized; /* WS_MSG_DOCK_SHOW_MINIMIZED */
+	bool		dock_start_menu;	/* WS_MSG_DOCK_START_MENU */
+	uint64_t	dock_start_menu_since;	/* when it said so */
 	uint32_t	dock_edge;	/* WS_MSG_DOCK_SET_EDGE: WS_DOCK_EDGE_* */
 	uint32_t	dock_thickness;
 	uint64_t	dock_edge_serial; /* when it said so (newest wins) */
@@ -931,6 +933,7 @@ struct ws_server {
 	pixman_image_t	*tile_mask_inner;
 	/* the Dock (dock.c) */
 	struct ws_client *dock;		/* shows minimized windows, or NULL */
+	uint64_t	dock_start_menu_seq;	/* orders WS_MSG_DOCK_START_MENU */
 	bool		dock_list_dirty;	/* send WINDOW_LIST_CHANGED */
 	bool		dock_previews_dirty;	/* some window->preview_dirty */
 	/*
@@ -1345,6 +1348,8 @@ void	dock_preview_changed(struct ws_server *srv, struct ws_window *w);
 void	dock_client_ready(struct ws_server *srv, struct ws_client *c);
 void	dock_client_gone(struct ws_server *srv, struct ws_client *c);
 void	dock_flush(struct ws_server *srv);
+bool	dock_start_key(struct ws_server *srv);
+void	dock_start_menu(struct ws_server *srv, struct ws_client *c, bool on);
 void	dock_show_minimized(struct ws_server *srv, struct ws_client *c,
 	    bool on);
 int	dock_set_edge(struct ws_server *srv, struct ws_client *c,
