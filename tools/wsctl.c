@@ -57,6 +57,8 @@ usage(void)
 	    "       wsctl dock restore WINDOW\n"
 	    "       wsctl dock preview WINDOW SIZE FILE.ppm\n"
 	    "       wsctl dock watch [SECONDS] (stay the Dock, print notices)\n"
+	    "       wsctl dock start-menu [SECONDS] (a Dock with a Start menu:\n"
+	    "                                print each Start key tap)\n"
 	    "       wsctl dock edge left|right|top|bottom|none THICKNESS [SECONDS]\n"
 	    "                                (report a Dock edge, stay SECONDS)\n"
 	    "       wsctl settings get [KEY]   (values in effect, and where from)\n"
@@ -478,6 +480,9 @@ print_dock_event(const ws_event_t *ev)
 	case WS_EVENT_PREVIEW_CHANGED:
 		printf("preview-changed window=%u\n", ev->hdr.window);
 		break;
+	case WS_EVENT_START_KEY:
+		printf("start-key\n");
+		break;
 	case WS_EVENT_ERROR:
 		printf("error request=0x%x code=%d %s\n", ev->u.error.request,
 		    ev->u.error.code, ev->u.error.message);
@@ -521,6 +526,37 @@ dock_watch(ws_connection_t *c, int seconds)
 				printf("list failed: %s\n", strerror(errno));
 			printf("end\n");
 			continue;	/* the list may have queued events */
+		}
+		pfd.fd = ws_connection_fd(c);
+		pfd.events = POLLIN;
+		pfd.revents = 0;
+		(void)poll(&pfd, 1, 200);
+	}
+	return 0;
+}
+
+/* wsctl dock start-menu: say this Dock shows a Start menu and print each
+ * Start key tap that comes to it. */
+static int
+dock_start_menu_watch(ws_connection_t *c, int seconds)
+{
+	time_t end = seconds > 0 ? time(NULL) + seconds : 0;
+	struct pollfd pfd;
+	ws_event_t ev;
+	int r;
+
+	signal(SIGTERM, on_signal);
+	signal(SIGINT, on_signal);
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	if (ws_dock_set_start_menu(c, 1) < 0 || ws_sync(c) < 0)
+		return -1;
+	printf("start menu as client %u\n", ws_client_id(c));
+	while (!stop && (end == 0 || time(NULL) < end)) {
+		while ((r = ws_next_event(c, &ev, 0)) > 0)
+			print_dock_event(&ev);
+		if (r < 0) {
+			printf("server closed the connection\n");
+			return -1;
 		}
 		pfd.fd = ws_connection_fd(c);
 		pfd.events = POLLIN;
@@ -652,6 +688,8 @@ dock_main(int argc, char **argv)
 		}
 	} else if (strcmp(cmd, "watch") == 0 && argc <= 3) {
 		r = dock_watch(c, argc == 3 ? atoi(argv[2]) : 0);
+	} else if (strcmp(cmd, "start-menu") == 0 && argc <= 3) {
+		r = dock_start_menu_watch(c, argc == 3 ? atoi(argv[2]) : 0);
 	} else if (strcmp(cmd, "edge") == 0 && (argc == 4 || argc == 5)) {
 		r = dock_edge(c, argv[2], argv[3], argc == 5 ? atoi(argv[4]) : 0);
 	} else {

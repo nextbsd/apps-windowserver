@@ -156,7 +156,7 @@ config_defaults(struct ws_config *cfg)
 	    sizeof(cfg->snapshot_path));
 	/* The size of a GNUstep app icon, so tiles line up with icons. */
 	cfg->minimize_tile_size = 64;
-	cfg->start_key_overview = true;
+	cfg->start_key_overview = false;
 	cfg->reduce_motion = false;
 	/* Windows stack until the user (Workspace Preferences) or the
 	   theme picks tiling. */

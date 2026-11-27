@@ -933,10 +933,13 @@ server_key_held(struct ws_server *srv, uint32_t code, bool pressed)
 }
 
 /*
- * The Start key (Super, which is also Command) tapped on its own opens
- * or closes the overview: pressed with no other key or button down,
- * and released before any other key, click or gesture. Command
- * shortcuts are untouched, and the key itself still reaches the app.
+ * The Start key (Super, which is also Command) tapped on its own:
+ * pressed with no other key or button down, and released before any
+ * other key, click or gesture. It opens the Start menu of a Dock that
+ * shows one (the Windows style's taskbar, WS_MSG_DOCK_START_MENU), or
+ * else the overview if StartKeyShowsOverview is on (off by default: as
+ * on a Mac, Command alone does nothing). Command shortcuts are
+ * untouched, and the key itself still reaches the app.
  */
 static bool
 start_tap(struct ws_server *srv, uint32_t code, bool pressed)
@@ -951,7 +954,7 @@ start_tap(struct ws_server *srv, uint32_t code, bool pressed)
 	if (code != srv->start_tap || code == 0)
 		return false;
 	srv->start_tap = 0;
-	return srv->cfg.start_key_overview;
+	return true;
 }
 
 void
@@ -1008,7 +1011,7 @@ keyboard_key(struct ws_server *srv, uint32_t code, bool pressed)
 	} else if (code == srv->repeat_key) {
 		repeat_stop(srv);
 	}
-	if (tapped)
+	if (tapped && !dock_start_key(srv) && srv->cfg.start_key_overview)
 		overview_toggle(srv, WS_OVERVIEW_ALL);
 }
 

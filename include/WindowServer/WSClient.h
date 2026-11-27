@@ -539,6 +539,10 @@ int		 ws_tiling(ws_connection_t *conn, uint32_t op, uint32_t window,
  *			WindowServer then hands it the ones minimized into
  *			the Dock (WS_DOCK_MINIMIZED_WINDOWS) instead of
  *			drawing tiles for them
+ *   ws_dock_set_start_menu
+ *			say this Dock shows a Start menu: a tap of the
+ *			Start (Command) key on its own then comes to it as
+ *			WS_EVENT_START_KEY
  *   ws_dock_set_edge	say which screen edge this Dock is on
  *			(WS_DOCK_EDGE_*) and how thick it is, so tiling
  *			keeps it free; servers with WS_SERVER_DOCK_EDGE
@@ -547,6 +551,7 @@ int		 ws_dock_activate(ws_connection_t *conn, uint32_t app_id,
     uint32_t window);
 int		 ws_dock_restore(ws_connection_t *conn, uint32_t window);
 int		 ws_dock_show_minimized(ws_connection_t *conn, int on);
+int		 ws_dock_set_start_menu(ws_connection_t *conn, int on);
 int		 ws_dock_set_edge(ws_connection_t *conn, uint32_t edge,
     uint32_t thickness);
 int		 ws_dock_preview(ws_connection_t *conn, uint32_t window,

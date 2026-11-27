@@ -334,6 +334,49 @@ dock_show_minimized(struct ws_server *srv, struct ws_client *c, bool on)
 	}
 }
 
+/* WS_MSG_DOCK_START_MENU: Dock c shows a Start menu (or no longer). */
+void
+dock_start_menu(struct ws_server *srv, struct ws_client *c, bool on)
+{
+	if (c->dock_start_menu == on)
+		return;
+	c->dock_start_menu = on;
+	c->dock_start_menu_since = on ? ++srv->dock_start_menu_seq : 0;
+	ws_info("client %u (%s, pid %d) %s a Start menu", c->id, c->app_name,
+	    (int)c->pid, on ? "shows" : "no longer shows");
+}
+
+/* A tap of the Start key on its own: to the newest Dock with a Start
+   menu, if one said so. */
+bool
+dock_start_key(struct ws_server *srv)
+{
+	struct ws_client *c, *best = NULL, *front = NULL;
+	ws_event_t ev;
+
+	for (c = srv->clients; c != NULL; c = c->next)
+		if (dock_usable(c) && c->dock_start_menu &&
+		    (best == NULL ||
+		    c->dock_start_menu_since > best->dock_start_menu_since))
+			best = c;
+	if (best == NULL)
+		return false;
+	/* The user turned to the Dock, as with a click on it: its Start
+	   menu gets the keys once it is key, and the active app stays. The
+	   menu is a window of the Dock's AppKit connection, its first one
+	   (the Dock connection is another). */
+	for (c = srv->clients; c != NULL; c = c->next)
+		if (!c->dead && c->pid == best->pid && c->uid == best->uid &&
+		    (c->flags & (WS_CONNECT_DOCK | WS_CONNECT_TOOL)) == 0 &&
+		    (front == NULL || c->id < front->id))
+			front = c;
+	if (front != NULL)
+		app_activate(srv, front->app, NULL);
+	event_init(srv, &ev, WS_EVENT_START_KEY, 0, 0);
+	client_send(srv, best, &ev, -1);
+	return true;
+}
+
 /* Dock connection c is going away. */
 void
 dock_client_gone(struct ws_server *srv, struct ws_client *c)

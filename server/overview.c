@@ -8,8 +8,9 @@
  * each group, over the dimmed desktop. Windows animate from their
  * places into the overview and back (not with ReduceMotion).
  *
- * It opens on a tap of the Start key on its own, Control+Up, the
- * Mission Control key or a three-finger swipe up (keyboard.c, input.c);
+ * It opens on Control+Up, the Mission Control key, a three-finger swipe
+ * up, or a tap of the Start key on its own when StartKeyShowsOverview is
+ * on and no Dock has a Start menu (keyboard.c, input.c);
  * Control+Down or a three-finger swipe down show App Exposé. While it
  * is open, WindowServer takes the pointer and the keyboard: hovering or
  * the arrow keys select a window, a click or Return picks it (its app

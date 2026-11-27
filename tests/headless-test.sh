@@ -731,6 +731,14 @@ ov_center() {
 W1ID=$(awk '/"W1"$/ { sub("id=", "", $1); print $1 }' "$LOG/dock-list.txt")
 W4ID=$(awk '/"W4"$/ { sub("id=", "", $1); print $1 }' "$LOG/dock-list.txt")
 W2ID=$(awk '/"W2"$/ { sub("id=", "", $1); print $1 }' "$LOG/dock-list.txt")
+# Off by default (as on a Mac, Command alone does nothing): a tap opens
+# nothing; with StartKeyShowsOverview on, it opens the overview.
+"$B/wsctl" key Super_L || fail "wsctl key Super_L (off)"
+sleep 0.3
+"$B/wsctl" overview status | grep -q '^state=closed ' &&
+    pass "a Start tap opens nothing by default" || fail "a Start tap opened the overview"
+"$B/wsctl" settings set StartKeyShowsOverview true >/dev/null ||
+    fail "wsctl settings set StartKeyShowsOverview true"
 mark
 PO0=$MARKS
 "$B/wsctl" key Super_L || fail "wsctl key Super_L"
@@ -826,6 +834,24 @@ ov_wait closed && pass "another Start tap closed it" || fail "Start tap didn't c
 "$B/wsctl" overview all | grep -q '^state=open ' || fail "wsctl overview all"
 "$B/wsctl" click 5 5 || fail "wsctl click (empty)"
 ov_wait closed && pass "a click on empty space closed it" || fail "click on empty space"
+# A Dock with a Start menu (the Windows style's taskbar) gets the Start
+# tap instead of the overview; when it goes, the tap opens the overview
+# again.
+"$B/wsctl" dock start-menu 3 > "$LOG/start-menu.txt" 2>&1 &
+SMPID=$!
+sleep 0.5
+"$B/wsctl" key Super_L || fail "wsctl key Super_L (Start menu)"
+sleep 0.5
+grep -qx start-key "$LOG/start-menu.txt" &&
+    pass "the Start tap went to the Dock's Start menu" || fail "no start-key for the Dock"
+"$B/wsctl" overview status | grep -q '^state=closed ' &&
+    pass "and didn't open the overview" || fail "the overview opened despite the Start menu"
+wait "$SMPID"
+"$B/wsctl" key Super_L || fail "wsctl key Super_L (no Start menu)"
+ov_wait open && pass "with the Dock gone, the tap opens the overview again" ||
+    fail "no overview after the Start menu Dock left"
+"$B/wsctl" key Escape >/dev/null 2>&1
+ov_wait closed || "$B/wsctl" overview close >/dev/null 2>&1
 # Three-finger swipes: up opens, down closes; down from closed is App
 # Exposé; four fingers do nothing (ThreeFingerDrag is off).
 "$B/wsctl" swipe 3 0 -200 || fail "wsctl swipe up"

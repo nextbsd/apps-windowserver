@@ -1711,6 +1711,12 @@ ws_dock_show_minimized(ws_connection_t *c, int on)
 }
 
 WS_API int
+ws_dock_set_start_menu(ws_connection_t *c, int on)
+{
+	return send_int(c, WS_MSG_DOCK_START_MENU, 0, on ? 1 : 0);
+}
+
+WS_API int
 ws_dock_set_edge(ws_connection_t *c, uint32_t edge, uint32_t thickness)
 {
 	ws_req_dock_edge_t m;
