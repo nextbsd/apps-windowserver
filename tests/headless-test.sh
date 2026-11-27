@@ -852,6 +852,59 @@ ov_wait open && pass "with the Dock gone, the tap opens the overview again" ||
     fail "no overview after the Start menu Dock left"
 "$B/wsctl" key Escape >/dev/null 2>&1
 ov_wait closed || "$B/wsctl" overview close >/dev/null 2>&1
+# The screenshot keys (Command+Shift+3, 4, 5 and Print Screen, with
+# Control to copy): an app's own keys while no Dock takes them; taken
+# from every app and sent to the Dock that does; the app's again once
+# it goes. Keycodes: 3 is 12, 4 is 13, 5 is 14, Print 107.
+mark
+SK0=$MARKS
+"$B/wsctl" key super+shift+3 || fail "wsctl key super+shift+3 (no Dock)"
+mark
+tail -n +$((SK0 + 1)) "$LOG/wstest.log" | grep -q 'type=key-down .*keycode=12 ' &&
+    pass "with no Dock taking them, Command+Shift+3 reaches the app" ||
+    fail "Command+Shift+3 didn't reach the app without a screenshot Dock"
+"$B/wsctl" dock screenshot-keys 4 > "$LOG/screenshot-keys.txt" 2>&1 &
+SKPID=$!
+sleep 0.5
+mark
+SK1=$MARKS
+for k in super+shift+3 super+shift+4 super+shift+5 ctrl+super+shift+3 \
+    ctrl+super+shift+4 Print ctrl+Print alt+super+shift+3 shift+Print; do
+	"$B/wsctl" key "$k" || fail "wsctl key $k"
+done
+mark
+sleep 0.3
+grep '^screenshot-key' "$LOG/screenshot-keys.txt" > "$LOG/screenshot-keys.got"
+cat > "$LOG/screenshot-keys.want" <<EOK
+screenshot-key screen
+screenshot-key selection
+screenshot-key toolbar
+screenshot-key screen clipboard
+screenshot-key selection clipboard
+screenshot-key screen
+screenshot-key screen clipboard
+EOK
+cmp -s "$LOG/screenshot-keys.got" "$LOG/screenshot-keys.want" &&
+    pass "the Dock got Command+Shift+3, 4, 5, with Control, and Print Screen" ||
+    { fail "screenshot keys to the Dock:"; cat "$LOG/screenshot-keys.got"; }
+tail -n +$((SK1 + 1)) "$LOG/wstest.log" > "$LOG/screenshot-keys.app"
+grep -E 'type=key-(down|up) .*keycode=(13|14) ' "$LOG/screenshot-keys.app" >/dev/null &&
+    fail "the app got a screenshot key the Dock took" ||
+    pass "the app got none of the keys the Dock took, down or up"
+[ "$(grep -c 'type=key-down .*keycode=12 ' "$LOG/screenshot-keys.app")" = 1 ] &&
+    pass "Option+Command+Shift+3 stays the app's" ||
+    fail "Option+Command+Shift+3: $(grep 'keycode=12 ' "$LOG/screenshot-keys.app")"
+[ "$(grep -c 'type=key-down .*keycode=107 ' "$LOG/screenshot-keys.app")" = 1 ] &&
+    pass "and so does Shift+Print Screen" ||
+    fail "Shift+Print: $(grep 'keycode=107 ' "$LOG/screenshot-keys.app")"
+wait "$SKPID"
+mark
+SK2=$MARKS
+"$B/wsctl" key super+shift+4 || fail "wsctl key super+shift+4 (Dock gone)"
+mark
+tail -n +$((SK2 + 1)) "$LOG/wstest.log" | grep -q 'type=key-down .*keycode=13 ' &&
+    pass "with the Dock gone, Command+Shift+4 is the app's again" ||
+    fail "Command+Shift+4 didn't reach the app after the Dock left"
 # Three-finger swipes: up opens, down closes; down from closed is App
 # Exposé; four fingers do nothing (ThreeFingerDrag is off).
 "$B/wsctl" swipe 3 0 -200 || fail "wsctl swipe up"

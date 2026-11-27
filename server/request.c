@@ -338,7 +338,8 @@ is_dock_request(mach_msg_id_t id)
 {
 	return id == WS_MSG_DOCK_ACTIVATE || id == WS_MSG_DOCK_RESTORE ||
 	    id == WS_MSG_DOCK_PREVIEW || id == WS_MSG_DOCK_SHOW_MINIMIZED ||
-	    id == WS_MSG_DOCK_SET_EDGE || id == WS_MSG_DOCK_START_MENU;
+	    id == WS_MSG_DOCK_SET_EDGE || id == WS_MSG_DOCK_START_MENU ||
+	    id == WS_MSG_DOCK_SCREENSHOT_KEYS;
 }
 
 static size_t
@@ -362,6 +363,7 @@ min_size(mach_msg_id_t id)
 	case WS_MSG_DOCK_PREVIEW:
 	case WS_MSG_DOCK_SHOW_MINIMIZED:
 	case WS_MSG_DOCK_START_MENU:
+	case WS_MSG_DOCK_SCREENSHOT_KEYS:
 	case WS_MSG_OVERVIEW:
 	case WS_MSG_SET_KEYBOARD_LAYOUT:
 	case WS_MSG_POINTER_GRAB:
@@ -933,6 +935,9 @@ request_handle(struct ws_server *srv, struct ws_mach_item *item)
 		break;
 	case WS_MSG_DOCK_START_MENU:
 		dock_start_menu(srv, c, value != 0);
+		break;
+	case WS_MSG_DOCK_SCREENSHOT_KEYS:
+		dock_screenshot_keys(srv, c, value != 0);
 		break;
 	case WS_MSG_STATUS_ITEM: {
 		ws_req_status_item_t *m = (void *)h;

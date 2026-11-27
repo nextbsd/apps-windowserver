@@ -158,6 +158,9 @@ enum {
 	/* WS_CONNECT_DOCK only, see "The Dock" */
 	WS_MSG_DOCK_START_MENU,		/* ws_req_int_t: 1 = this Dock shows a
 					   Start menu, 0 = no longer */
+	WS_MSG_DOCK_SCREENSHOT_KEYS,	/* ws_req_int_t: 1 = this Dock takes
+					   the screenshot keys, 0 = no
+					   longer */
 	WS_MSG_LAST
 };
 
@@ -560,6 +563,22 @@ typedef struct ws_req_cursor {
  *     tap no longer opens the overview. Value 0, or the Dock going away,
  *     gives the tap back (StartKeyShowsOverview decides). Servers older
  *     than this message answer it with an error and never send the event.
+ *   - WS_MSG_DOCK_SCREENSHOT_KEYS (ws_req_int_t, value 1): this Dock
+ *     takes the screenshot keys, as macOS's SystemUIServer does, and
+ *     hands them to the screenshot app (Screenshot.app). WindowServer
+ *     then takes them before any app, whatever app is active, and sends
+ *     WS_EVENT_SCREENSHOT_KEY (ws_event_screenshot_key_t) to the newest
+ *     Dock connection that said so:
+ *       Command+Shift+3, Print Screen	WS_SCREENSHOT_SCREEN
+ *       Command+Shift+4		WS_SCREENSHOT_SELECTION
+ *       Command+Shift+5		WS_SCREENSHOT_TOOLBAR
+ *     each with WS_SCREENSHOT_CLIPBOARD when Control is held too (copy
+ *     the picture instead of saving a file). The keys are the 3, 4 and 5
+ *     keys wherever the layout puts them, as on a Mac; Option held, or
+ *     any other modifier with Print Screen, leaves the key to the app.
+ *     The key's release and repeats go nowhere. Value 0, or the Dock
+ *     going away, gives the keys back to the apps. Servers older than
+ *     this message answer it with an error and never send the event.
  */
 #define WS_MAX_PREVIEW		512
 
@@ -1201,6 +1220,16 @@ typedef struct ws_req_drag_status {	/* DRAG_STATUS */
  *     stays as it was (headless servers, root and the server's own
  *     user) and is logged too.
  *   - An app capturing a window of its own app needs nothing.
+ *   - The trusted apps (the CaptureTrustedApps setting, a server-only
+ *     key: Screenshot.app, /System/Applications/Screenshot.app/
+ *     Screenshot) are exempt for the console user, as macOS's
+ *     screencaptureui is: the user asks them with the screenshot keys
+ *     and their toolbar. The sender's executable, as the kernel names
+ *     it (KERN_PROC_PATHNAME), must be one of those paths, and it and
+ *     every directory above it must be root's and writable by nobody
+ *     else; otherwise it has to ask like any app, and the server logs
+ *     why. Never on behalf of another program (for_pid). Their streams
+ *     still show the indicator, and they're logged as exempt.
  *   - Everyone else needs the user's consent, and must be the console
  *     user (see "The Dock"), or anyone on a headless server or without a
  *     loginwindow session; other users get EPERM.

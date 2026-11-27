@@ -377,6 +377,45 @@ dock_start_key(struct ws_server *srv)
 	return true;
 }
 
+/* WS_MSG_DOCK_SCREENSHOT_KEYS: Dock c takes the screenshot keys (or no
+   longer). */
+void
+dock_screenshot_keys(struct ws_server *srv, struct ws_client *c, bool on)
+{
+	if (c->dock_screenshot_keys == on)
+		return;
+	c->dock_screenshot_keys = on;
+	c->dock_screenshot_since = on ? ++srv->dock_screenshot_seq : 0;
+	ws_info("client %u (%s, pid %d) %s the screenshot keys", c->id,
+	    c->app_name, (int)c->pid, on ? "takes" : "no longer takes");
+}
+
+/* A screenshot key (keyboard.c): to the newest Dock that takes them.
+   false when none does, and the key goes to the app as before. */
+bool
+dock_screenshot_key(struct ws_server *srv, uint32_t action, uint32_t flags)
+{
+	struct ws_client *c, *best = NULL;
+	ws_event_t ev;
+
+	for (c = srv->clients; c != NULL; c = c->next)
+		if (dock_usable(c) && c->dock_screenshot_keys &&
+		    (best == NULL ||
+		    c->dock_screenshot_since > best->dock_screenshot_since))
+			best = c;
+	if (best == NULL)
+		return false;
+	event_init(srv, &ev, WS_EVENT_SCREENSHOT_KEY,
+	    sizeof(ev.u.screenshot_key), 0);
+	ev.u.screenshot_key.action = action;
+	ev.u.screenshot_key.flags = flags;
+	client_send(srv, best, &ev, -1);
+	ws_info("screenshot key %u%s to client %u (%s)", action,
+	    (flags & WS_SCREENSHOT_CLIPBOARD) ? " (clipboard)" : "", best->id,
+	    best->app_name);
+	return true;
+}
+
 /* Dock connection c is going away. */
 void
 dock_client_gone(struct ws_server *srv, struct ws_client *c)

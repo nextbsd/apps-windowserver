@@ -543,6 +543,10 @@ int		 ws_tiling(ws_connection_t *conn, uint32_t op, uint32_t window,
  *			say this Dock shows a Start menu: a tap of the
  *			Start (Command) key on its own then comes to it as
  *			WS_EVENT_START_KEY
+ *   ws_dock_set_screenshot_keys
+ *			say this Dock takes the screenshot keys (Command+
+ *			Shift+3, 4, 5 and Print Screen): they then come to
+ *			it as WS_EVENT_SCREENSHOT_KEY, from every app
  *   ws_dock_set_edge	say which screen edge this Dock is on
  *			(WS_DOCK_EDGE_*) and how thick it is, so tiling
  *			keeps it free; servers with WS_SERVER_DOCK_EDGE
@@ -552,6 +556,7 @@ int		 ws_dock_activate(ws_connection_t *conn, uint32_t app_id,
 int		 ws_dock_restore(ws_connection_t *conn, uint32_t window);
 int		 ws_dock_show_minimized(ws_connection_t *conn, int on);
 int		 ws_dock_set_start_menu(ws_connection_t *conn, int on);
+int		 ws_dock_set_screenshot_keys(ws_connection_t *conn, int on);
 int		 ws_dock_set_edge(ws_connection_t *conn, uint32_t edge,
     uint32_t thickness);
 int		 ws_dock_preview(ws_connection_t *conn, uint32_t window,

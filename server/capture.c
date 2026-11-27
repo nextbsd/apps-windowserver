@@ -18,10 +18,12 @@
 
 #include <sys/types.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 #include <errno.h>
 #include <math.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,6 +56,68 @@ base_name(const char *path)
 	const char *p = strrchr(path, '/');
 
 	return p != NULL ? p + 1 : path;
+}
+
+/*
+ * Can only root change `path` and every directory above it? Root owns
+ * them all, none is writable by its group or others (a sticky /tmp
+ * isn't enough: anyone may put a program there), and none of them is a
+ * symbolic link. NULL, or why not.
+ */
+static const char *
+root_only(const char *path)
+{
+	char p[PATH_MAX], *slash;
+	struct stat st;
+
+	if (path[0] != '/' || strlcpy(p, path, sizeof(p)) >= sizeof(p))
+		return "not an absolute path";
+	for (;;) {
+		if (lstat(p[0] != '\0' ? p : "/", &st) < 0)
+			return "missing";
+		if (S_ISLNK(st.st_mode))
+			return "a symbolic link on the way";
+		if (st.st_uid != 0)
+			return "not root's";
+		if ((st.st_mode & (S_IWGRP | S_IWOTH)) != 0)
+			return "writable by others";
+		if (p[0] == '\0')
+			return NULL;
+		slash = strrchr(p, '/');
+		*slash = '\0';		/* "/a/b" -> "/a" -> "" (the root) */
+	}
+}
+
+/*
+ * Is pid one of the programs trusted to capture without asking
+ * (CaptureTrustedApps: Screenshot.app), as the user it runs for? Its
+ * executable, as the kernel names it, must be one of those paths, and
+ * only root may be able to change it. Checked at each request, so a
+ * program put in its place since is checked again.
+ */
+static bool
+trusted_app(struct ws_server *srv, pid_t pid, const char *name)
+{
+	char list[sizeof(srv->cfg.capture_trusted_apps)], path[PATH_MAX];
+	char *p, *item;
+	const char *why;
+
+	if (srv->cfg.capture_trusted_apps[0] == '\0' ||
+	    proc_path(pid, path, sizeof(path)) < 0)
+		return false;
+	strlcpy(list, srv->cfg.capture_trusted_apps, sizeof(list));
+	for (p = list; (item = strsep(&p, ",")) != NULL; ) {
+		if (strcmp(item, path) != 0)
+			continue;
+		why = root_only(path);
+		if (why == NULL)
+			return true;
+		ws_warn("capture: %s (pid %d) runs %s, a trusted app, but "
+		    "it or a directory above it is %s: it has to ask",
+		    name, (int)pid, path, why);
+		return false;
+	}
+	return false;
 }
 
 /* ---- streams ---- */
@@ -848,7 +912,7 @@ capture_start(struct ws_server *srv, struct ws_client *c,
 	char path[1024];
 	uid_t uid = c->uid;
 	pid_t pid = c->pid;
-	bool root, own = false;
+	bool root, own = false, trusted = false;
 	int err = 0, i;
 
 	m->for_name[sizeof(m->for_name) - 1] = '\0';
@@ -880,6 +944,10 @@ capture_start(struct ws_server *srv, struct ws_client *c,
 	    !(srv->run_uid != 0 && c->uid == srv->run_uid) &&
 	    !may_ask(srv, uid))
 		err = EPERM;
+	/* A trusted app (Screenshot.app) for the user at the screen, for
+	   itself, never on behalf of another program. */
+	if (err == 0 && !root && !own && m->for_pid == 0)
+		trusted = trusted_app(srv, c->pid, c->app_name);
 	if (err != 0) {
 		ws_info("capture: refused %s (pid %d)%s: %s", c->app_name,
 		    (int)c->pid, m->for_pid != 0 ? " for another process" :
@@ -921,7 +989,7 @@ capture_start(struct ws_server *srv, struct ws_client *c,
 	else
 		strlcpy(s->name, strncmp(s->key, "app:", 4) == 0 ?
 		    s->key + 4 : base_name(s->key), sizeof(s->name));
-	s->exempt = root || own || (srv->run_uid != 0 &&
+	s->exempt = root || own || trusted || (srv->run_uid != 0 &&
 	    c->uid == srv->run_uid);
 	s->indicator = !own;
 	s->next = srv->captures;
@@ -931,9 +999,10 @@ capture_start(struct ws_server *srv, struct ws_client *c,
 		*reply_flags = WS_CAPTURE_EXEMPT;
 		if (!own)
 			ws_info("capture: stream %u of the %s for %s (pid %d, "
-			    "uid %d) is exempt from consent", s->id,
+			    "uid %d) is exempt from consent%s", s->id,
 			    s->window ? "window" : "screen", s->name,
-			    (int)s->pid, (int)s->uid);
+			    (int)s->pid, (int)s->uid,
+			    trusted && !root ? " (a trusted app)" : "");
 	} else {
 		s->state = WS_CAPTURE_PENDING;
 		s->request = ++srv->next_consent_request;

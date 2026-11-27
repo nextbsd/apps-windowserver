@@ -534,6 +534,8 @@ enum {
 	WS_EVENT_START_KEY,		/* no payload: the Start key was tapped
 					   on its own; open or close the Start
 					   menu */
+	/* WS_CONNECT_DOCK, after WS_MSG_DOCK_SCREENSHOT_KEYS */
+	WS_EVENT_SCREENSHOT_KEY,	/* ws_event_screenshot_key_t */
 	WS_EVENT_MAX
 };
 
@@ -917,6 +919,25 @@ typedef struct ws_event_window_info {
 /* Defined by headers that have WS_MSG_DOCK_START_MENU, WS_EVENT_START_KEY
    and ws_dock_set_start_menu, so a Dock can build against older ones. */
 #define WS_DOCK_START_MENU	1
+
+/*
+ * WS_EVENT_SCREENSHOT_KEY, to the Dock that takes the screenshot keys
+ * (WS_MSG_DOCK_SCREENSHOT_KEYS; "The Dock" in WSProtocol.h): what to
+ * take, and how. WS_DOCK_SCREENSHOT_KEYS is defined by headers that
+ * have them, so a Dock can build against older ones.
+ */
+#define WS_DOCK_SCREENSHOT_KEYS	1
+
+#define WS_SCREENSHOT_SCREEN	1	/* Command+Shift+3, Print Screen */
+#define WS_SCREENSHOT_SELECTION	2	/* Command+Shift+4 */
+#define WS_SCREENSHOT_TOOLBAR	3	/* Command+Shift+5 */
+
+#define WS_SCREENSHOT_CLIPBOARD	0x0001	/* Control held: to the clipboard */
+
+typedef struct ws_event_screenshot_key {
+	uint32_t	action;		/* WS_SCREENSHOT_SCREEN... */
+	uint32_t	flags;		/* WS_SCREENSHOT_CLIPBOARD */
+} ws_event_screenshot_key_t;
 
 /*
  * The screen edge the Dock keeps (servers with WS_SERVER_DOCK_EDGE):
@@ -1380,6 +1401,7 @@ typedef struct ws_event {
 		ws_event_capture_revoked_t capture_revoked;
 		ws_display_info_t	display;
 		ws_display_mode_t	display_mode;
+		ws_event_screenshot_key_t screenshot_key;
 		uint8_t			raw[232];
 	} u;
 } ws_event_t;
