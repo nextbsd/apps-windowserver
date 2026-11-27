@@ -95,6 +95,8 @@ struct ws_config {
 	char	user[32];		/* account to drop to */
 	char	group[32];
 	char	snapshot_path[256];	/* SIGUSR1 writes a PPM here */
+	char	capture_trusted_apps[512]; /* executables exempt from capture
+					   consent, comma-separated */
 	int	minimize_tile_size;	/* minimized-window tiles, pixels */
 	char	minimize_tile_image[256]; /* "" = plain dark rounded tile */
 	bool	minimize_into_dock;	/* minimize requests that don't say
@@ -311,6 +313,8 @@ struct ws_client {
 	bool		dock_wants_minimized; /* WS_MSG_DOCK_SHOW_MINIMIZED */
 	bool		dock_start_menu;	/* WS_MSG_DOCK_START_MENU */
 	uint64_t	dock_start_menu_since;	/* when it said so */
+	bool		dock_screenshot_keys;	/* WS_MSG_DOCK_SCREENSHOT_KEYS */
+	uint64_t	dock_screenshot_since;	/* when it said so */
 	uint32_t	dock_edge;	/* WS_MSG_DOCK_SET_EDGE: WS_DOCK_EDGE_* */
 	uint32_t	dock_thickness;
 	uint64_t	dock_edge_serial; /* when it said so (newest wins) */
@@ -934,6 +938,7 @@ struct ws_server {
 	/* the Dock (dock.c) */
 	struct ws_client *dock;		/* shows minimized windows, or NULL */
 	uint64_t	dock_start_menu_seq;	/* orders WS_MSG_DOCK_START_MENU */
+	uint64_t	dock_screenshot_seq;	/* orders WS_MSG_DOCK_SCREENSHOT_KEYS */
 	bool		dock_list_dirty;	/* send WINDOW_LIST_CHANGED */
 	bool		dock_previews_dirty;	/* some window->preview_dirty */
 	/*
@@ -1350,6 +1355,10 @@ void	dock_client_gone(struct ws_server *srv, struct ws_client *c);
 void	dock_flush(struct ws_server *srv);
 bool	dock_start_key(struct ws_server *srv);
 void	dock_start_menu(struct ws_server *srv, struct ws_client *c, bool on);
+bool	dock_screenshot_key(struct ws_server *srv, uint32_t action,
+	    uint32_t flags);
+void	dock_screenshot_keys(struct ws_server *srv, struct ws_client *c,
+	    bool on);
 void	dock_show_minimized(struct ws_server *srv, struct ws_client *c,
 	    bool on);
 int	dock_set_edge(struct ws_server *srv, struct ws_client *c,

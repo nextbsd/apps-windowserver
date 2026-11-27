@@ -82,6 +82,7 @@ static const struct ckey keys[] = {
 	S("User", user, 0),
 	S("Group", group, 0),
 	S("SnapshotPath", snapshot_path, 0),
+	S("CaptureTrustedApps", capture_trusted_apps, 0),
 	I("MinimizeTileSize", minimize_tile_size, 0),
 	S("MinimizeTileImage", minimize_tile_image, 0),
 	/* per user through the minimize request (NBMinimizeStyle) for now;
@@ -154,6 +155,12 @@ config_defaults(struct ws_config *cfg)
 	strlcpy(cfg->group, "video", sizeof(cfg->group));
 	strlcpy(cfg->snapshot_path, "/tmp/WindowServer-snapshot.ppm",
 	    sizeof(cfg->snapshot_path));
+	/* Screenshot.app (apps-settings) takes screenshots and recordings
+	   for the user who asked with its own keys and toolbar, as macOS's
+	   screencaptureui is trusted ("Screen capture" in WSProtocol.h). */
+	strlcpy(cfg->capture_trusted_apps,
+	    "/System/Applications/Screenshot.app/Screenshot",
+	    sizeof(cfg->capture_trusted_apps));
 	/* The size of a GNUstep app icon, so tiles line up with icons. */
 	cfg->minimize_tile_size = 64;
 	cfg->start_key_overview = false;

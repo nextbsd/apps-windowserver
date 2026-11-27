@@ -135,6 +135,23 @@ capture() {
 }
 
 if [ -n "$TU" ]; then
+	# trusted copies of wsctl (8b): one where only root can change it,
+	# when the build directory is root's all the way up, and one in /tmp
+	cp "$B/wsctl" "$B/wsctl-trusted" && chmod 755 "$B/wsctl-trusted"
+	cp "$B/wsctl" "$LOG/wsctl-trusted" && chmod 755 "$LOG/wsctl-trusted"
+	# the kernel names executables by their real paths (/tmp is a link
+	# on NextBSD)
+	RLOG=$(realpath "$LOG")
+	TRUSTED_OK=1
+	d=$B
+	while [ -n "$d" ]; do
+		# shellcheck disable=SC2012
+		set -- $(ls -ld "$d" | awk '{ print $1, $3 }')
+		case $1 in l*|?????w*|????????w*) TRUSTED_OK=0 ;; esac
+		[ "$2" = root ] || TRUSTED_OK=0
+		[ "$d" = / ] && break
+		d=$(dirname "$d")
+	done
 	cat >"$LOG/server.plist" <<EOP
 <?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>
 <key>Label</key><string>org.nextbsd.WindowServer.captest.$$</string>
@@ -145,7 +162,8 @@ if [ -n "$TU" ]; then
 <string>--service</string><string>$WS_SERVICE_NAME</string></array>
 <key>MachServices</key><dict><key>$WS_SERVICE_NAME</key><true/></dict>
 <key>EnvironmentVariables</key><dict>
-<key>WS_BackgroundColor</key><string>202020</string></dict>
+<key>WS_BackgroundColor</key><string>202020</string>
+<key>WS_CaptureTrustedApps</key><string>$B/wsctl-trusted,$RLOG/wsctl-trusted</string></dict>
 <key>RunAtLoad</key><true/>
 <key>StandardOutPath</key><string>$LOG/server.log</string>
 <key>StandardErrorPath</key><string>$LOG/server.log</string>
@@ -290,6 +308,31 @@ if [ -n "$TU" ]; then
 	    fail "root's one-shot capture: $(cat "$LOG/img-root")"
 	grep -q "is exempt from consent" "$LOG/server.log" &&
 	    pass "and the server logs the exemption" || fail "no exemption logged"
+fi
+
+# 8b. A trusted app (CaptureTrustedApps, Screenshot.app's place) is
+# exempt while the agent refuses everyone else, and only from a place
+# only root can change: a copy in /tmp, though named, has to ask.
+if [ -n "$TU" ]; then
+	as_user "$B/wsctl-trusted" capture image "$LOG/trusted.ppm" >"$LOG/img-trusted" 2>&1
+	if [ "$TRUSTED_OK" = 1 ]; then
+		grep -q "trusted.ppm: 1280x800" "$LOG/img-trusted" &&
+		    pass "a trusted app's one-shot capture is exempt from consent" ||
+		    fail "trusted one-shot: $(cat "$LOG/img-trusted")"
+		grep -q "is exempt from consent (a trusted app)" "$LOG/server.log" &&
+		    pass "and the server logs it as a trusted app" ||
+		    fail "no trusted-app exemption logged"
+	else
+		echo "(skipped: $B isn't root's all the way up, so it can't be trusted)"
+	fi
+	as_user "$LOG/wsctl-trusted" capture image "$LOG/untrusted.ppm" >"$LOG/img-untrusted" 2>&1
+	grep -q "untrusted.ppm: 1280x800" "$LOG/img-untrusted" &&
+	    fail "the copy under /tmp was trusted: $(cat "$LOG/img-untrusted")" ||
+	    pass "the same program under /tmp has to ask (and is refused)"
+	grep -q "a trusted app, but it or a directory above it is writable by others" "$LOG/server.log" &&
+	    pass "and the server says why it isn't trusted" ||
+	    fail "no warning for the untrusted copy"
+	rm -f "$B/wsctl-trusted"
 fi
 
 # 9. A revocation with no agent connected waits for the next one.

@@ -104,6 +104,12 @@
 	     Command alone does nothing. -->
 	<key>StartKeyShowsOverview</key>
 	<false/>
+	<!-- Programs that capture the screen without asking for consent
+	     (README, "Screen capture"), comma-separated full paths:
+	     Screenshot.app, which the user asks with the screenshot keys.
+	     Each must be root's, in directories only root can change. -->
+	<key>CaptureTrustedApps</key>
+	<string>/System/Applications/Screenshot.app/Screenshot</string>
 	<!-- No animations (the overview's). -->
 	<key>ReduceMotion</key>
 	<false/>

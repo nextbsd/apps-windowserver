@@ -861,6 +861,38 @@ send_flags(struct ws_server *srv)
 	client_send(srv, c, &ev, -1);
 }
 
+/*
+ * The screenshot keys, as on a Mac: Command+Shift+3 (the screen), 4 (a
+ * selection) and 5 (the toolbar), and Print Screen (the screen), each
+ * with Control to copy instead of saving. By key position (KEY_3...),
+ * so they're the same keys in every layout. Given to the Dock that
+ * takes them (dock_screenshot_key); with none, they stay the app's.
+ */
+static bool
+screenshot_key(struct ws_server *srv, uint32_t code, xkb_keysym_t sym)
+{
+	uint32_t mods = srv->modifiers & (WS_MOD_SHIFT | WS_MOD_CONTROL |
+	    WS_MOD_ALT | WS_MOD_COMMAND);
+	uint32_t action = 0;
+
+	if (code == KEY_SYSRQ || sym == XKB_KEY_Print) {
+		if ((mods & ~(uint32_t)WS_MOD_CONTROL) == 0)
+			action = WS_SCREENSHOT_SCREEN;
+	} else if ((mods & ~(uint32_t)WS_MOD_CONTROL) ==
+	    (WS_MOD_COMMAND | WS_MOD_SHIFT)) {
+		if (code == KEY_3)
+			action = WS_SCREENSHOT_SCREEN;
+		else if (code == KEY_4)
+			action = WS_SCREENSHOT_SELECTION;
+		else if (code == KEY_5)
+			action = WS_SCREENSHOT_TOOLBAR;
+	}
+	if (action == 0)
+		return false;
+	return dock_screenshot_key(srv, action,
+	    (mods & WS_MOD_CONTROL) ? WS_SCREENSHOT_CLIPBOARD : 0);
+}
+
 /* Keys the server handles itself. Returns true if consumed. */
 static bool
 server_key(struct ws_server *srv, uint32_t code, bool pressed, xkb_keysym_t sym)
@@ -895,6 +927,9 @@ server_key(struct ws_server *srv, uint32_t code, bool pressed, xkb_keysym_t sym)
 		    WS_OVERVIEW_APP);
 		return true;
 	}
+	/* Screenshots, over the overview too. */
+	if (screenshot_key(srv, code, sym))
+		return true;
 	if (overview_active(srv))
 		return overview_key(srv, code, sym);
 	if (tiling_key(srv, sym))

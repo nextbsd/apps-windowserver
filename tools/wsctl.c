@@ -59,6 +59,8 @@ usage(void)
 	    "       wsctl dock watch [SECONDS] (stay the Dock, print notices)\n"
 	    "       wsctl dock start-menu [SECONDS] (a Dock with a Start menu:\n"
 	    "                                print each Start key tap)\n"
+	    "       wsctl dock screenshot-keys [SECONDS] (a Dock that takes the\n"
+	    "                                screenshot keys: print each one)\n"
 	    "       wsctl dock edge left|right|top|bottom|none THICKNESS [SECONDS]\n"
 	    "                                (report a Dock edge, stay SECONDS)\n"
 	    "       wsctl settings get [KEY]   (values in effect, and where from)\n"
@@ -483,6 +485,18 @@ print_dock_event(const ws_event_t *ev)
 	case WS_EVENT_START_KEY:
 		printf("start-key\n");
 		break;
+#ifdef WS_DOCK_SCREENSHOT_KEYS
+	case WS_EVENT_SCREENSHOT_KEY:
+		printf("screenshot-key %s%s\n",
+		    ev->u.screenshot_key.action == WS_SCREENSHOT_SCREEN ?
+		    "screen" : ev->u.screenshot_key.action ==
+		    WS_SCREENSHOT_SELECTION ? "selection" :
+		    ev->u.screenshot_key.action == WS_SCREENSHOT_TOOLBAR ?
+		    "toolbar" : "unknown",
+		    (ev->u.screenshot_key.flags & WS_SCREENSHOT_CLIPBOARD) ?
+		    " clipboard" : "");
+		break;
+#endif
 	case WS_EVENT_ERROR:
 		printf("error request=0x%x code=%d %s\n", ev->u.error.request,
 		    ev->u.error.code, ev->u.error.message);
@@ -536,9 +550,10 @@ dock_watch(ws_connection_t *c, int seconds)
 }
 
 /* wsctl dock start-menu: say this Dock shows a Start menu and print each
- * Start key tap that comes to it. */
+ * Start key tap that comes to it. wsctl dock screenshot-keys: say this
+ * Dock takes the screenshot keys and print each one. */
 static int
-dock_start_menu_watch(ws_connection_t *c, int seconds)
+dock_start_menu_watch(ws_connection_t *c, int seconds, int screenshot)
 {
 	time_t end = seconds > 0 ? time(NULL) + seconds : 0;
 	struct pollfd pfd;
@@ -548,9 +563,13 @@ dock_start_menu_watch(ws_connection_t *c, int seconds)
 	signal(SIGTERM, on_signal);
 	signal(SIGINT, on_signal);
 	setvbuf(stdout, NULL, _IOLBF, 0);
-	if (ws_dock_set_start_menu(c, 1) < 0 || ws_sync(c) < 0)
+	if (screenshot ? ws_dock_set_screenshot_keys(c, 1) < 0 :
+	    ws_dock_set_start_menu(c, 1) < 0)
 		return -1;
-	printf("start menu as client %u\n", ws_client_id(c));
+	if (ws_sync(c) < 0)
+		return -1;
+	printf("%s as client %u\n", screenshot ? "screenshot keys" :
+	    "start menu", ws_client_id(c));
 	while (!stop && (end == 0 || time(NULL) < end)) {
 		while ((r = ws_next_event(c, &ev, 0)) > 0)
 			print_dock_event(&ev);
@@ -689,7 +708,9 @@ dock_main(int argc, char **argv)
 	} else if (strcmp(cmd, "watch") == 0 && argc <= 3) {
 		r = dock_watch(c, argc == 3 ? atoi(argv[2]) : 0);
 	} else if (strcmp(cmd, "start-menu") == 0 && argc <= 3) {
-		r = dock_start_menu_watch(c, argc == 3 ? atoi(argv[2]) : 0);
+		r = dock_start_menu_watch(c, argc == 3 ? atoi(argv[2]) : 0, 0);
+	} else if (strcmp(cmd, "screenshot-keys") == 0 && argc <= 3) {
+		r = dock_start_menu_watch(c, argc == 3 ? atoi(argv[2]) : 0, 1);
 	} else if (strcmp(cmd, "edge") == 0 && (argc == 4 || argc == 5)) {
 		r = dock_edge(c, argv[2], argv[3], argc == 5 ? atoi(argv[4]) : 0);
 	} else {
